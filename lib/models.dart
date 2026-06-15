@@ -2,6 +2,8 @@ enum DownloadStatus { queued, downloading, paused, completed, failed, canceled }
 
 enum RepeatMode { none, one, all }
 
+enum LibrarySortMode { downloadedAtDesc, titleAsc, artistAsc }
+
 class TrackSearchResult {
   const TrackSearchResult({
     required this.id,
@@ -22,6 +24,26 @@ class TrackSearchResult {
   final String? coverUrl;
 
   String get displayArtist => artist.trim().isEmpty ? '未知歌手' : artist;
+
+  TrackSearchResult copyWith({
+    String? id,
+    String? title,
+    String? artist,
+    String? source,
+    String? detailUrl,
+    String? duration,
+    String? coverUrl,
+  }) {
+    return TrackSearchResult(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      source: source ?? this.source,
+      detailUrl: detailUrl ?? this.detailUrl,
+      duration: duration ?? this.duration,
+      coverUrl: coverUrl ?? this.coverUrl,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -165,6 +187,7 @@ class DownloadedTrack {
     required this.downloadedAt,
     required this.sourceUrl,
     this.coverUrl,
+    this.coverFilePath,
   });
 
   final String id;
@@ -175,6 +198,31 @@ class DownloadedTrack {
   final DateTime downloadedAt;
   final String sourceUrl;
   final String? coverUrl;
+  final String? coverFilePath;
+
+  DownloadedTrack copyWith({
+    String? id,
+    String? title,
+    String? artist,
+    String? path,
+    String? format,
+    DateTime? downloadedAt,
+    String? sourceUrl,
+    String? coverUrl,
+    String? coverFilePath,
+  }) {
+    return DownloadedTrack(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      path: path ?? this.path,
+      format: format ?? this.format,
+      downloadedAt: downloadedAt ?? this.downloadedAt,
+      sourceUrl: sourceUrl ?? this.sourceUrl,
+      coverUrl: coverUrl ?? this.coverUrl,
+      coverFilePath: coverFilePath ?? this.coverFilePath,
+    );
+  }
 
   TrackSearchResult toTrackResult() {
     return TrackSearchResult(
@@ -196,6 +244,7 @@ class DownloadedTrack {
     'downloadedAt': downloadedAt.toIso8601String(),
     'sourceUrl': sourceUrl,
     'coverUrl': coverUrl,
+    'coverFilePath': coverFilePath,
   };
 
   factory DownloadedTrack.fromJson(Map<String, dynamic> json) {
@@ -210,6 +259,7 @@ class DownloadedTrack {
           DateTime.fromMillisecondsSinceEpoch(0),
       sourceUrl: json['sourceUrl'] as String? ?? '',
       coverUrl: json['coverUrl'] as String?,
+      coverFilePath: json['coverFilePath'] as String?,
     );
   }
 }
@@ -220,24 +270,28 @@ class AppSettings {
     this.preferredFormat = 'mp3',
     this.concurrentDownloads = 2,
     this.theme = 'lightGreen',
+    this.volume = 100,
   });
 
   final String downloadDirectory;
   final String preferredFormat;
   final int concurrentDownloads;
   final String theme;
+  final double volume;
 
   AppSettings copyWith({
     String? downloadDirectory,
     String? preferredFormat,
     int? concurrentDownloads,
     String? theme,
+    double? volume,
   }) {
     return AppSettings(
       downloadDirectory: downloadDirectory ?? this.downloadDirectory,
       preferredFormat: preferredFormat ?? this.preferredFormat,
       concurrentDownloads: concurrentDownloads ?? this.concurrentDownloads,
       theme: theme ?? this.theme,
+      volume: volume ?? this.volume,
     );
   }
 
@@ -246,6 +300,7 @@ class AppSettings {
     'preferredFormat': preferredFormat,
     'concurrentDownloads': concurrentDownloads,
     'theme': theme,
+    'volume': volume,
   };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
@@ -254,6 +309,7 @@ class AppSettings {
       preferredFormat: json['preferredFormat'] as String? ?? 'mp3',
       concurrentDownloads: json['concurrentDownloads'] as int? ?? 2,
       theme: json['theme'] as String? ?? 'lightGreen',
+      volume: (json['volume'] as num?)?.toDouble() ?? 100,
     );
   }
 }
@@ -267,6 +323,8 @@ class PlayerItem {
     this.headers = const {},
     this.localPath,
     this.coverUrl,
+    this.coverFilePath,
+    this.lyrics,
   });
 
   final String id;
@@ -276,6 +334,32 @@ class PlayerItem {
   final Map<String, String> headers;
   final String? localPath;
   final String? coverUrl;
+  final String? coverFilePath;
+  final String? lyrics;
+
+  PlayerItem copyWith({
+    String? id,
+    String? title,
+    String? artist,
+    String? uri,
+    Map<String, String>? headers,
+    String? localPath,
+    String? coverUrl,
+    String? coverFilePath,
+    String? lyrics,
+  }) {
+    return PlayerItem(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      uri: uri ?? this.uri,
+      headers: headers ?? this.headers,
+      localPath: localPath ?? this.localPath,
+      coverUrl: coverUrl ?? this.coverUrl,
+      coverFilePath: coverFilePath ?? this.coverFilePath,
+      lyrics: lyrics ?? this.lyrics,
+    );
+  }
 }
 
 class DownloadStartResult {

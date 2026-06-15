@@ -1,3 +1,6 @@
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/gequbao_source.dart';
 import 'package:qingting/models.dart';
@@ -73,6 +76,25 @@ void main() {
       'https://www.gequbao.com/upload/search-two.jpg',
     );
   });
+
+  test(
+    'source search returns list results without detail cover hydration',
+    () async {
+      final dio = Dio(
+        BaseOptions(
+          responseType: ResponseType.plain,
+          validateStatus: (_) => true,
+        ),
+      )..httpClientAdapter = _FakeGequbaoAdapter();
+      final source = GequbaoSource(dio: dio, baseUri: baseUrl);
+
+      final results = await source.search('周杰伦');
+
+      expect(results, hasLength(1));
+      expect(results.single.title, '稻香');
+      expect(results.single.coverUrl, isNull);
+    },
+  );
 
   test('parses detail candidates and prefers mp3', () {
     const html = r'''
@@ -224,4 +246,71 @@ void main() {
     expect(name, '周杰伦 - A B C D');
     expect(name.contains(RegExp(r'[<>:"/\\|?*]')), isFalse);
   });
+
+  test('persists player volume in app settings', () {
+    const settings = AppSettings(
+      downloadDirectory: '/tmp/QingTing',
+      concurrentDownloads: 3,
+      volume: 42.5,
+    );
+
+    final restored = AppSettings.fromJson(settings.toJson());
+
+    expect(restored.downloadDirectory, '/tmp/QingTing');
+    expect(restored.concurrentDownloads, 3);
+    expect(restored.volume, 42.5);
+  });
+}
+
+class _FakeGequbaoAdapter implements HttpClientAdapter {
+  const _FakeGequbaoAdapter();
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    final path = options.uri.path;
+    if (path.startsWith('/s/')) {
+      return ResponseBody.fromString(
+        '''
+          <html>
+            <body>
+              <a href="/music/200">稻香 - 周杰伦</a>
+            </body>
+          </html>
+        ''',
+        200,
+        headers: {
+          Headers.contentTypeHeader: ['text/html; charset=utf-8'],
+        },
+      );
+    }
+
+    if (path == '/music/200') {
+      return ResponseBody.fromString(
+        '''
+          <html>
+            <head>
+              <meta property="og:image" content="/cover/detail.jpg">
+            </head>
+            <body>
+              歌名：稻香
+              歌手：周杰伦
+            </body>
+          </html>
+        ''',
+        200,
+        headers: {
+          Headers.contentTypeHeader: ['text/html; charset=utf-8'],
+        },
+      );
+    }
+
+    return ResponseBody.fromString('', 404);
+  }
+
+  @override
+  void close({bool force = false}) {}
 }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'id3_lyrics_embedder.dart';
 import 'models.dart';
 
 class StorageService {
@@ -17,7 +18,8 @@ class StorageService {
     }
 
     try {
-      final json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final json =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
       return AppSettings.fromJson(json);
     } catch (_) {
       return AppSettings(downloadDirectory: await defaultDownloadDirectory());
@@ -41,7 +43,9 @@ class StorageService {
       final json = jsonDecode(await file.readAsString()) as List<dynamic>;
       return json
           .whereType<Map>()
-          .map((item) => DownloadedTrack.fromJson(Map<String, dynamic>.from(item)))
+          .map(
+            (item) => DownloadedTrack.fromJson(Map<String, dynamic>.from(item)),
+          )
           .toList();
     } catch (_) {
       return const [];
@@ -51,9 +55,56 @@ class StorageService {
   Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
     final file = await _supportFile(_libraryFileName);
     await file.writeAsString(
-      const JsonEncoder.withIndent('  ')
-          .convert(tracks.map((track) => track.toJson()).toList()),
+      const JsonEncoder.withIndent(
+        '  ',
+      ).convert(tracks.map((track) => track.toJson()).toList()),
     );
+  }
+
+  Future<String?> ensureEmbeddedCoverCache(DownloadedTrack track) async {
+    final cachedPath = track.coverFilePath?.trim();
+    if (cachedPath != null &&
+        cachedPath.isNotEmpty &&
+        await File(cachedPath).exists()) {
+      return cachedPath;
+    }
+
+    final audioFile = File(track.path);
+    if (!await audioFile.exists() || track.format.toLowerCase() != 'mp3') {
+      return null;
+    }
+
+    return cacheEmbeddedCover(
+      audioFile,
+      cacheKey: '${track.id}-${p.basenameWithoutExtension(track.path)}',
+    );
+  }
+
+  Future<String?> cacheEmbeddedCover(
+    File audioFile, {
+    required String cacheKey,
+  }) async {
+    final cover = await Id3LyricsEmbedder.extractCover(audioFile);
+    if (cover == null) {
+      return null;
+    }
+
+    return cacheCoverImage(cover, cacheKey: cacheKey);
+  }
+
+  Future<String> cacheCoverImage(
+    Id3CoverImage cover, {
+    required String cacheKey,
+  }) async {
+    final directory = await _supportDirectory('covers');
+    final safeKey = sanitizeFilePart(cacheKey).isEmpty
+        ? 'cover'
+        : sanitizeFilePart(cacheKey);
+    final file = File(
+      p.join(directory.path, '$safeKey.${_coverExtension(cover.mimeType)}'),
+    );
+    await file.writeAsBytes(cover.bytes, flush: true);
+    return file.path;
   }
 
   Future<String> defaultDownloadDirectory() async {
@@ -107,8 +158,24 @@ class StorageService {
   }
 
   Future<File> _supportFile(String fileName) async {
-    final directory = await getApplicationSupportDirectory();
-    await directory.create(recursive: true);
+    final directory = await _supportDirectory();
     return File(p.join(directory.path, fileName));
+  }
+
+  Future<Directory> _supportDirectory([String? child]) async {
+    final base = await getApplicationSupportDirectory();
+    final directory = child == null
+        ? base
+        : Directory(p.join(base.path, child));
+    await directory.create(recursive: true);
+    return directory;
+  }
+
+  String _coverExtension(String mimeType) {
+    return switch (mimeType.toLowerCase()) {
+      'image/png' => 'png',
+      'image/webp' => 'webp',
+      _ => 'jpg',
+    };
   }
 }

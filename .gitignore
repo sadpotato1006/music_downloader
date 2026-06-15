@@ -36,6 +36,7 @@ migrate_working_dir/
 .pub/
 **/build/
 /build/
+/dist/
 /coverage/
 local.properties
 /android/local.properties
@@ -50,6 +51,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+*.apk
+*.aab
 
 # Android signing secrets
 keystore.properties

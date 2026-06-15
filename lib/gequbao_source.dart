@@ -17,11 +17,7 @@ class GequbaoSource implements MusicSource {
               connectTimeout: const Duration(seconds: 12),
               receiveTimeout: const Duration(seconds: 18),
               responseType: ResponseType.plain,
-              headers: const {
-                'Accept':
-                    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'User-Agent': 'QingTing/1.0 (+personal-use)',
-              },
+              headers: _browserLikeHeaders(),
               validateStatus: _validateAnyStatus,
             ),
           );
@@ -41,14 +37,14 @@ class GequbaoSource implements MusicSource {
 
     final encoded = Uri.encodeComponent(trimmed);
     final uri = _baseUri.resolve('/s/$encoded${page > 1 ? '?page=$page' : ''}');
-    final html = await _getString(uri);
+    final html = await _getString(uri, referer: _baseUri.toString());
     return GequbaoParser.parseSearchResults(html, baseUrl: _baseUri);
   }
 
   @override
   Future<TrackDetail> loadDetail(TrackSearchResult result) async {
     final detailUri = _baseUri.resolve(result.detailUrl);
-    final html = await _getString(detailUri);
+    final html = await _getString(detailUri, referer: _baseUri.toString());
     final detail = GequbaoParser.parseTrackDetail(
       html,
       baseUrl: _baseUri,
@@ -78,17 +74,38 @@ class GequbaoSource implements MusicSource {
     return detail.candidates;
   }
 
-  Future<String> _getString(Uri uri) async {
+  Future<String> _getString(Uri uri, {String? referer}) async {
     try {
-      final response = await _dio.getUri<String>(uri);
-      final status = response.statusCode ?? 0;
+      Response<String>? lastResponse;
+      for (var attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt > 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+        }
+        final response = await _dio.getUri<String>(
+          uri,
+          options: Options(headers: _browserLikeHeaders(referer: referer)),
+        );
+        lastResponse = response;
+        final status = response.statusCode ?? 0;
+        if (!_shouldRetryStatus(status)) {
+          break;
+        }
+      }
+
+      final response = lastResponse;
+      final status = response?.statusCode ?? 0;
       if (status == 403) {
-        throw const MusicSourceException('拒绝了程序请求。请稍后重试，或在浏览器确认该公开页面是否仍可访问。');
+        throw const MusicSourceException('歌曲宝拒绝了程序请求。请稍后重试，或在浏览器打开歌曲宝后再试。');
+      }
+      if (status == 520) {
+        throw const MusicSourceException(
+          '歌曲宝当前拦截或异常返回 HTTP 520。搜索可稍后重试，或减少连续搜索/播放次数。',
+        );
       }
       if (status >= 400) {
         throw MusicSourceException('歌曲宝返回 HTTP $status，当前无法读取该页面。');
       }
-      return response.data?.toString() ?? '';
+      return response?.data?.toString() ?? '';
     } on MusicSourceException {
       rethrow;
     } on DioException catch (error) {
@@ -109,6 +126,7 @@ class GequbaoSource implements MusicSource {
         options: Options(
           contentType: Headers.formUrlEncodedContentType,
           headers: {
+            ..._browserLikeHeaders(referer: sourceUrl),
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'X-Requested-With': 'XMLHttpRequest',
             'Origin': _originFor(_baseUri),
@@ -158,6 +176,29 @@ class GequbaoSource implements MusicSource {
   }
 
   static bool _validateAnyStatus(int? status) => status != null;
+
+  static bool _shouldRetryStatus(int status) {
+    return status == 520 ||
+        status == 521 ||
+        status == 522 ||
+        status == 523 ||
+        status == 524 ||
+        status == 429;
+  }
+
+  static Map<String, String> _browserLikeHeaders({String? referer}) {
+    return {
+      'Accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Referer': referer ?? 'https://www.gequbao.com/',
+      'Upgrade-Insecure-Requests': '1',
+      'User-Agent':
+          'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 QingTing/1.0',
+    };
+  }
 
   static String _originFor(Uri uri) {
     final defaultPort =
