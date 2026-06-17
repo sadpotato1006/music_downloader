@@ -260,6 +260,31 @@ void main() {
     expect(restored.concurrentDownloads, 3);
     expect(restored.volume, 42.5);
   });
+
+  test('serializes persisted player queue items', () {
+    const item = PlayerItem(
+      id: 'local-song',
+      title: 'Song',
+      artist: 'Artist',
+      uri: 'file:///tmp/Song.mp3',
+      localPath: '/tmp/Song.mp3',
+      coverFilePath: '/tmp/Song.jpg',
+      lyrics: '[00:00]Song',
+    );
+    const saved = SavedPlayerQueue(
+      items: [item],
+      currentIndex: 8,
+      shuffleEnabled: true,
+    );
+
+    final restored = SavedPlayerQueue.fromJson(saved.toJson());
+
+    expect(restored.items, hasLength(1));
+    expect(restored.items.single.title, 'Song');
+    expect(restored.items.single.localPath, '/tmp/Song.mp3');
+    expect(restored.normalizedCurrentIndex, 0);
+    expect(restored.shuffleEnabled, isTrue);
+  });
 }
 
 class _FakeGequbaoAdapter implements HttpClientAdapter {

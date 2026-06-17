@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:open_filex/open_filex.dart';
@@ -29,6 +30,7 @@ class AppController extends ChangeNotifier {
   final StorageService storage;
   final PlayerService player;
   final Dio _downloadDio;
+  final Random _shuffleRandom = Random();
   final Map<String, CancelToken> _cancelTokens = {};
   static const _sourceRequestGap = Duration(seconds: 2);
   static const _cooldown520 = Duration(minutes: 3);
@@ -51,6 +53,7 @@ class AppController extends ChangeNotifier {
 
   String? resolvingPlayId;
   String? preparingDownloadId;
+  String? preparingQueueNextId;
   String? globalMessage;
 
   List<DownloadTask> downloadTasks = [];
@@ -65,6 +68,7 @@ class AppController extends ChangeNotifier {
   List<PlayerItem> queue = [];
   int currentQueueIndex = -1;
   RepeatMode repeatMode = RepeatMode.none;
+  bool shuffleEnabled = false;
 
   PlayerItem? get currentItem {
     if (currentQueueIndex < 0 || currentQueueIndex >= queue.length) {
@@ -123,6 +127,10 @@ class AppController extends ChangeNotifier {
     downloadedTracks = await _hydrateDownloadedCoverCaches(
       await storage.loadDownloadedTracks(),
     );
+    final savedQueue = await storage.loadPlayerQueue();
+    queue = savedQueue.items;
+    currentQueueIndex = savedQueue.normalizedCurrentIndex;
+    shuffleEnabled = savedQueue.shuffleEnabled;
     isReady = true;
     notifyListeners();
   }
@@ -188,26 +196,7 @@ class AppController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final detail = await _runSourceRequest(
-        '播放',
-        () => source.loadDetail(result),
-      );
-      final candidate = _pickPreferredCandidate(
-        await source.resolveCandidates(detail),
-        allowNonMp3: true,
-      );
-      if (candidate == null) {
-        throw const MusicSourceException('这个歌曲页面没有找到可播放的公开音频链接。');
-      }
-      final item = PlayerItem(
-        id: result.id,
-        title: detail.title,
-        artist: detail.artist,
-        uri: candidate.url,
-        headers: candidate.headers,
-        coverUrl: detail.coverUrl ?? result.coverUrl,
-        lyrics: detail.lyrics,
-      );
+      final item = await _resolveSearchResultPlayerItem(result, '播放');
       await _enqueueAndPlay(item);
     } on MusicSourceException catch (error) {
       globalMessage = error.message;
@@ -219,31 +208,51 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> playDownloaded(DownloadedTrack track) async {
-    final file = File(track.path);
-    if (!await file.exists()) {
-      globalMessage = '本地文件不存在：${track.path}';
+  Future<void> queueSearchResultNext(TrackSearchResult result) async {
+    preparingQueueNextId = result.id;
+    globalMessage = null;
+    notifyListeners();
+
+    try {
+      final item = await _resolveSearchResultPlayerItem(result, '下一首播放');
+      await _enqueueNext(item);
+      globalMessage = '已加入下一首播放：${item.title}';
+    } on MusicSourceException catch (error) {
+      globalMessage = error.message;
+    } catch (error) {
+      globalMessage = '加入下一首播放失败：${_friendlyUnexpectedError(error)}';
+    } finally {
+      preparingQueueNextId = null;
       notifyListeners();
+    }
+  }
+
+  Future<void> playDownloaded(DownloadedTrack track) async {
+    final item = await _playerItemFromDownloadedTrack(track);
+    if (item == null) {
       return;
     }
-
-    String? lyrics;
-    try {
-      lyrics = await Id3LyricsEmbedder.extractLyrics(file);
-    } catch (_) {
-      lyrics = null;
-    }
-
-    final item = PlayerItem(
-      id: track.id,
-      title: track.title,
-      artist: track.artist,
-      uri: file.uri.toString(),
-      localPath: track.path,
-      coverFilePath: track.coverFilePath,
-      lyrics: lyrics,
-    );
     await _enqueueAndPlay(item);
+  }
+
+  Future<void> queueDownloadedNext(DownloadedTrack track) async {
+    preparingQueueNextId = track.id;
+    globalMessage = null;
+    notifyListeners();
+
+    try {
+      final item = await _playerItemFromDownloadedTrack(track);
+      if (item == null) {
+        return;
+      }
+      await _enqueueNext(item);
+      globalMessage = '已加入下一首播放：${item.title}';
+    } catch (error) {
+      globalMessage = '加入下一首播放失败：${_friendlyUnexpectedError(error)}';
+    } finally {
+      preparingQueueNextId = null;
+      notifyListeners();
+    }
   }
 
   Future<void> playQueueAt(int index) async {
@@ -251,12 +260,17 @@ class AppController extends ChangeNotifier {
       return;
     }
     currentQueueIndex = index;
+    await _saveQueueState();
     notifyListeners();
     await player.open(queue[index]);
   }
 
   Future<void> playNext() async {
     if (queue.isEmpty) {
+      return;
+    }
+    if (shuffleEnabled && queue.length > 1) {
+      await playQueueAt(_randomQueueIndex());
       return;
     }
     if (currentQueueIndex < queue.length - 1) {
@@ -272,6 +286,10 @@ class AppController extends ChangeNotifier {
     }
     if (player.position > const Duration(seconds: 3)) {
       await player.seek(Duration.zero);
+      return;
+    }
+    if (shuffleEnabled && queue.length > 1) {
+      await playQueueAt(_randomQueueIndex());
       return;
     }
     if (currentQueueIndex > 0) {
@@ -302,6 +320,12 @@ class AppController extends ChangeNotifier {
       RepeatMode.all => RepeatMode.one,
       RepeatMode.one => RepeatMode.none,
     };
+    notifyListeners();
+  }
+
+  void toggleShuffleMode() {
+    shuffleEnabled = !shuffleEnabled;
+    unawaited(_saveQueueState());
     notifyListeners();
   }
 
@@ -728,6 +752,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             : item,
     ];
     await storage.saveDownloadedTracks(downloadedTracks);
+    await _saveQueueState();
     globalMessage = null;
     notifyListeners();
     return true;
@@ -748,9 +773,10 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     } else if (index < currentQueueIndex) {
       currentQueueIndex -= 1;
     } else if (removingCurrent) {
-      currentQueueIndex = currentQueueIndex.clamp(0, queue.length - 1);
+      currentQueueIndex = currentQueueIndex.clamp(0, queue.length - 1).toInt();
       await player.open(queue[currentQueueIndex]);
     }
+    await _saveQueueState();
     notifyListeners();
   }
 
@@ -777,6 +803,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       currentQueueIndex += 1;
     }
     queue = updatedQueue;
+    unawaited(_saveQueueState());
     notifyListeners();
   }
 
@@ -801,6 +828,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       currentQueueIndex += 1;
     }
     queue = updatedQueue;
+    unawaited(_saveQueueState());
     notifyListeners();
   }
 
@@ -808,6 +836,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     queue = [];
     currentQueueIndex = -1;
     await player.stop();
+    await _saveQueueState();
     notifyListeners();
   }
 
@@ -963,6 +992,116 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     queue = [...queue, item];
     await playQueueAt(queue.length - 1);
+  }
+
+  Future<void> _enqueueNext(PlayerItem item) async {
+    final updatedQueue = List<PlayerItem>.from(queue);
+    var insertionIndex = currentQueueIndex >= 0
+        ? currentQueueIndex + 1
+        : updatedQueue.length;
+    final existingIndex = updatedQueue.indexWhere(
+      (queued) => queued.id == item.id,
+    );
+
+    if (existingIndex >= 0) {
+      if (existingIndex == currentQueueIndex) {
+        updatedQueue[existingIndex] = item;
+        queue = updatedQueue;
+        await _saveQueueState();
+        notifyListeners();
+        return;
+      }
+      updatedQueue.removeAt(existingIndex);
+      if (existingIndex < currentQueueIndex) {
+        currentQueueIndex -= 1;
+      }
+      insertionIndex = currentQueueIndex >= 0
+          ? currentQueueIndex + 1
+          : updatedQueue.length;
+    }
+
+    final clampedIndex = insertionIndex.clamp(0, updatedQueue.length).toInt();
+    updatedQueue.insert(clampedIndex, item);
+    queue = updatedQueue;
+    await _saveQueueState();
+    notifyListeners();
+  }
+
+  Future<PlayerItem> _resolveSearchResultPlayerItem(
+    TrackSearchResult result,
+    String action,
+  ) async {
+    final detail = await _runSourceRequest(
+      action,
+      () => source.loadDetail(result),
+    );
+    final candidate = _pickPreferredCandidate(
+      await source.resolveCandidates(detail),
+      allowNonMp3: true,
+    );
+    if (candidate == null) {
+      throw const MusicSourceException('这个歌曲页面没有找到可播放的公开音频链接。');
+    }
+    return PlayerItem(
+      id: result.id,
+      title: detail.title,
+      artist: detail.artist,
+      uri: candidate.url,
+      headers: candidate.headers,
+      coverUrl: detail.coverUrl ?? result.coverUrl,
+      lyrics: detail.lyrics,
+    );
+  }
+
+  Future<PlayerItem?> _playerItemFromDownloadedTrack(
+    DownloadedTrack track,
+  ) async {
+    final file = File(track.path);
+    if (!await file.exists()) {
+      globalMessage = '本地文件不存在：${track.path}';
+      notifyListeners();
+      return null;
+    }
+
+    String? lyrics;
+    try {
+      lyrics = await Id3LyricsEmbedder.extractLyrics(file);
+    } catch (_) {
+      lyrics = null;
+    }
+
+    return PlayerItem(
+      id: track.id,
+      title: track.title,
+      artist: track.artist,
+      uri: file.uri.toString(),
+      localPath: track.path,
+      coverFilePath: track.coverFilePath,
+      lyrics: lyrics,
+    );
+  }
+
+  Future<void> _saveQueueState() {
+    return storage.savePlayerQueue(
+      queue,
+      currentQueueIndex,
+      shuffleEnabled: shuffleEnabled,
+    );
+  }
+
+  int _randomQueueIndex() {
+    if (queue.isEmpty) {
+      return -1;
+    }
+    if (queue.length == 1) {
+      return 0;
+    }
+
+    var nextIndex = currentQueueIndex;
+    while (nextIndex == currentQueueIndex) {
+      nextIndex = _shuffleRandom.nextInt(queue.length);
+    }
+    return nextIndex;
   }
 
   void _handlePlaybackCompleted() {

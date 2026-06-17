@@ -337,6 +337,32 @@ class PlayerItem {
   final String? coverFilePath;
   final String? lyrics;
 
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'title': title,
+    'artist': artist,
+    'uri': uri,
+    'headers': headers,
+    'localPath': localPath,
+    'coverUrl': coverUrl,
+    'coverFilePath': coverFilePath,
+    'lyrics': lyrics,
+  };
+
+  factory PlayerItem.fromJson(Map<String, dynamic> json) {
+    return PlayerItem(
+      id: json['id'] as String,
+      title: json['title'] as String,
+      artist: json['artist'] as String? ?? '',
+      uri: json['uri'] as String,
+      headers: Map<String, String>.from(json['headers'] as Map? ?? const {}),
+      localPath: json['localPath'] as String?,
+      coverUrl: json['coverUrl'] as String?,
+      coverFilePath: json['coverFilePath'] as String?,
+      lyrics: json['lyrics'] as String?,
+    );
+  }
+
   PlayerItem copyWith({
     String? id,
     String? title,
@@ -358,6 +384,45 @@ class PlayerItem {
       coverUrl: coverUrl ?? this.coverUrl,
       coverFilePath: coverFilePath ?? this.coverFilePath,
       lyrics: lyrics ?? this.lyrics,
+    );
+  }
+}
+
+class SavedPlayerQueue {
+  const SavedPlayerQueue({
+    required this.items,
+    required this.currentIndex,
+    this.shuffleEnabled = false,
+  });
+
+  final List<PlayerItem> items;
+  final int currentIndex;
+  final bool shuffleEnabled;
+
+  int get normalizedCurrentIndex {
+    if (items.isEmpty) {
+      return -1;
+    }
+    return currentIndex.clamp(0, items.length - 1).toInt();
+  }
+
+  Map<String, dynamic> toJson() => {
+    'items': items.map((item) => item.toJson()).toList(),
+    'currentIndex': currentIndex,
+    'shuffleEnabled': shuffleEnabled,
+  };
+
+  factory SavedPlayerQueue.fromJson(Map<String, dynamic> json) {
+    final rawItems = json['items'] as List<dynamic>? ?? const [];
+    final items = rawItems
+        .whereType<Map>()
+        .map((item) => PlayerItem.fromJson(Map<String, dynamic>.from(item)))
+        .toList();
+    final currentIndex = json['currentIndex'] as int? ?? -1;
+    return SavedPlayerQueue(
+      items: items,
+      currentIndex: currentIndex,
+      shuffleEnabled: json['shuffleEnabled'] as bool? ?? false,
     );
   }
 }

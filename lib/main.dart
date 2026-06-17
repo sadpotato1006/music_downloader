@@ -414,8 +414,6 @@ class _SearchPageState extends State<SearchPage> {
     final controller = widget.controller;
     final cooldownText = controller.sourceCooldownText;
     return _PageFrame(
-      title: '青听',
-      subtitle: '歌曲宝',
       child: Column(
         children: [
           Row(
@@ -460,9 +458,8 @@ class _SearchPageState extends State<SearchPage> {
                     icon: Icons.music_note,
                     text: controller.searchError ?? '输入关键词开始搜索',
                   )
-                : ListView.separated(
+                : _ResponsiveTrackList(
                     itemCount: controller.searchResults.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 10),
                     itemBuilder: (context, index) {
                       final result = controller.searchResults[index];
                       return TrackTile(
@@ -477,6 +474,18 @@ class _SearchPageState extends State<SearchPage> {
                                 : Icons.play_arrow,
                             onPressed: () =>
                                 controller.playSearchResult(result),
+                          ),
+                          _IconAction(
+                            tooltip: '下一首播放',
+                            icon: controller.preparingQueueNextId == result.id
+                                ? Icons.more_horiz
+                                : Icons.playlist_add,
+                            onPressed:
+                                controller.preparingQueueNextId == result.id
+                                ? null
+                                : () =>
+                                      controller.queueSearchResultNext(result),
+                            size: 34,
                           ),
                           _IconAction(
                             tooltip: '下载',
@@ -565,8 +574,6 @@ class DownloadsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _PageFrame(
-      title: '下载',
-      subtitle: '${controller.downloadTasks.length} 个任务',
       child: controller.downloadTasks.isEmpty
           ? Column(
               children: [
@@ -739,10 +746,6 @@ class _LibraryPageState extends State<LibraryPage> {
   Widget build(BuildContext context) {
     final visibleTracks = controller.visibleDownloadedTracks;
     return _PageFrame(
-      title: '本地',
-      subtitle: controller.libraryQuery.trim().isEmpty
-          ? '${controller.downloadedTracks.length} 首'
-          : '${visibleTracks.length} / ${controller.downloadedTracks.length} 首',
       child: controller.downloadedTracks.isEmpty
           ? Column(
               children: [
@@ -804,10 +807,8 @@ class _LibraryPageState extends State<LibraryPage> {
                           icon: Icons.search_off,
                           text: '没有匹配的本地歌曲',
                         )
-                      : ListView.separated(
+                      : _ResponsiveTrackList(
                           itemCount: visibleTracks.length,
-                          separatorBuilder: (_, _) =>
-                              const SizedBox(height: 10),
                           itemBuilder: (context, index) {
                             final track = visibleTracks[index];
                             return TrackTile(
@@ -821,6 +822,22 @@ class _LibraryPageState extends State<LibraryPage> {
                                   icon: Icons.play_arrow,
                                   onPressed: () =>
                                       controller.playDownloaded(track),
+                                ),
+                                _IconAction(
+                                  tooltip: '下一首播放',
+                                  icon:
+                                      controller.preparingQueueNextId ==
+                                          track.id
+                                      ? Icons.more_horiz
+                                      : Icons.playlist_add,
+                                  onPressed:
+                                      controller.preparingQueueNextId ==
+                                          track.id
+                                      ? null
+                                      : () => controller.queueDownloadedNext(
+                                          track,
+                                        ),
+                                  size: 34,
                                 ),
                                 _LibraryMoreActions(
                                   controller: controller,
@@ -960,8 +977,6 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget build(BuildContext context) {
     final settings = controller.settings!;
     return _PageFrame(
-      title: '设置',
-      subtitle: '轻绿 · 简洁',
       child: ListView(
         children: [
           _SettingPanel(
@@ -1430,6 +1445,13 @@ class _PlaybackControls extends StatelessWidget {
           onPressed: controller.playNext,
         ),
         _IconAction(
+          tooltip: '随机播放',
+          icon: Icons.shuffle,
+          size: buttonSize,
+          selected: controller.shuffleEnabled,
+          onPressed: controller.toggleShuffleMode,
+        ),
+        _IconAction(
           tooltip: '循环',
           icon: _repeatIcon(controller.repeatMode),
           size: buttonSize,
@@ -1473,6 +1495,57 @@ class _PlayButton extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ResponsiveTrackList extends StatelessWidget {
+  const _ResponsiveTrackList({
+    required this.itemCount,
+    required this.itemBuilder,
+  });
+
+  final int itemCount;
+  final IndexedWidgetBuilder itemBuilder;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = _trackListColumnCount(context, constraints);
+        if (columns <= 1) {
+          return ListView.separated(
+            padding: EdgeInsets.zero,
+            itemCount: itemCount,
+            separatorBuilder: (_, _) => const SizedBox(height: 10),
+            itemBuilder: itemBuilder,
+          );
+        }
+
+        return GridView.builder(
+          padding: EdgeInsets.zero,
+          itemCount: itemCount,
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            mainAxisExtent: 86,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+          ),
+          itemBuilder: itemBuilder,
+        );
+      },
+    );
+  }
+}
+
+int _trackListColumnCount(BuildContext context, BoxConstraints constraints) {
+  final window = MediaQuery.sizeOf(context);
+  final isWideAndShort = window.height / window.width <= 0.72;
+  if (!isWideAndShort || constraints.maxWidth < 980) {
+    return 1;
+  }
+  if (constraints.maxWidth >= 1640) {
+    return 3;
+  }
+  return 2;
 }
 
 class TrackTile extends StatelessWidget {
@@ -1550,14 +1623,8 @@ class _TrackText extends StatelessWidget {
 }
 
 class _PageFrame extends StatelessWidget {
-  const _PageFrame({
-    required this.title,
-    required this.subtitle,
-    required this.child,
-  });
+  const _PageFrame({required this.child});
 
-  final String title;
-  final String subtitle;
   final Widget child;
 
   @override
@@ -1569,20 +1636,7 @@ class _PageFrame extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(24, 20, 24, 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 30,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(subtitle, style: const TextStyle(color: _muted)),
-            const SizedBox(height: 20),
-            Expanded(child: child),
-          ],
+          children: [Expanded(child: child)],
         ),
       ),
     );

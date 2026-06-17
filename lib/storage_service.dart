@@ -10,6 +10,7 @@ import 'models.dart';
 class StorageService {
   static const _settingsFileName = 'settings.json';
   static const _libraryFileName = 'downloads.json';
+  static const _queueFileName = 'queue.json';
 
   Future<AppSettings> loadSettings() async {
     final file = await _supportFile(_settingsFileName);
@@ -58,6 +59,44 @@ class StorageService {
       const JsonEncoder.withIndent(
         '  ',
       ).convert(tracks.map((track) => track.toJson()).toList()),
+    );
+  }
+
+  Future<SavedPlayerQueue> loadPlayerQueue() async {
+    final file = await _supportFile(_queueFileName);
+    if (!await file.exists()) {
+      return const SavedPlayerQueue(items: [], currentIndex: -1);
+    }
+
+    try {
+      final json =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final saved = SavedPlayerQueue.fromJson(json);
+      return SavedPlayerQueue(
+        items: saved.items,
+        currentIndex: saved.normalizedCurrentIndex,
+        shuffleEnabled: saved.shuffleEnabled,
+      );
+    } catch (_) {
+      return const SavedPlayerQueue(items: [], currentIndex: -1);
+    }
+  }
+
+  Future<void> savePlayerQueue(
+    List<PlayerItem> items,
+    int currentIndex, {
+    required bool shuffleEnabled,
+  }) async {
+    final file = await _supportFile(_queueFileName);
+    final saved = SavedPlayerQueue(
+      items: items,
+      currentIndex: items.isEmpty
+          ? -1
+          : currentIndex.clamp(0, items.length - 1).toInt(),
+      shuffleEnabled: shuffleEnabled,
+    );
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(saved.toJson()),
     );
   }
 
