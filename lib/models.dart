@@ -13,6 +13,7 @@ class TrackSearchResult {
     required this.detailUrl,
     this.duration,
     this.coverUrl,
+    this.album = '',
   });
 
   final String id;
@@ -22,6 +23,7 @@ class TrackSearchResult {
   final String detailUrl;
   final String? duration;
   final String? coverUrl;
+  final String album;
 
   String get displayArtist => artist.trim().isEmpty ? '未知歌手' : artist;
 
@@ -33,6 +35,7 @@ class TrackSearchResult {
     String? detailUrl,
     String? duration,
     String? coverUrl,
+    String? album,
   }) {
     return TrackSearchResult(
       id: id ?? this.id,
@@ -42,6 +45,7 @@ class TrackSearchResult {
       detailUrl: detailUrl ?? this.detailUrl,
       duration: duration ?? this.duration,
       coverUrl: coverUrl ?? this.coverUrl,
+      album: album ?? this.album,
     );
   }
 
@@ -53,6 +57,7 @@ class TrackSearchResult {
     'detailUrl': detailUrl,
     'duration': duration,
     'coverUrl': coverUrl,
+    'album': album,
   };
 
   factory TrackSearchResult.fromJson(Map<String, dynamic> json) {
@@ -64,6 +69,7 @@ class TrackSearchResult {
       detailUrl: json['detailUrl'] as String,
       duration: json['duration'] as String?,
       coverUrl: json['coverUrl'] as String?,
+      album: json['album'] as String? ?? '',
     );
   }
 }
@@ -77,6 +83,7 @@ class TrackDetail {
     required this.rawMetadata,
     this.lyrics,
     this.coverUrl,
+    this.album = '',
   });
 
   final String title;
@@ -86,6 +93,7 @@ class TrackDetail {
   final Map<String, String> rawMetadata;
   final String? lyrics;
   final String? coverUrl;
+  final String album;
 }
 
 class AudioCandidate {
@@ -140,6 +148,7 @@ class DownloadTask {
     this.receivedBytes = 0,
     this.totalBytes,
     this.lyrics,
+    this.album = '',
   });
 
   final String id;
@@ -152,6 +161,7 @@ class DownloadTask {
   final int receivedBytes;
   final int? totalBytes;
   final String? lyrics;
+  final String album;
 
   DownloadTask copyWith({
     DownloadStatus? status,
@@ -161,6 +171,7 @@ class DownloadTask {
     int? receivedBytes,
     int? totalBytes,
     String? lyrics,
+    String? album,
   }) {
     return DownloadTask(
       id: id,
@@ -173,6 +184,7 @@ class DownloadTask {
       receivedBytes: receivedBytes ?? this.receivedBytes,
       totalBytes: totalBytes ?? this.totalBytes,
       lyrics: lyrics ?? this.lyrics,
+      album: album ?? this.album,
     );
   }
 }
@@ -186,6 +198,7 @@ class DownloadedTrack {
     required this.format,
     required this.downloadedAt,
     required this.sourceUrl,
+    this.album = '',
     this.coverUrl,
     this.coverFilePath,
   });
@@ -197,6 +210,7 @@ class DownloadedTrack {
   final String format;
   final DateTime downloadedAt;
   final String sourceUrl;
+  final String album;
   final String? coverUrl;
   final String? coverFilePath;
 
@@ -208,6 +222,7 @@ class DownloadedTrack {
     String? format,
     DateTime? downloadedAt,
     String? sourceUrl,
+    String? album,
     String? coverUrl,
     String? coverFilePath,
   }) {
@@ -219,6 +234,7 @@ class DownloadedTrack {
       format: format ?? this.format,
       downloadedAt: downloadedAt ?? this.downloadedAt,
       sourceUrl: sourceUrl ?? this.sourceUrl,
+      album: album ?? this.album,
       coverUrl: coverUrl ?? this.coverUrl,
       coverFilePath: coverFilePath ?? this.coverFilePath,
     );
@@ -232,6 +248,7 @@ class DownloadedTrack {
       source: '本地',
       detailUrl: sourceUrl,
       coverUrl: coverUrl,
+      album: album,
     );
   }
 
@@ -243,6 +260,7 @@ class DownloadedTrack {
     'format': format,
     'downloadedAt': downloadedAt.toIso8601String(),
     'sourceUrl': sourceUrl,
+    'album': album,
     'coverUrl': coverUrl,
     'coverFilePath': coverFilePath,
   };
@@ -258,6 +276,7 @@ class DownloadedTrack {
           DateTime.tryParse(json['downloadedAt'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
       sourceUrl: json['sourceUrl'] as String? ?? '',
+      album: json['album'] as String? ?? '',
       coverUrl: json['coverUrl'] as String?,
       coverFilePath: json['coverFilePath'] as String?,
     );
@@ -268,9 +287,11 @@ class AppSettings {
   const AppSettings({
     required this.downloadDirectory,
     this.preferredFormat = 'mp3',
-    this.concurrentDownloads = 2,
+    this.concurrentDownloads = 1,
     this.theme = 'lightGreen',
     this.volume = 100,
+    this.autoPlayOnStartup = false,
+    this.defaultStartupPageIndex = 0,
   });
 
   final String downloadDirectory;
@@ -278,6 +299,8 @@ class AppSettings {
   final int concurrentDownloads;
   final String theme;
   final double volume;
+  final bool autoPlayOnStartup;
+  final int defaultStartupPageIndex;
 
   AppSettings copyWith({
     String? downloadDirectory,
@@ -285,6 +308,8 @@ class AppSettings {
     int? concurrentDownloads,
     String? theme,
     double? volume,
+    bool? autoPlayOnStartup,
+    int? defaultStartupPageIndex,
   }) {
     return AppSettings(
       downloadDirectory: downloadDirectory ?? this.downloadDirectory,
@@ -292,6 +317,9 @@ class AppSettings {
       concurrentDownloads: concurrentDownloads ?? this.concurrentDownloads,
       theme: theme ?? this.theme,
       volume: volume ?? this.volume,
+      autoPlayOnStartup: autoPlayOnStartup ?? this.autoPlayOnStartup,
+      defaultStartupPageIndex:
+          defaultStartupPageIndex ?? this.defaultStartupPageIndex,
     );
   }
 
@@ -301,15 +329,20 @@ class AppSettings {
     'concurrentDownloads': concurrentDownloads,
     'theme': theme,
     'volume': volume,
+    'autoPlayOnStartup': autoPlayOnStartup,
+    'defaultStartupPageIndex': defaultStartupPageIndex,
   };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
+    final savedDefaultPage = json['defaultStartupPageIndex'] as int? ?? 0;
     return AppSettings(
       downloadDirectory: json['downloadDirectory'] as String,
       preferredFormat: json['preferredFormat'] as String? ?? 'mp3',
-      concurrentDownloads: json['concurrentDownloads'] as int? ?? 2,
+      concurrentDownloads: json['concurrentDownloads'] as int? ?? 1,
       theme: json['theme'] as String? ?? 'lightGreen',
       volume: (json['volume'] as num?)?.toDouble() ?? 100,
+      autoPlayOnStartup: json['autoPlayOnStartup'] as bool? ?? false,
+      defaultStartupPageIndex: savedDefaultPage == 2 ? 2 : 0,
     );
   }
 }
@@ -325,6 +358,7 @@ class PlayerItem {
     this.coverUrl,
     this.coverFilePath,
     this.lyrics,
+    this.album = '',
   });
 
   final String id;
@@ -336,6 +370,7 @@ class PlayerItem {
   final String? coverUrl;
   final String? coverFilePath;
   final String? lyrics;
+  final String album;
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -347,6 +382,7 @@ class PlayerItem {
     'coverUrl': coverUrl,
     'coverFilePath': coverFilePath,
     'lyrics': lyrics,
+    'album': album,
   };
 
   factory PlayerItem.fromJson(Map<String, dynamic> json) {
@@ -360,6 +396,7 @@ class PlayerItem {
       coverUrl: json['coverUrl'] as String?,
       coverFilePath: json['coverFilePath'] as String?,
       lyrics: json['lyrics'] as String?,
+      album: json['album'] as String? ?? '',
     );
   }
 
@@ -373,6 +410,7 @@ class PlayerItem {
     String? coverUrl,
     String? coverFilePath,
     String? lyrics,
+    String? album,
   }) {
     return PlayerItem(
       id: id ?? this.id,
@@ -384,6 +422,7 @@ class PlayerItem {
       coverUrl: coverUrl ?? this.coverUrl,
       coverFilePath: coverFilePath ?? this.coverFilePath,
       lyrics: lyrics ?? this.lyrics,
+      album: album ?? this.album,
     );
   }
 }
@@ -392,7 +431,7 @@ class SavedPlayerQueue {
   const SavedPlayerQueue({
     required this.items,
     required this.currentIndex,
-    this.shuffleEnabled = false,
+    this.shuffleEnabled = true,
   });
 
   final List<PlayerItem> items;
@@ -422,7 +461,7 @@ class SavedPlayerQueue {
     return SavedPlayerQueue(
       items: items,
       currentIndex: currentIndex,
-      shuffleEnabled: json['shuffleEnabled'] as bool? ?? false,
+      shuffleEnabled: json['shuffleEnabled'] as bool? ?? true,
     );
   }
 }

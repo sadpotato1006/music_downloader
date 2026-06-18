@@ -9,12 +9,15 @@ class Id3LyricsEmbedder {
     File file, {
     required String title,
     required String artist,
+    String? album,
     String? lyrics,
     Id3CoverImage? cover,
   }) async {
+    final cleanedAlbum = album?.trim();
     final cleanedLyrics = lyrics?.trim();
     if (title.trim().isEmpty &&
         artist.trim().isEmpty &&
+        (cleanedAlbum == null || cleanedAlbum.isEmpty) &&
         (cleanedLyrics == null || cleanedLyrics.isEmpty) &&
         cover == null) {
       return false;
@@ -25,6 +28,7 @@ class Id3LyricsEmbedder {
       bytes,
       title: title,
       artist: artist,
+      album: cleanedAlbum,
       lyrics: cleanedLyrics,
       cover: cover,
     );
@@ -65,6 +69,7 @@ class Id3LyricsEmbedder {
     var offset = 10;
     String? title;
     String? artist;
+    String? album;
     String? lyrics;
     Id3CoverImage? cover;
 
@@ -92,8 +97,17 @@ class Id3LyricsEmbedder {
         case 'TPE1':
           artist ??= _parseTextFrame(payload);
           break;
+        case 'TALB':
+          album ??= _parseTextFrame(payload);
+          break;
         case 'USLT':
           lyrics ??= _parseUnsynchronizedLyricsFrame(payload);
+          break;
+        case 'SYLT':
+          lyrics ??= _parseSynchronizedLyricsFrame(payload);
+          break;
+        case 'TXXX':
+          lyrics ??= _parseUserTextLyricsFrame(payload);
           break;
         case 'APIC':
           cover ??= _parseAttachedPictureFrame(payload);
@@ -105,6 +119,7 @@ class Id3LyricsEmbedder {
     return Id3Metadata(
       title: title,
       artist: artist,
+      album: album,
       lyrics: lyrics,
       cover: cover,
     );
@@ -195,10 +210,24 @@ class Id3LyricsEmbedder {
 
       final payloadStart = offset + 10;
       final payloadEnd = payloadStart + frameSize;
+      final payload = source.sublist(payloadStart, payloadEnd);
       if (frameId == 'USLT') {
-        return _parseUnsynchronizedLyricsFrame(
-          source.sublist(payloadStart, payloadEnd),
-        );
+        final lyrics = _parseUnsynchronizedLyricsFrame(payload);
+        if (lyrics != null) {
+          return lyrics;
+        }
+      }
+      if (frameId == 'SYLT') {
+        final lyrics = _parseSynchronizedLyricsFrame(payload);
+        if (lyrics != null) {
+          return lyrics;
+        }
+      }
+      if (frameId == 'TXXX') {
+        final lyrics = _parseUserTextLyricsFrame(payload);
+        if (lyrics != null) {
+          return lyrics;
+        }
       }
       offset = payloadEnd;
     }
@@ -232,11 +261,13 @@ class Id3LyricsEmbedder {
     List<int> bytes, {
     required String title,
     required String artist,
+    String? album,
     String? lyrics,
     Id3CoverImage? cover,
   }) {
     final source = Uint8List.fromList(bytes);
     final audioBytes = _stripExistingTag(source);
+    final cleanedAlbum = album?.trim();
     final cleanedLyrics = lyrics?.trim();
     final body = BytesBuilder(copy: false);
 
@@ -245,6 +276,9 @@ class Id3LyricsEmbedder {
     }
     if (artist.trim().isNotEmpty) {
       body.add(_textFrame('TPE1', artist.trim()));
+    }
+    if (cleanedAlbum != null && cleanedAlbum.isNotEmpty) {
+      body.add(_textFrame('TALB', cleanedAlbum));
     }
     if (cleanedLyrics != null && cleanedLyrics.isNotEmpty) {
       body.add(_unsynchronizedLyricsFrame(cleanedLyrics));
@@ -385,6 +419,91 @@ class Id3LyricsEmbedder {
     return lyrics.isEmpty ? null : lyrics;
   }
 
+  static String? _parseSynchronizedLyricsFrame(Uint8List payload) {
+    if (payload.length < 7) {
+      return null;
+    }
+
+    final encoding = payload[0];
+    final timestampFormat = payload[4];
+    var cursor = 6;
+    final descriptionEnd = _indexOfTextTerminator(payload, encoding, cursor);
+    if (descriptionEnd == -1) {
+      return null;
+    }
+    cursor = descriptionEnd + _textTerminatorLength(encoding);
+
+    final lines = <String>[];
+    while (cursor < payload.length) {
+      final textEnd = _indexOfTextTerminator(payload, encoding, cursor);
+      if (textEnd == -1) {
+        break;
+      }
+      final text = _decodeId3Text(
+        encoding,
+        payload.sublist(cursor, textEnd),
+      ).trim();
+      cursor = textEnd + _textTerminatorLength(encoding);
+      if (cursor + 4 > payload.length) {
+        break;
+      }
+      final timestamp = _readUint32(payload, cursor);
+      cursor += 4;
+      if (text.isEmpty) {
+        continue;
+      }
+      final duration = Duration(
+        milliseconds: timestampFormat == 2 ? timestamp : timestamp,
+      );
+      lines.add('${_formatLrcTimestamp(duration)}$text');
+    }
+
+    if (lines.isEmpty) {
+      return null;
+    }
+    return lines.join('\n');
+  }
+
+  static String? _parseUserTextLyricsFrame(Uint8List payload) {
+    if (payload.isEmpty) {
+      return null;
+    }
+    final encoding = payload[0];
+    var cursor = 1;
+    final descriptionEnd = _indexOfTextTerminator(payload, encoding, cursor);
+    if (descriptionEnd == -1) {
+      return null;
+    }
+    final description = _decodeId3Text(
+      encoding,
+      payload.sublist(cursor, descriptionEnd),
+    ).trim().toLowerCase();
+    cursor = descriptionEnd + _textTerminatorLength(encoding);
+    if (cursor >= payload.length) {
+      return null;
+    }
+    final value = _decodeId3Text(encoding, payload.sublist(cursor)).trim();
+    if (value.isEmpty) {
+      return null;
+    }
+    const lyricDescriptions = {
+      'lyrics',
+      'lyric',
+      'syncedlyrics',
+      'unsyncedlyrics',
+      'unsynchronised lyrics',
+      'unsynchronized lyrics',
+      'lrc',
+      '歌词',
+    };
+    if (lyricDescriptions.contains(description) ||
+        description.contains('lyric') ||
+        description.contains('歌词')) {
+      return value;
+    }
+    return null;
+  }
+
   static Uint8List _frame(String id, Uint8List payload) {
     final frame = BytesBuilder(copy: false)
       ..add(ascii.encode(id))
@@ -478,6 +597,25 @@ class Id3LyricsEmbedder {
     return String.fromCharCodes(codeUnits);
   }
 
+  static int _textTerminatorLength(int encoding) {
+    return encoding == 1 || encoding == 2 ? 2 : 1;
+  }
+
+  static int _indexOfTextTerminator(Uint8List bytes, int encoding, int start) {
+    return encoding == 1 || encoding == 2
+        ? _indexOfDoubleZero(bytes, start)
+        : _indexOfByte(bytes, 0, start);
+  }
+
+  static String _formatLrcTimestamp(Duration duration) {
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds.remainder(60);
+    final centiseconds = (duration.inMilliseconds.remainder(1000) / 10).floor();
+    return '[${minutes.toString().padLeft(2, '0')}:'
+        '${seconds.toString().padLeft(2, '0')}.'
+        '${centiseconds.toString().padLeft(2, '0')}]';
+  }
+
   static int _indexOfByte(Uint8List bytes, int value, int start) {
     for (var index = start; index < bytes.length; index += 1) {
       if (bytes[index] == value) {
@@ -505,10 +643,17 @@ class Id3CoverImage {
 }
 
 class Id3Metadata {
-  const Id3Metadata({this.title, this.artist, this.lyrics, this.cover});
+  const Id3Metadata({
+    this.title,
+    this.artist,
+    this.album,
+    this.lyrics,
+    this.cover,
+  });
 
   final String? title;
   final String? artist;
+  final String? album;
   final String? lyrics;
   final Id3CoverImage? cover;
 }

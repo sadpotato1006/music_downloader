@@ -128,6 +128,59 @@ void main() {
     expect(detail.candidates.first.format, 'mp3');
   });
 
+  test('extracts album metadata from detail page', () {
+    const html = r'''
+      <html>
+        <head>
+          <meta name="album" content="November's Chopin">
+        </head>
+        <body>
+          Song name: Night Song
+          Artist: Artist
+          <audio src="https:\/\/cdn.example.test\/night.mp3"></audio>
+        </body>
+      </html>
+    ''';
+    const fallback = TrackSearchResult(
+      id: 'album-456',
+      title: 'Night Song',
+      artist: 'Artist',
+      source: 'Gequbao',
+      detailUrl: 'https://www.gequbao.com/music/album-456',
+    );
+
+    final detail = GequbaoParser.parseTrackDetail(
+      html,
+      baseUrl: baseUrl,
+      fallback: fallback,
+    );
+
+    expect(detail.album, "November's Chopin");
+  });
+
+  test('extracts album metadata from nested app data arrays', () {
+    const html = r'''
+      <script>
+        window.appData = JSON.parse('{"songs":[{"mp3_title":"Song","mp3_author":"Artist","album_name":"Album In App Data"}]}');
+      </script>
+    ''';
+    const fallback = TrackSearchResult(
+      id: 'album-app-data',
+      title: 'Song',
+      artist: 'Artist',
+      source: 'Gequbao',
+      detailUrl: 'https://www.gequbao.com/music/album-app-data',
+    );
+
+    final detail = GequbaoParser.parseTrackDetail(
+      html,
+      baseUrl: baseUrl,
+      fallback: fallback,
+    );
+
+    expect(detail.album, 'Album In App Data');
+  });
+
   test('parses escaped appData from detail page HTML', () {
     const html = r'''
       <script>
@@ -252,6 +305,8 @@ void main() {
       downloadDirectory: '/tmp/QingTing',
       concurrentDownloads: 3,
       volume: 42.5,
+      autoPlayOnStartup: true,
+      defaultStartupPageIndex: 2,
     );
 
     final restored = AppSettings.fromJson(settings.toJson());
@@ -259,6 +314,8 @@ void main() {
     expect(restored.downloadDirectory, '/tmp/QingTing');
     expect(restored.concurrentDownloads, 3);
     expect(restored.volume, 42.5);
+    expect(restored.autoPlayOnStartup, isTrue);
+    expect(restored.defaultStartupPageIndex, 2);
   });
 
   test('serializes persisted player queue items', () {
@@ -270,6 +327,7 @@ void main() {
       localPath: '/tmp/Song.mp3',
       coverFilePath: '/tmp/Song.jpg',
       lyrics: '[00:00]Song',
+      album: 'Album',
     );
     const saved = SavedPlayerQueue(
       items: [item],
@@ -281,6 +339,7 @@ void main() {
 
     expect(restored.items, hasLength(1));
     expect(restored.items.single.title, 'Song');
+    expect(restored.items.single.album, 'Album');
     expect(restored.items.single.localPath, '/tmp/Song.mp3');
     expect(restored.normalizedCurrentIndex, 0);
     expect(restored.shuffleEnabled, isTrue);

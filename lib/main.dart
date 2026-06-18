@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart' hide RepeatMode;
@@ -103,32 +104,7 @@ class _QingTingAppState extends State<QingTingApp> {
         ),
         home: AnimatedBuilder(
           animation: controller,
-          builder: (context, _) {
-            if (!controller.isReady) {
-              return const _LoadingScreen();
-            }
-            return HomeShell(controller: controller);
-          },
-        ),
-      ),
-    );
-  }
-}
-
-class _LoadingScreen extends StatelessWidget {
-  const _LoadingScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CupertinoActivityIndicator(radius: 14),
-            SizedBox(height: 18),
-            Text('青听'),
-          ],
+          builder: (context, _) => HomeShell(controller: controller),
         ),
       ),
     );
@@ -146,6 +122,8 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   late final PageController _pageController;
+  Timer? _toastTimer;
+  String? _toastMessage;
 
   AppController get controller => widget.controller;
 
@@ -169,6 +147,7 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    _toastTimer?.cancel();
     controller.removeListener(_syncPageWithSelectedIndex);
     _pageController.dispose();
     super.dispose();
@@ -196,25 +175,40 @@ class _HomeShellState extends State<HomeShell> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final isDesktop = constraints.maxWidth >= 820;
-        return Scaffold(
-          body: Column(
-            children: [
-              _TopNavigation(controller: controller, isDesktop: isDesktop),
-              Expanded(
-                child: PageView(
-                  controller: _pageController,
-                  onPageChanged: controller.selectIndex,
-                  children: [
-                    SearchPage(controller: controller),
-                    DownloadsPage(controller: controller),
-                    LibraryPage(controller: controller),
-                    SettingsPage(controller: controller),
-                  ],
+        return Stack(
+          children: [
+            Scaffold(
+              body: Column(
+                children: [
+                  _TopNavigation(controller: controller, isDesktop: isDesktop),
+                  Expanded(
+                    child: PageView(
+                      controller: _pageController,
+                      onPageChanged: controller.selectIndex,
+                      children: [
+                        SearchPage(controller: controller),
+                        DownloadsPage(controller: controller),
+                        LibraryPage(controller: controller),
+                        SettingsPage(controller: controller),
+                      ],
+                    ),
+                  ),
+                  MiniPlayer(controller: controller, isDesktop: isDesktop),
+                ],
+              ),
+            ),
+            if (_toastMessage != null)
+              Positioned(
+                bottom:
+                    MediaQuery.paddingOf(context).bottom +
+                    (isDesktop ? 98 : 112),
+                left: 18,
+                right: 18,
+                child: IgnorePointer(
+                  child: _QingTingToast(message: _toastMessage!),
                 ),
               ),
-              MiniPlayer(controller: controller, isDesktop: isDesktop),
-            ],
-          ),
+          ],
         );
       },
     );
@@ -229,11 +223,81 @@ class _HomeShellState extends State<HomeShell> {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      setState(() => _toastMessage = message);
+      _toastTimer?.cancel();
+      _toastTimer = Timer(const Duration(milliseconds: 2200), () {
+        if (mounted) {
+          setState(() => _toastMessage = null);
+        }
+      });
       controller.clearGlobalMessage();
     });
+  }
+}
+
+class _QingTingToast extends StatelessWidget {
+  const _QingTingToast({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Material(
+          color: Colors.transparent,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _line),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.10),
+                  blurRadius: 24,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: _accent.withValues(alpha: 0.22),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.music_note,
+                      color: _accentStrong,
+                      size: 19,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Text(
+                      message,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -262,9 +326,9 @@ class _TopNavigation extends StatelessWidget {
         child: Padding(
           padding: EdgeInsets.fromLTRB(
             isDesktop ? 28 : 12,
-            isDesktop ? 12 : 8,
+            isDesktop ? 8 : 5,
             isDesktop ? 28 : 12,
-            isDesktop ? 12 : 8,
+            isDesktop ? 8 : 5,
           ),
           child: Row(
             children: [
@@ -303,18 +367,18 @@ class _AppMark extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 42,
-          height: 42,
+          width: 38,
+          height: 38,
           decoration: BoxDecoration(
             color: _accent.withValues(alpha: 0.2),
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(13),
           ),
           child: const Icon(Icons.music_note, color: _accentStrong),
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 8),
         const Text(
           '青听',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
         ),
       ],
     );
@@ -343,17 +407,17 @@ class _TopNavItem extends StatelessWidget {
         child: Tooltip(
           message: destination.label,
           child: InkWell(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(15),
             onTap: onTap,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              height: compact ? 46 : 48,
-              padding: EdgeInsets.symmetric(horizontal: compact ? 6 : 14),
+              height: compact ? 40 : 42,
+              padding: EdgeInsets.symmetric(horizontal: compact ? 4 : 12),
               decoration: BoxDecoration(
                 color: selected
                     ? _accent.withValues(alpha: 0.18)
                     : Colors.transparent,
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(15),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -362,9 +426,9 @@ class _TopNavItem extends StatelessWidget {
                   Icon(
                     destination.icon,
                     color: foreground,
-                    size: compact ? 22 : 20,
+                    size: compact ? 20 : 19,
                   ),
-                  SizedBox(width: compact ? 5 : 8),
+                  SizedBox(width: compact ? 4 : 7),
                   Flexible(
                     child: Text(
                       destination.label,
@@ -372,7 +436,7 @@ class _TopNavItem extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: selected ? _ink : _muted,
-                        fontSize: compact ? 13 : 14,
+                        fontSize: compact ? 12.5 : 13,
                         fontWeight: selected
                             ? FontWeight.w800
                             : FontWeight.w600,
@@ -466,15 +530,8 @@ class _SearchPageState extends State<SearchPage> {
                         title: result.title,
                         subtitle: result.displayArtist,
                         showArtwork: false,
+                        onTap: () => controller.playSearchResult(result),
                         trailing: [
-                          _IconAction(
-                            tooltip: '播放',
-                            icon: controller.resolvingPlayId == result.id
-                                ? Icons.more_horiz
-                                : Icons.play_arrow,
-                            onPressed: () =>
-                                controller.playSearchResult(result),
-                          ),
                           _IconAction(
                             tooltip: '下一首播放',
                             icon: controller.preparingQueueNextId == result.id
@@ -485,7 +542,7 @@ class _SearchPageState extends State<SearchPage> {
                                 ? null
                                 : () =>
                                       controller.queueSearchResultNext(result),
-                            size: 34,
+                            size: 30,
                           ),
                           _IconAction(
                             tooltip: '下载',
@@ -513,15 +570,11 @@ class _SearchPageState extends State<SearchPage> {
       return;
     }
     if (start.didStart) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('已加入下载队列')));
+      widget.controller.showMessage('已加入下载队列');
       return;
     }
     if (start.didFail) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(start.message ?? '创建下载任务失败')));
+      widget.controller.showMessage(start.message ?? '创建下载任务失败');
       return;
     }
 
@@ -549,10 +602,8 @@ class _SearchPageState extends State<SearchPage> {
         allowNonMp3: true,
       );
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(retry.didStart ? '已加入下载队列' : retry.message ?? '下载失败'),
-          ),
+        widget.controller.showMessage(
+          retry.didStart ? '已加入下载队列' : retry.message ?? '下载失败',
         );
       }
     }
@@ -735,10 +786,47 @@ class _LibraryPageState extends State<LibraryPage> {
     super.dispose();
   }
 
-  Future<void> _scanDownloadDirectory() async {
-    await controller.scanCurrentDownloadDirectory();
-    if (mounted) {
+  Future<void> _showLibrarySearch() async {
+    final textController = TextEditingController(text: controller.libraryQuery);
+    try {
+      final value = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('搜索本地歌曲'),
+          content: TextField(
+            controller: textController,
+            autofocus: true,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (value) => Navigator.pop(context, value),
+            decoration: const InputDecoration(
+              hintText: '歌名、歌手或专辑',
+              prefixIcon: Icon(Icons.search),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, ''),
+              child: const Text('清空'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, textController.text),
+              child: const Text('搜索'),
+            ),
+          ],
+        ),
+      );
+      if (value == null || !mounted) {
+        return;
+      }
+      queryController.text = value;
+      controller.setLibraryQuery(value);
       setState(() {});
+    } finally {
+      textController.dispose();
     }
   }
 
@@ -746,110 +834,146 @@ class _LibraryPageState extends State<LibraryPage> {
   Widget build(BuildContext context) {
     final visibleTracks = controller.visibleDownloadedTracks;
     return _PageFrame(
-      child: controller.downloadedTracks.isEmpty
-          ? Column(
-              children: [
-                _DirectoryScanButton(
-                  controller: controller,
-                  onPressed: _scanDownloadDirectory,
-                ),
-                const SizedBox(height: 12),
-                const Expanded(
-                  child: _EmptyState(
+      horizontalPadding: 18,
+      child: Column(
+        children: [
+          _LibraryToolbar(controller: controller, onSearch: _showLibrarySearch),
+          const SizedBox(height: 8),
+          Expanded(
+            child: controller.downloadedTracks.isEmpty
+                ? const _EmptyState(
                     icon: Icons.library_music,
                     text: '下载完成后会出现在这里',
+                  )
+                : visibleTracks.isEmpty
+                ? const _EmptyState(icon: Icons.search_off, text: '没有匹配的本地歌曲')
+                : _ResponsiveTrackList(
+                    itemCount: visibleTracks.length,
+                    itemBuilder: (context, index) {
+                      final track = visibleTracks[index];
+                      final artist = track.artist.isEmpty
+                          ? '未知歌手'
+                          : track.artist;
+                      final album = track.album.trim().isEmpty
+                          ? '未知专辑'
+                          : track.album.trim();
+                      return TrackTile(
+                        title: track.title,
+                        subtitle: '$artist  ·  $album',
+                        coverFilePath: track.coverFilePath,
+                        artworkSize: 48,
+                        titleWeight: FontWeight.w400,
+                        titleSize: 15.5,
+                        subtitleSize: 13.2,
+                        onTap: () => controller.playDownloaded(track),
+                        trailing: [
+                          _IconAction(
+                            tooltip: '下一首播放',
+                            icon: controller.preparingQueueNextId == track.id
+                                ? Icons.more_horiz
+                                : Icons.playlist_add,
+                            onPressed:
+                                controller.preparingQueueNextId == track.id
+                                ? null
+                                : () => controller.queueDownloadedNext(track),
+                            size: 28,
+                          ),
+                          _LibraryMoreActions(
+                            controller: controller,
+                            track: track,
+                          ),
+                        ],
+                      );
+                    },
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LibraryToolbar extends StatelessWidget {
+  const _LibraryToolbar({required this.controller, required this.onSearch});
+
+  final AppController controller;
+  final VoidCallback onSearch;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasQuery = controller.libraryQuery.trim().isNotEmpty;
+    return Row(
+      children: [
+        Expanded(
+          flex: 2,
+          child: SizedBox(
+            height: 42,
+            child: FilledButton.icon(
+              onPressed: controller.downloadedTracks.isEmpty
+                  ? null
+                  : controller.startRandomLibraryPlayback,
+              icon: const Icon(Icons.shuffle),
+              label: const Text(
+                '点击开始随机播放',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              style: FilledButton.styleFrom(
+                textStyle: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
                 ),
-              ],
-            )
-          : Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: queryController,
-                        textInputAction: TextInputAction.search,
-                        onChanged: (value) {
-                          controller.setLibraryQuery(value);
-                          setState(() {});
-                        },
-                        decoration: InputDecoration(
-                          hintText: '搜索歌名、歌手或格式',
-                          prefixIcon: const Icon(Icons.search),
-                          suffixIcon: queryController.text.isEmpty
-                              ? null
-                              : IconButton(
-                                  tooltip: '清空',
-                                  icon: const Icon(Icons.close),
-                                  onPressed: () {
-                                    queryController.clear();
-                                    controller.setLibraryQuery('');
-                                    setState(() {});
-                                  },
-                                ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    _LibrarySortMenu(controller: controller),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                _DirectoryScanButton(
-                  controller: controller,
-                  onPressed: _scanDownloadDirectory,
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: visibleTracks.isEmpty
-                      ? const _EmptyState(
-                          icon: Icons.search_off,
-                          text: '没有匹配的本地歌曲',
-                        )
-                      : _ResponsiveTrackList(
-                          itemCount: visibleTracks.length,
-                          itemBuilder: (context, index) {
-                            final track = visibleTracks[index];
-                            return TrackTile(
-                              title: track.title,
-                              subtitle:
-                                  '${track.artist.isEmpty ? '未知歌手' : track.artist} · ${track.format.toUpperCase()}',
-                              coverFilePath: track.coverFilePath,
-                              trailing: [
-                                _IconAction(
-                                  tooltip: '播放',
-                                  icon: Icons.play_arrow,
-                                  onPressed: () =>
-                                      controller.playDownloaded(track),
-                                ),
-                                _IconAction(
-                                  tooltip: '下一首播放',
-                                  icon:
-                                      controller.preparingQueueNextId ==
-                                          track.id
-                                      ? Icons.more_horiz
-                                      : Icons.playlist_add,
-                                  onPressed:
-                                      controller.preparingQueueNextId ==
-                                          track.id
-                                      ? null
-                                      : () => controller.queueDownloadedNext(
-                                          track,
-                                        ),
-                                  size: 34,
-                                ),
-                                _LibraryMoreActions(
-                                  controller: controller,
-                                  track: track,
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                ),
-              ],
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+              ),
             ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        _LibrarySortMenu(controller: controller),
+        const SizedBox(width: 6),
+        _CompactIconButton(
+          tooltip: hasQuery ? '修改搜索' : '搜索',
+          icon: hasQuery ? Icons.search_off : Icons.search,
+          selected: hasQuery,
+          onPressed: onSearch,
+        ),
+      ],
+    );
+  }
+}
+
+class _CompactIconButton extends StatelessWidget {
+  const _CompactIconButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+    this.selected = false,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.square(
+      dimension: 42,
+      child: Tooltip(
+        message: tooltip,
+        child: OutlinedButton(
+          onPressed: onPressed,
+          style: OutlinedButton.styleFrom(
+            padding: EdgeInsets.zero,
+            backgroundColor: selected ? _accent.withValues(alpha: 0.16) : null,
+            foregroundColor: selected ? _accentStrong : _ink,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+          ),
+          child: Icon(icon),
+        ),
+      ),
     );
   }
 }
@@ -865,8 +989,7 @@ class _DirectoryScanButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: double.infinity,
+    final button = SizedBox(
       child: OutlinedButton.icon(
         onPressed: controller.isScanningDownloadDirectory ? null : onPressed,
         icon: controller.isScanningDownloadDirectory
@@ -881,6 +1004,7 @@ class _DirectoryScanButton extends StatelessWidget {
         ),
       ),
     );
+    return SizedBox(width: double.infinity, child: button);
   }
 }
 
@@ -909,24 +1033,18 @@ class _LibrarySortMenu extends StatelessWidget {
             ),
           ),
       ],
-      child: Container(
-        height: 52,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border.all(color: _line),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_librarySortIcon(controller.librarySortMode), color: _muted),
-            const SizedBox(width: 8),
-            Text(
-              _librarySortLabel(controller.librarySortMode),
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ],
+      child: SizedBox.square(
+        dimension: 42,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border.all(color: _line),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Icon(
+            _librarySortIcon(controller.librarySortMode),
+            color: _muted,
+          ),
         ),
       ),
     );
@@ -945,6 +1063,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController pathController;
   late final FocusNode pathFocusNode;
+  bool _concurrentWarningOpen = false;
 
   AppController get controller => widget.controller;
 
@@ -1022,6 +1141,56 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 12),
           _SettingPanel(
+            title: '本地歌曲',
+            child: _DirectoryScanButton(
+              controller: controller,
+              onPressed: () => _scanDownloadDirectory(context),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingPanel(
+            title: '启动播放',
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    '启动软件时自动播放音乐',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Switch(
+                  value: settings.autoPlayOnStartup,
+                  onChanged: controller.setAutoPlayOnStartup,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingPanel(
+            title: '启动页面',
+            child: SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<int>(
+                segments: const [
+                  ButtonSegment(
+                    value: 0,
+                    icon: Icon(Icons.search),
+                    label: Text('搜索'),
+                  ),
+                  ButtonSegment(
+                    value: 2,
+                    icon: Icon(Icons.library_music),
+                    label: Text('本地'),
+                  ),
+                ],
+                selected: {settings.defaultStartupPageIndex == 2 ? 2 : 0},
+                onSelectionChanged: (selection) =>
+                    controller.setDefaultStartupPageIndex(selection.first),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingPanel(
             title: '同时下载',
             child: Row(
               children: [
@@ -1033,7 +1202,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     label: '${settings.concurrentDownloads}',
                     value: settings.concurrentDownloads.toDouble(),
                     onChanged: (value) =>
-                        controller.setConcurrentDownloads(value.round()),
+                        _setConcurrentDownloads(context, value.round()),
                   ),
                 ),
                 SizedBox(
@@ -1061,19 +1230,19 @@ class _SettingsPageState extends State<SettingsPage> {
                     SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        'github.com/sadpotato1006/music_downloader',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        'https://github.com/sadpotato1006/music_downloader',
+                        maxLines: 2,
+                        softWrap: true,
+                        overflow: TextOverflow.clip,
                         style: TextStyle(
                           color: _accentStrong,
+                          fontSize: 14,
                           fontWeight: FontWeight.w700,
                           decoration: TextDecoration.underline,
                           decorationColor: _accentStrong,
                         ),
                       ),
                     ),
-                    SizedBox(width: 8),
-                    Icon(Icons.chevron_right, color: _muted),
                   ],
                 ),
               ),
@@ -1138,9 +1307,7 @@ class _SettingsPageState extends State<SettingsPage> {
       }
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(success ? '下载目录已保存' : '下载目录不可用')));
+    controller.showMessage(success ? '下载目录已保存' : '下载目录不可用');
     if (!success) {
       pathController.text = controller.settings!.downloadDirectory;
     } else {
@@ -1158,14 +1325,54 @@ class _SettingsPageState extends State<SettingsPage> {
     await _saveDownloadDirectory(context);
   }
 
+  Future<void> _scanDownloadDirectory(BuildContext context) async {
+    await controller.scanCurrentDownloadDirectory();
+  }
+
+  Future<void> _setConcurrentDownloads(BuildContext context, int value) async {
+    final normalized = value.clamp(1, 4).toInt();
+    final current = controller.settings?.concurrentDownloads ?? 1;
+    if (normalized == current) {
+      return;
+    }
+    if (normalized > current) {
+      if (_concurrentWarningOpen) {
+        return;
+      }
+      _concurrentWarningOpen = true;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('确认提高同时下载数？'),
+          content: const Text(
+            '同时下载越多，请求越频繁，可能更容易被网站拒绝访问或触发临时限制。建议保持 1，确认后再提高。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('确认提高'),
+            ),
+          ],
+        ),
+      );
+      _concurrentWarningOpen = false;
+      if (confirmed != true || !context.mounted) {
+        return;
+      }
+    }
+    await controller.setConcurrentDownloads(normalized);
+  }
+
   Future<void> _openProjectRepository(BuildContext context) async {
     final opened = await controller.openProjectRepository();
     if (!context.mounted || opened) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('无法打开 GitHub 链接')));
+    controller.showMessage('无法打开 GitHub 链接');
   }
 }
 
@@ -1182,12 +1389,6 @@ class MiniPlayer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final item = controller.currentItem;
-    final durationMs = controller.player.duration.inMilliseconds;
-    final positionMs = controller.player.position.inMilliseconds.clamp(
-      0,
-      durationMs <= 0 ? 1 : durationMs,
-    );
-    final maxMs = (durationMs <= 0 ? 1 : durationMs).toDouble();
     final lyricLines = _parseLyricLines(item?.lyrics);
     final currentLyricIndex = _currentLyricIndex(
       lyricLines,
@@ -1197,7 +1398,7 @@ class MiniPlayer extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Container(
-        height: isDesktop ? 104 : 118,
+        height: isDesktop ? 78 : 82,
         padding: EdgeInsets.symmetric(
           horizontal: isDesktop ? 24 : 14,
           vertical: isDesktop ? 10 : 8,
@@ -1210,16 +1411,12 @@ class MiniPlayer extends StatelessWidget {
             ? _DesktopMiniPlayerContent(
                 controller: controller,
                 item: item,
-                positionMs: positionMs.toDouble(),
-                maxMs: maxMs,
                 lyricLines: lyricLines,
                 currentLyricIndex: currentLyricIndex,
               )
             : _MobileMiniPlayerContent(
                 controller: controller,
                 item: item,
-                positionMs: positionMs.toDouble(),
-                maxMs: maxMs,
                 lyricLines: lyricLines,
                 currentLyricIndex: currentLyricIndex,
               ),
@@ -1232,16 +1429,12 @@ class _DesktopMiniPlayerContent extends StatelessWidget {
   const _DesktopMiniPlayerContent({
     required this.controller,
     required this.item,
-    required this.positionMs,
-    required this.maxMs,
     required this.lyricLines,
     required this.currentLyricIndex,
   });
 
   final AppController controller;
   final PlayerItem? item;
-  final double positionMs;
-  final double maxMs;
   final List<_LyricLine> lyricLines;
   final int currentLyricIndex;
 
@@ -1250,70 +1443,35 @@ class _DesktopMiniPlayerContent extends StatelessWidget {
     final lyricText = _currentLyricText(lyricLines, currentLyricIndex);
     return Row(
       children: [
-        _TrackArtwork(
-          coverUrl: item?.coverUrl,
-          coverFilePath: item?.coverFilePath,
-          icon: Icons.graphic_eq,
-        ),
-        const SizedBox(width: 12),
         Expanded(
-          flex: 2,
           child: InkWell(
             borderRadius: BorderRadius.circular(10),
-            onTap: lyricLines.isEmpty
+            onTap: item == null
                 ? null
                 : () => _showLyricsSheet(context, controller),
-            child: _TrackText(
-              title: item?.title ?? '未播放',
-              subtitle: lyricText ?? item?.artist ?? '青听',
+            child: Row(
+              children: [
+                _TrackArtwork(
+                  coverUrl: item?.coverUrl,
+                  coverFilePath: item?.coverFilePath,
+                  icon: Icons.graphic_eq,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _TrackText(
+                    title: item?.title ?? '未播放',
+                    subtitle: lyricText ?? item?.artist ?? '青听',
+                    tertiary: item?.album.trim().isEmpty ?? true
+                        ? null
+                        : item?.album.trim(),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
         const SizedBox(width: 20),
-        Expanded(
-          flex: 3,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              _PlaybackControls(controller: controller, compact: false),
-              Row(
-                children: [
-                  Text(
-                    _formatDuration(controller.player.position),
-                    style: const TextStyle(fontSize: 11, color: _muted),
-                  ),
-                  Expanded(
-                    child: Slider(
-                      value: positionMs,
-                      min: 0,
-                      max: maxMs,
-                      onChanged: item == null
-                          ? null
-                          : (value) => controller.seekTo(
-                              Duration(milliseconds: value.round()),
-                            ),
-                    ),
-                  ),
-                  Text(
-                    _formatDuration(controller.player.duration),
-                    style: const TextStyle(fontSize: 11, color: _muted),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: 14),
-        const Icon(Icons.volume_up, color: _muted, size: 19),
-        SizedBox(
-          width: 120,
-          child: Slider(
-            value: controller.player.volume.clamp(0, 100).toDouble(),
-            min: 0,
-            max: 100,
-            onChanged: controller.setVolume,
-          ),
-        ),
+        _PlaybackControls(controller: controller, compact: false),
       ],
     );
   }
@@ -1323,96 +1481,50 @@ class _MobileMiniPlayerContent extends StatelessWidget {
   const _MobileMiniPlayerContent({
     required this.controller,
     required this.item,
-    required this.positionMs,
-    required this.maxMs,
     required this.lyricLines,
     required this.currentLyricIndex,
   });
 
   final AppController controller;
   final PlayerItem? item;
-  final double positionMs;
-  final double maxMs;
   final List<_LyricLine> lyricLines;
   final int currentLyricIndex;
 
   @override
   Widget build(BuildContext context) {
     final lyricText = _currentLyricText(lyricLines, currentLyricIndex);
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return Row(
       children: [
-        Row(
-          children: [
-            _TrackArtwork(
-              coverUrl: item?.coverUrl,
-              coverFilePath: item?.coverFilePath,
-              icon: Icons.graphic_eq,
-              size: 42,
-              borderRadius: 14,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: InkWell(
-                borderRadius: BorderRadius.circular(10),
-                onTap: lyricLines.isEmpty
-                    ? null
-                    : () => _showLyricsSheet(context, controller),
-                child: _TrackText(
-                  title: item?.title ?? '未播放',
-                  subtitle: lyricText ?? item?.artist ?? '青听',
+        Expanded(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: item == null
+                ? null
+                : () => _showLyricsSheet(context, controller),
+            child: Row(
+              children: [
+                _TrackArtwork(
+                  coverUrl: item?.coverUrl,
+                  coverFilePath: item?.coverFilePath,
+                  icon: Icons.graphic_eq,
+                  size: 46,
+                  borderRadius: 14,
                 ),
-              ),
-            ),
-            _PlaybackControls(controller: controller, compact: true),
-          ],
-        ),
-        SizedBox(
-          height: 28,
-          child: Row(
-            children: [
-              SizedBox(
-                width: 38,
-                child: Text(
-                  _formatDuration(controller.player.position),
-                  style: const TextStyle(fontSize: 11, color: _muted),
-                ),
-              ),
-              Expanded(
-                child: SliderTheme(
-                  data: SliderTheme.of(context).copyWith(
-                    trackHeight: 3,
-                    thumbShape: const RoundSliderThumbShape(
-                      enabledThumbRadius: 5,
-                      disabledThumbRadius: 5,
-                    ),
-                    overlayShape: const RoundSliderOverlayShape(
-                      overlayRadius: 12,
-                    ),
-                  ),
-                  child: Slider(
-                    value: positionMs,
-                    min: 0,
-                    max: maxMs,
-                    onChanged: item == null
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _TrackText(
+                    title: item?.title ?? '未播放',
+                    subtitle: lyricText ?? item?.artist ?? '青听',
+                    tertiary: item?.album.trim().isEmpty ?? true
                         ? null
-                        : (value) => controller.seekTo(
-                            Duration(milliseconds: value.round()),
-                          ),
+                        : item?.album.trim(),
                   ),
                 ),
-              ),
-              SizedBox(
-                width: 38,
-                child: Text(
-                  _formatDuration(controller.player.duration),
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(fontSize: 11, color: _muted),
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
+        _PlaybackControls(controller: controller, compact: true),
       ],
     );
   }
@@ -1431,33 +1543,7 @@ class _PlaybackControls extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        _IconAction(
-          tooltip: '上一首',
-          icon: Icons.skip_previous,
-          size: buttonSize,
-          onPressed: controller.playPrevious,
-        ),
         _PlayButton(controller: controller, compact: compact),
-        _IconAction(
-          tooltip: '下一首',
-          icon: Icons.skip_next,
-          size: buttonSize,
-          onPressed: controller.playNext,
-        ),
-        _IconAction(
-          tooltip: '随机播放',
-          icon: Icons.shuffle,
-          size: buttonSize,
-          selected: controller.shuffleEnabled,
-          onPressed: controller.toggleShuffleMode,
-        ),
-        _IconAction(
-          tooltip: '循环',
-          icon: _repeatIcon(controller.repeatMode),
-          size: buttonSize,
-          selected: controller.repeatMode != RepeatMode.none,
-          onPressed: controller.cycleRepeatMode,
-        ),
         _IconAction(
           tooltip: '播放队列',
           icon: Icons.queue_music,
@@ -1515,7 +1601,7 @@ class _ResponsiveTrackList extends StatelessWidget {
           return ListView.separated(
             padding: EdgeInsets.zero,
             itemCount: itemCount,
-            separatorBuilder: (_, _) => const SizedBox(height: 10),
+            separatorBuilder: (_, _) => const SizedBox(height: 6),
             itemBuilder: itemBuilder,
           );
         }
@@ -1525,9 +1611,9 @@ class _ResponsiveTrackList extends StatelessWidget {
           itemCount: itemCount,
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: columns,
-            mainAxisExtent: 86,
-            mainAxisSpacing: 10,
-            crossAxisSpacing: 10,
+            mainAxisExtent: 72,
+            mainAxisSpacing: 6,
+            crossAxisSpacing: 6,
           ),
           itemBuilder: itemBuilder,
         );
@@ -1554,49 +1640,97 @@ class TrackTile extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.trailing,
+    this.onTap,
+    this.tertiary,
     this.coverUrl,
     this.coverFilePath,
     this.showArtwork = true,
+    this.artworkSize = 40,
+    this.titleWeight = FontWeight.w700,
+    this.titleSize = 15,
+    this.subtitleSize = 13,
+    this.tertiarySize = 12,
   });
 
   final String title;
   final String subtitle;
+  final String? tertiary;
   final List<Widget> trailing;
+  final VoidCallback? onTap;
   final String? coverUrl;
   final String? coverFilePath;
   final bool showArtwork;
+  final double artworkSize;
+  final FontWeight titleWeight;
+  final double titleSize;
+  final double subtitleSize;
+  final double tertiarySize;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: _tileDecoration(),
-      child: Row(
-        children: [
-          if (showArtwork) ...[
-            _TrackArtwork(
-              coverUrl: coverUrl,
-              coverFilePath: coverFilePath,
-              icon: Icons.music_note,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        splashColor: _accent.withValues(alpha: 0.18),
+        highlightColor: _accent.withValues(alpha: 0.10),
+        child: Ink(
+          decoration: _tileDecoration(),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              children: [
+                if (showArtwork) ...[
+                  _TrackArtwork(
+                    coverUrl: coverUrl,
+                    coverFilePath: coverFilePath,
+                    icon: Icons.music_note,
+                    size: artworkSize,
+                    borderRadius: 12,
+                  ),
+                  const SizedBox(width: 10),
+                ],
+                Expanded(
+                  child: _TrackText(
+                    title: title,
+                    subtitle: subtitle,
+                    tertiary: tertiary,
+                    titleWeight: titleWeight,
+                    titleSize: titleSize,
+                    subtitleSize: subtitleSize,
+                    tertiarySize: tertiarySize,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Wrap(spacing: 2, children: trailing),
+              ],
             ),
-            const SizedBox(width: 12),
-          ],
-          Expanded(
-            child: _TrackText(title: title, subtitle: subtitle),
           ),
-          const SizedBox(width: 8),
-          Wrap(spacing: 4, children: trailing),
-        ],
+        ),
       ),
     );
   }
 }
 
 class _TrackText extends StatelessWidget {
-  const _TrackText({required this.title, required this.subtitle});
+  const _TrackText({
+    required this.title,
+    required this.subtitle,
+    this.tertiary,
+    this.titleWeight = FontWeight.w700,
+    this.titleSize = 15,
+    this.subtitleSize = 13,
+    this.tertiarySize = 12,
+  });
 
   final String title;
   final String subtitle;
+  final String? tertiary;
+  final FontWeight titleWeight;
+  final double titleSize;
+  final double subtitleSize;
+  final double tertiarySize;
 
   @override
   Widget build(BuildContext context) {
@@ -1608,24 +1742,37 @@ class _TrackText extends StatelessWidget {
           title,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+          style: TextStyle(fontWeight: titleWeight, fontSize: titleSize),
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 3),
         Text(
           subtitle,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: _muted, fontSize: 13),
+          style: TextStyle(color: _muted, fontSize: subtitleSize),
         ),
+        if (tertiary != null && tertiary!.trim().isNotEmpty) ...[
+          const SizedBox(height: 1),
+          Text(
+            tertiary!,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: _muted.withValues(alpha: 0.82),
+              fontSize: tertiarySize,
+            ),
+          ),
+        ],
       ],
     );
   }
 }
 
 class _PageFrame extends StatelessWidget {
-  const _PageFrame({required this.child});
+  const _PageFrame({required this.child, this.horizontalPadding = 24});
 
   final Widget child;
+  final double horizontalPadding;
 
   @override
   Widget build(BuildContext context) {
@@ -1633,7 +1780,12 @@ class _PageFrame extends StatelessWidget {
       top: false,
       bottom: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 20, 24, 14),
+        padding: EdgeInsets.fromLTRB(
+          horizontalPadding,
+          20,
+          horizontalPadding,
+          14,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [Expanded(child: child)],
@@ -1726,12 +1878,10 @@ class _InlineNotice extends StatelessWidget {
 void _showLyricsSheet(BuildContext context, AppController controller) {
   showModalBottomSheet<void>(
     context: context,
-    useSafeArea: true,
+    useSafeArea: false,
     isScrollControlled: true,
     backgroundColor: Colors.white,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
-    ),
+    constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height),
     builder: (context) => _LyricsSheet(controller: controller),
   );
 }
@@ -1809,67 +1959,257 @@ class _LyricsSheetState extends State<_LyricsSheet> {
       lines,
       widget.controller.player.position,
     );
+    final duration = widget.controller.player.duration;
+    final durationMs = duration.inMilliseconds;
+    final maxMs = (durationMs <= 0 ? 1 : durationMs).toDouble();
+    final positionMs = widget.controller.player.position.inMilliseconds.clamp(
+      0,
+      durationMs <= 0 ? 1 : durationMs,
+    );
+    final album = item?.album.trim();
 
     return SizedBox(
-      height: MediaQuery.sizeOf(context).height * 0.72,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(22, 12, 22, 18),
-        child: Column(
-          children: [
-            Container(
-              width: 38,
-              height: 4,
-              decoration: BoxDecoration(
-                color: _line,
-                borderRadius: BorderRadius.circular(99),
+      height: MediaQuery.sizeOf(context).height,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 18),
+          child: Column(
+            children: [
+              Container(
+                width: 38,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: _line,
+                  borderRadius: BorderRadius.circular(99),
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              item?.title ?? '歌词',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              item?.artist ?? '青听',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: _muted),
-            ),
-            const SizedBox(height: 18),
-            Expanded(
-              child: lines.isEmpty
-                  ? const _EmptyState(icon: Icons.lyrics, text: '这首歌没有内嵌歌词')
-                  : ListView.builder(
-                      controller: scrollController,
-                      padding: const EdgeInsets.symmetric(vertical: 96),
-                      itemCount: lines.length,
-                      itemBuilder: (context, index) {
-                        final selected = index == currentIndex;
-                        return AnimatedDefaultTextStyle(
-                          duration: const Duration(milliseconds: 160),
-                          style: TextStyle(
-                            color: selected ? _accentStrong : _muted,
-                            fontSize: selected ? 18 : 15,
-                            fontWeight: selected
-                                ? FontWeight.w800
-                                : FontWeight.w500,
-                            height: 1.45,
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            child: Text(
-                              lines[index].text,
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        );
-                      },
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: '返回',
+                    onPressed: () => Navigator.maybePop(context),
+                    icon: const Icon(Icons.keyboard_arrow_down),
+                  ),
+                  const Expanded(
+                    child: Text(
+                      '歌词',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
-            ),
-          ],
+                  ),
+                  const SizedBox(width: 48),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _TrackArtwork(
+                    coverUrl: item?.coverUrl,
+                    coverFilePath: item?.coverFilePath,
+                    icon: Icons.graphic_eq,
+                    size: 64,
+                    borderRadius: 16,
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: _TrackText(
+                      title: item?.title ?? '未播放',
+                      subtitle: item?.artist.trim().isEmpty ?? true
+                          ? '青听'
+                          : item!.artist.trim(),
+                      tertiary: album == null || album.isEmpty ? null : album,
+                      titleWeight: FontWeight.w600,
+                      titleSize: 18,
+                      subtitleSize: 13,
+                      tertiarySize: 12,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: lines.isEmpty
+                    ? const _EmptyState(icon: Icons.lyrics, text: '这首歌没有内嵌歌词')
+                    : ListView.builder(
+                        controller: scrollController,
+                        padding: const EdgeInsets.symmetric(vertical: 84),
+                        itemCount: lines.length,
+                        itemBuilder: (context, index) {
+                          final selected = index == currentIndex;
+                          final line = lines[index];
+                          return InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () => widget.controller.seekTo(line.time),
+                            child: AnimatedDefaultTextStyle(
+                              duration: const Duration(milliseconds: 160),
+                              style: TextStyle(
+                                color: selected ? _accentStrong : _muted,
+                                fontSize: selected ? 18 : 15,
+                                fontWeight: selected
+                                    ? FontWeight.w800
+                                    : FontWeight.w500,
+                                height: 1.45,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                  horizontal: 8,
+                                ),
+                                child: Text(
+                                  line.text,
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  SizedBox(
+                    width: 42,
+                    child: Text(
+                      _formatDuration(widget.controller.player.position),
+                      style: const TextStyle(fontSize: 12, color: _muted),
+                    ),
+                  ),
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 4,
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 6,
+                          disabledThumbRadius: 6,
+                        ),
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 14,
+                        ),
+                      ),
+                      child: Slider(
+                        value: positionMs.toDouble(),
+                        min: 0,
+                        max: maxMs,
+                        onChanged: item == null
+                            ? null
+                            : (value) => widget.controller.seekTo(
+                                Duration(milliseconds: value.round()),
+                              ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 42,
+                    child: Text(
+                      _formatDuration(duration),
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(fontSize: 12, color: _muted),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _LyricsPlaybackControls(controller: widget.controller),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LyricsPlaybackControls extends StatelessWidget {
+  const _LyricsPlaybackControls({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final item = controller.currentItem;
+    final singleLoop = controller.isSingleLoopMode;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        _LyricsRoundButton(
+          tooltip: singleLoop ? '单曲循环' : '随机播放',
+          icon: singleLoop ? Icons.repeat_one : Icons.shuffle,
+          selected: !singleLoop,
+          onPressed: controller.toggleLyricsPlaybackMode,
+        ),
+        _LyricsRoundButton(
+          tooltip: '上一首',
+          icon: Icons.skip_previous,
+          onPressed: controller.queue.isEmpty ? null : controller.playPrevious,
+        ),
+        _LyricsMainPlayButton(controller: controller),
+        _LyricsRoundButton(
+          tooltip: '下一首',
+          icon: Icons.skip_next,
+          onPressed: controller.queue.isEmpty ? null : controller.playNext,
+        ),
+        _LyricsRoundButton(
+          tooltip: '歌曲信息',
+          icon: Icons.more_horiz,
+          onPressed: item == null
+              ? null
+              : () => _showTrackInfoSheet(context, item),
+        ),
+      ],
+    );
+  }
+}
+
+class _LyricsRoundButton extends StatelessWidget {
+  const _LyricsRoundButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+    this.selected = false,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.square(
+      dimension: 44,
+      child: IconButton(
+        tooltip: tooltip,
+        onPressed: onPressed,
+        style: IconButton.styleFrom(
+          backgroundColor: selected ? _accent.withValues(alpha: 0.18) : null,
+          foregroundColor: selected ? _accentStrong : _ink,
+        ),
+        icon: Icon(icon),
+      ),
+    );
+  }
+}
+
+class _LyricsMainPlayButton extends StatelessWidget {
+  const _LyricsMainPlayButton({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = controller.currentItem != null;
+    return SizedBox.square(
+      dimension: 52,
+      child: IconButton.filled(
+        tooltip: controller.player.isPlaying ? '暂停' : '播放',
+        onPressed: enabled ? controller.togglePlayPause : null,
+        icon: Icon(
+          controller.player.isPlaying ? Icons.pause : Icons.play_arrow,
+          size: 26,
         ),
       ),
     );
@@ -1887,6 +2227,86 @@ void _showQueueSheet(BuildContext context, AppController controller) {
     ),
     builder: (context) => _QueueSheet(controller: controller),
   );
+}
+
+void _showTrackInfoSheet(BuildContext context, PlayerItem item) {
+  showModalBottomSheet<void>(
+    context: context,
+    useSafeArea: true,
+    backgroundColor: Colors.white,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    ),
+    builder: (context) {
+      final album = item.album.trim();
+      final path = item.localPath?.trim();
+      final source = path == null || path.isEmpty ? item.uri : path;
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 22),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 38,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: _line,
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              '歌曲信息',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 16),
+            _TrackInfoRow(label: '歌名', value: item.title),
+            _TrackInfoRow(
+              label: '歌手',
+              value: item.artist.trim().isEmpty ? '未知歌手' : item.artist,
+            ),
+            _TrackInfoRow(label: '专辑', value: album.isEmpty ? '未知专辑' : album),
+            _TrackInfoRow(label: '来源', value: source),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+class _TrackInfoRow extends StatelessWidget {
+  const _TrackInfoRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 46,
+            child: Text(
+              label,
+              style: const TextStyle(color: _muted, fontSize: 13),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: const TextStyle(fontSize: 14.5, color: _ink),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _QueueSheet extends StatefulWidget {
@@ -1962,6 +2382,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                   ? const _EmptyState(icon: Icons.queue_music, text: '播放队列为空')
                   : ReorderableListView.builder(
                       itemCount: queue.length,
+                      buildDefaultDragHandles: false,
                       onReorderItem: controller.moveQueueItemTo,
                       proxyDecorator: (child, index, animation) {
                         return Material(
@@ -1980,63 +2401,70 @@ class _QueueSheetState extends State<_QueueSheet> {
                       itemBuilder: (context, index) {
                         final item = queue[index];
                         final selected = index == controller.currentQueueIndex;
+                        final artist = item.artist.trim().isEmpty
+                            ? '未知歌手'
+                            : item.artist.trim();
+                        final album = item.album.trim().isEmpty
+                            ? '未知专辑'
+                            : item.album.trim();
                         return Padding(
                           key: ValueKey('${item.id}-${item.uri}'),
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: selected
-                                  ? _accent.withValues(alpha: 0.14)
-                                  : Colors.white,
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
                               borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                color: selected ? _accentStrong : _line,
+                              splashColor: _accent.withValues(alpha: 0.18),
+                              highlightColor: _accent.withValues(alpha: 0.10),
+                              onTap: selected
+                                  ? () {}
+                                  : () => controller.playQueueAt(index),
+                              child: Ink(
+                                decoration: BoxDecoration(
+                                  color: selected
+                                      ? _accent.withValues(alpha: 0.14)
+                                      : Colors.white,
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(
+                                    color: selected ? _accentStrong : _line,
+                                  ),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 8,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      _TrackArtwork(
+                                        coverUrl: item.coverUrl,
+                                        coverFilePath: item.coverFilePath,
+                                        icon: selected
+                                            ? Icons.graphic_eq
+                                            : Icons.music_note,
+                                        size: 48,
+                                        borderRadius: 12,
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: _TrackText(
+                                          title: item.title,
+                                          subtitle: '$artist  ·  $album',
+                                          titleWeight: FontWeight.w400,
+                                          titleSize: 15.5,
+                                          subtitleSize: 13.2,
+                                        ),
+                                      ),
+                                      _IconAction(
+                                        tooltip: '移除',
+                                        icon: Icons.close,
+                                        onPressed: () =>
+                                            controller.removeQueueAt(index),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
-                            ),
-                            child: Row(
-                              children: [
-                                _TrackArtwork(
-                                  coverUrl: item.coverUrl,
-                                  coverFilePath: item.coverFilePath,
-                                  icon: selected
-                                      ? Icons.graphic_eq
-                                      : Icons.music_note,
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: _TrackText(
-                                    title: item.title,
-                                    subtitle: item.artist.isEmpty
-                                        ? '未知歌手'
-                                        : item.artist,
-                                  ),
-                                ),
-                                _IconAction(
-                                  tooltip: '播放',
-                                  icon: selected
-                                      ? Icons.play_circle_fill
-                                      : Icons.play_arrow,
-                                  onPressed: () =>
-                                      controller.playQueueAt(index),
-                                ),
-                                _IconAction(
-                                  tooltip: '移除',
-                                  icon: Icons.close,
-                                  onPressed: () =>
-                                      controller.removeQueueAt(index),
-                                ),
-                                ReorderableDragStartListener(
-                                  index: index,
-                                  child: const Padding(
-                                    padding: EdgeInsets.all(8),
-                                    child: Icon(
-                                      Icons.drag_handle,
-                                      color: _muted,
-                                    ),
-                                  ),
-                                ),
-                              ],
                             ),
                           ),
                         );
@@ -2240,9 +2668,7 @@ Future<void> _showEditDownloadedTrackDialog(
     if (!context.mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(success ? '歌曲信息已保存' : '歌曲信息保存失败')));
+    controller.showMessage(success ? '歌曲信息已保存' : '歌曲信息保存失败');
   } finally {
     titleController.dispose();
     artistController.dispose();
@@ -2415,14 +2841,6 @@ IconData _librarySortIcon(LibrarySortMode mode) {
     LibrarySortMode.downloadedAtDesc => Icons.schedule,
     LibrarySortMode.titleAsc => Icons.sort_by_alpha,
     LibrarySortMode.artistAsc => Icons.person_outline,
-  };
-}
-
-IconData _repeatIcon(RepeatMode mode) {
-  return switch (mode) {
-    RepeatMode.one => Icons.repeat_one,
-    RepeatMode.all => Icons.repeat,
-    RepeatMode.none => Icons.repeat,
   };
 }
 

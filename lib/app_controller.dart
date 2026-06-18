@@ -37,7 +37,7 @@ class AppController extends ChangeNotifier {
   static const _cooldown403 = Duration(minutes: 10);
   static const _cooldown429 = Duration(minutes: 5);
 
-  AppSettings? settings;
+  AppSettings? settings = const AppSettings(downloadDirectory: '');
   bool isReady = false;
   int selectedIndex = 0;
   DateTime? sourceCooldownUntil;
@@ -68,7 +68,7 @@ class AppController extends ChangeNotifier {
   List<PlayerItem> queue = [];
   int currentQueueIndex = -1;
   RepeatMode repeatMode = RepeatMode.none;
-  bool shuffleEnabled = false;
+  bool shuffleEnabled = true;
 
   PlayerItem? get currentItem {
     if (currentQueueIndex < 0 || currentQueueIndex >= queue.length) {
@@ -103,6 +103,7 @@ class AppController extends ChangeNotifier {
         : downloadedTracks.where((track) {
             return track.title.toLowerCase().contains(query) ||
                 track.artist.toLowerCase().contains(query) ||
+                track.album.toLowerCase().contains(query) ||
                 track.format.toLowerCase().contains(query);
           }).toList();
 
@@ -130,9 +131,16 @@ class AppController extends ChangeNotifier {
     final savedQueue = await storage.loadPlayerQueue();
     queue = savedQueue.items;
     currentQueueIndex = savedQueue.normalizedCurrentIndex;
-    shuffleEnabled = savedQueue.shuffleEnabled;
+    shuffleEnabled = savedQueue.items.isEmpty
+        ? savedQueue.shuffleEnabled
+        : true;
+    selectedIndex = settings!.defaultStartupPageIndex == 2 ? 2 : 0;
+    final startupItem = settings!.autoPlayOnStartup ? currentItem : null;
     isReady = true;
     notifyListeners();
+    if (startupItem != null) {
+      unawaited(player.open(startupItem));
+    }
   }
 
   void selectIndex(int index) {
@@ -153,6 +161,15 @@ class AppController extends ChangeNotifier {
       return;
     }
     librarySortMode = mode;
+    notifyListeners();
+  }
+
+  void showMessage(String message) {
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+    globalMessage = trimmed;
     notifyListeners();
   }
 
@@ -215,8 +232,10 @@ class AppController extends ChangeNotifier {
 
     try {
       final item = await _resolveSearchResultPlayerItem(result, '下一首播放');
-      await _enqueueNext(item);
-      globalMessage = '已加入下一首播放：${item.title}';
+      final started = await _enqueueNextOrPlayWhenIdle(item);
+      globalMessage = started
+          ? '已开始播放：${item.title}'
+          : '已加入下一首播放：${item.title}';
     } on MusicSourceException catch (error) {
       globalMessage = error.message;
     } catch (error) {
@@ -245,8 +264,10 @@ class AppController extends ChangeNotifier {
       if (item == null) {
         return;
       }
-      await _enqueueNext(item);
-      globalMessage = '已加入下一首播放：${item.title}';
+      final started = await _enqueueNextOrPlayWhenIdle(item);
+      globalMessage = started
+          ? '已开始播放：${item.title}'
+          : '已加入下一首播放：${item.title}';
     } catch (error) {
       globalMessage = '加入下一首播放失败：${_friendlyUnexpectedError(error)}';
     } finally {
@@ -259,10 +280,17 @@ class AppController extends ChangeNotifier {
     if (index < 0 || index >= queue.length) {
       return;
     }
+    final item = await _hydrateQueueItemForPlayback(queue[index]);
+    if (item.id != queue[index].id ||
+        item.lyrics != queue[index].lyrics ||
+        item.album != queue[index].album ||
+        item.coverFilePath != queue[index].coverFilePath) {
+      queue[index] = item;
+    }
     currentQueueIndex = index;
     await _saveQueueState();
     notifyListeners();
-    await player.open(queue[index]);
+    await player.open(item);
   }
 
   Future<void> playNext() async {
@@ -270,7 +298,11 @@ class AppController extends ChangeNotifier {
       return;
     }
     if (shuffleEnabled && queue.length > 1) {
-      await playQueueAt(_randomQueueIndex());
+      var nextIndex = _shuffleRandom.nextInt(queue.length);
+      if (nextIndex == currentQueueIndex) {
+        nextIndex = (nextIndex + 1) % queue.length;
+      }
+      await playQueueAt(nextIndex);
       return;
     }
     if (currentQueueIndex < queue.length - 1) {
@@ -286,10 +318,6 @@ class AppController extends ChangeNotifier {
     }
     if (player.position > const Duration(seconds: 3)) {
       await player.seek(Duration.zero);
-      return;
-    }
-    if (shuffleEnabled && queue.length > 1) {
-      await playQueueAt(_randomQueueIndex());
       return;
     }
     if (currentQueueIndex > 0) {
@@ -329,6 +357,55 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool get isSingleLoopMode => repeatMode == RepeatMode.one;
+
+  void toggleLyricsPlaybackMode() {
+    if (isSingleLoopMode) {
+      repeatMode = RepeatMode.none;
+      shuffleEnabled = true;
+    } else {
+      repeatMode = RepeatMode.one;
+      shuffleEnabled = false;
+    }
+    unawaited(_saveQueueState());
+    notifyListeners();
+  }
+
+  Future<void> startRandomLibraryPlayback() async {
+    if (downloadedTracks.isEmpty) {
+      globalMessage = '本地列表为空，请先下载歌曲或扫描下载目录。';
+      notifyListeners();
+      return;
+    }
+
+    final shuffledTracks = List<DownloadedTrack>.from(downloadedTracks)
+      ..shuffle(_shuffleRandom);
+    final items = <PlayerItem>[];
+    for (final track in shuffledTracks) {
+      final item = await _playerItemFromDownloadedTrack(
+        track,
+        includeLyrics: false,
+        showMissingMessage: false,
+      );
+      if (item != null) {
+        items.add(item);
+      }
+    }
+
+    if (items.isEmpty) {
+      globalMessage = '没有找到可播放的本地文件，请重新扫描下载目录。';
+      notifyListeners();
+      return;
+    }
+
+    queue = items;
+    currentQueueIndex = 0;
+    shuffleEnabled = true;
+    await _saveQueueState();
+    notifyListeners();
+    await player.open(queue[currentQueueIndex]);
+  }
+
   Future<DownloadStartResult> startDownload(
     TrackSearchResult result, {
     bool allowNonMp3 = false,
@@ -364,6 +441,7 @@ class AppController extends ChangeNotifier {
         detailUrl: detail.sourceUrl,
         duration: result.duration,
         coverUrl: detail.coverUrl ?? result.coverUrl,
+        album: detail.album,
       );
       final savePath = await storage.uniqueSavePath(
         downloadDirectory: activeSettings.downloadDirectory,
@@ -379,6 +457,7 @@ class AppController extends ChangeNotifier {
         progress: 0,
         savePath: savePath,
         lyrics: detail.lyrics,
+        album: detail.album,
       );
       downloadTasks = [task, ...downloadTasks];
       _scheduleDownloads();
@@ -536,10 +615,31 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     if (settings == null) {
       return;
     }
-    settings = settings!.copyWith(concurrentDownloads: value.clamp(1, 4));
+    settings = settings!.copyWith(
+      concurrentDownloads: value.clamp(1, 4).toInt(),
+    );
     await storage.saveSettings(settings!);
     notifyListeners();
     _scheduleDownloads();
+  }
+
+  Future<void> setAutoPlayOnStartup(bool enabled) async {
+    if (settings == null) {
+      return;
+    }
+    settings = settings!.copyWith(autoPlayOnStartup: enabled);
+    await storage.saveSettings(settings!);
+    notifyListeners();
+  }
+
+  Future<void> setDefaultStartupPageIndex(int index) async {
+    if (settings == null) {
+      return;
+    }
+    final normalized = index == 2 ? 2 : 0;
+    settings = settings!.copyWith(defaultStartupPageIndex: normalized);
+    await storage.saveSettings(settings!);
+    notifyListeners();
   }
 
   Future<void> openDownloadedFile(DownloadedTrack track) async {
@@ -617,6 +717,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             p.basenameWithoutExtension(entity.path),
           ]);
           final artist = _firstNonEmpty([metadata.artist, fileName.artist]);
+          final album = _firstNonEmpty([metadata.album]);
           final coverFilePath = metadata.coverFilePath;
 
           final item = DownloadedTrack(
@@ -627,6 +728,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             format: format,
             downloadedAt: stat.modified,
             sourceUrl: entity.uri.toString(),
+            album: album,
             coverFilePath: coverFilePath,
           );
           imported.add(item);
@@ -712,6 +814,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
           file,
           title: trimmedTitle,
           artist: trimmedArtist,
+          album: track.album,
           lyrics: trimmedLyrics.isEmpty ? null : trimmedLyrics,
           cover: existingCover,
         );
@@ -1027,6 +1130,45 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     notifyListeners();
   }
 
+  Future<bool> _enqueueNextOrPlayWhenIdle(PlayerItem item) async {
+    if (!player.isPlaying) {
+      await _enqueueAndPlay(item);
+      return true;
+    }
+
+    await _enqueueNext(item);
+    return false;
+  }
+
+  Future<PlayerItem> _hydrateQueueItemForPlayback(PlayerItem item) async {
+    final localPath = item.localPath;
+    if (localPath == null || localPath.trim().isEmpty) {
+      return item;
+    }
+    final file = File(localPath);
+    if (!await file.exists()) {
+      return item;
+    }
+    Id3Metadata metadata = const Id3Metadata();
+    try {
+      metadata = await Id3LyricsEmbedder.extractMetadata(file);
+    } catch (_) {
+      metadata = const Id3Metadata();
+    }
+    var lyrics = item.lyrics;
+    if (lyrics == null || lyrics.trim().isEmpty) {
+      lyrics = metadata.lyrics ?? await _readSidecarLyrics(file);
+    }
+    final embeddedAlbum = metadata.album?.trim();
+    final album =
+        item.album.trim().isEmpty &&
+            embeddedAlbum != null &&
+            embeddedAlbum.isNotEmpty
+        ? embeddedAlbum
+        : item.album;
+    return item.copyWith(lyrics: lyrics, album: album);
+  }
+
   Future<PlayerItem> _resolveSearchResultPlayerItem(
     TrackSearchResult result,
     String action,
@@ -1050,24 +1192,46 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       headers: candidate.headers,
       coverUrl: detail.coverUrl ?? result.coverUrl,
       lyrics: detail.lyrics,
+      album: detail.album,
     );
   }
 
   Future<PlayerItem?> _playerItemFromDownloadedTrack(
-    DownloadedTrack track,
-  ) async {
+    DownloadedTrack track, {
+    bool includeLyrics = true,
+    bool showMissingMessage = true,
+  }) async {
     final file = File(track.path);
     if (!await file.exists()) {
-      globalMessage = '本地文件不存在：${track.path}';
-      notifyListeners();
+      if (showMissingMessage) {
+        globalMessage = '本地文件不存在：${track.path}';
+        notifyListeners();
+      }
       return null;
     }
 
-    String? lyrics;
-    try {
-      lyrics = await Id3LyricsEmbedder.extractLyrics(file);
-    } catch (_) {
-      lyrics = null;
+    Id3Metadata metadata = const Id3Metadata();
+    if (includeLyrics || track.album.trim().isEmpty) {
+      try {
+        metadata = await Id3LyricsEmbedder.extractMetadata(file);
+      } catch (_) {
+        metadata = const Id3Metadata();
+      }
+    }
+    var lyrics = includeLyrics ? metadata.lyrics : null;
+    if (includeLyrics && (lyrics == null || lyrics.trim().isEmpty)) {
+      lyrics = await _readSidecarLyrics(file);
+    }
+    var album = track.album;
+    final embeddedAlbum = metadata.album?.trim();
+    if (album.trim().isEmpty &&
+        embeddedAlbum != null &&
+        embeddedAlbum.isNotEmpty) {
+      album = embeddedAlbum;
+      await _updateDownloadedTrackMetadata(
+        track,
+        track.copyWith(album: embeddedAlbum),
+      );
     }
 
     return PlayerItem(
@@ -1078,7 +1242,46 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       localPath: track.path,
       coverFilePath: track.coverFilePath,
       lyrics: lyrics,
+      album: album,
     );
+  }
+
+  Future<String?> _readSidecarLyrics(File audioFile) async {
+    final basePath = p.withoutExtension(audioFile.path);
+    for (final path in ['$basePath.lrc', '$basePath.LRC']) {
+      try {
+        final file = File(path);
+        if (await file.exists()) {
+          final lyrics = await file.readAsString();
+          final trimmed = lyrics.trim();
+          if (trimmed.isNotEmpty) {
+            return trimmed;
+          }
+        }
+      } catch (_) {
+        // Ignore unreadable sidecar lyrics and keep trying metadata.
+      }
+    }
+    return null;
+  }
+
+  Future<void> _updateDownloadedTrackMetadata(
+    DownloadedTrack original,
+    DownloadedTrack updated,
+  ) async {
+    downloadedTracks = [
+      for (final item in downloadedTracks)
+        item.id == original.id && item.path == original.path ? updated : item,
+    ];
+    queue = [
+      for (final item in queue)
+        item.localPath == original.path
+            ? item.copyWith(album: updated.album)
+            : item,
+    ];
+    await storage.saveDownloadedTracks(downloadedTracks);
+    await _saveQueueState();
+    notifyListeners();
   }
 
   Future<void> _saveQueueState() {
@@ -1087,21 +1290,6 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       currentQueueIndex,
       shuffleEnabled: shuffleEnabled,
     );
-  }
-
-  int _randomQueueIndex() {
-    if (queue.isEmpty) {
-      return -1;
-    }
-    if (queue.length == 1) {
-      return 0;
-    }
-
-    var nextIndex = currentQueueIndex;
-    while (nextIndex == currentQueueIndex) {
-      nextIndex = _shuffleRandom.nextInt(queue.length);
-    }
-    return nextIndex;
   }
 
   void _handlePlaybackCompleted() {
@@ -1115,7 +1303,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   }
 
   void _scheduleDownloads() {
-    final limit = settings?.concurrentDownloads ?? 2;
+    final limit = settings?.concurrentDownloads ?? 1;
     while (_activeDownloads < limit) {
       DownloadTask? next;
       for (final task in downloadTasks) {
@@ -1223,9 +1411,6 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       task.track.coverUrl,
       referer: task.track.detailUrl,
     );
-    if ((lyrics == null || lyrics.isEmpty) && cover == null) {
-      return;
-    }
 
     try {
       await Id3LyricsEmbedder.embedMetadata(
@@ -1233,6 +1418,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         lyrics: lyrics,
         title: task.track.title,
         artist: task.track.artist,
+        album: task.album,
         cover: cover,
       );
     } catch (error) {
@@ -1398,6 +1584,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       format: task.candidate.format,
       downloadedAt: DateTime.now(),
       sourceUrl: task.track.detailUrl,
+      album: task.album,
       coverUrl: task.track.coverUrl,
       coverFilePath: coverFilePath,
     );
@@ -1414,13 +1601,28 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     var changed = false;
     final hydrated = <DownloadedTrack>[];
     for (final track in tracks) {
+      var hydratedTrack = track;
       final coverFilePath = await storage.ensureEmbeddedCoverCache(track);
       if (coverFilePath != null && coverFilePath != track.coverFilePath) {
-        hydrated.add(track.copyWith(coverFilePath: coverFilePath));
+        hydratedTrack = hydratedTrack.copyWith(coverFilePath: coverFilePath);
         changed = true;
-      } else {
-        hydrated.add(track);
       }
+      if (hydratedTrack.format.toLowerCase() == 'mp3' &&
+          hydratedTrack.album.trim().isEmpty) {
+        try {
+          final metadata = await Id3LyricsEmbedder.extractMetadata(
+            File(hydratedTrack.path),
+          );
+          final album = metadata.album?.trim();
+          if (album != null && album.isNotEmpty) {
+            hydratedTrack = hydratedTrack.copyWith(album: album);
+            changed = true;
+          }
+        } catch (_) {
+          // Keep the saved record if the file cannot be read.
+        }
+      }
+      hydrated.add(hydratedTrack);
     }
     if (changed) {
       await storage.saveDownloadedTracks(hydrated);
@@ -1447,6 +1649,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     return _LocalAudioMetadata(
       title: metadata.title,
       artist: metadata.artist,
+      album: metadata.album,
       coverFilePath: coverFilePath,
     );
   }
@@ -1592,10 +1795,16 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 class _LocalAudioMetadata {
-  const _LocalAudioMetadata({this.title, this.artist, this.coverFilePath});
+  const _LocalAudioMetadata({
+    this.title,
+    this.artist,
+    this.album,
+    this.coverFilePath,
+  });
 
   final String? title;
   final String? artist;
+  final String? album;
   final String? coverFilePath;
 }
 

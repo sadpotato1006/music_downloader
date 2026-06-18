@@ -20,19 +20,21 @@ void main() {
     expect(embedded.sublist(embedded.length - sourceMp3.length), sourceMp3);
   });
 
-  test('embeds title and artist without lyrics or cover', () {
+  test('embeds title artist and album without lyrics or cover', () {
     final sourceMp3 = <int>[0xFF, 0xFB, 0x90, 0x64, 0x00];
 
     final embedded = Id3LyricsEmbedder.embedMetadataBytes(
       sourceMp3,
       title: 'Song',
       artist: 'Artist',
+      album: 'Album',
     );
 
     final text = latin1.decode(embedded, allowInvalid: true);
     expect(ascii.decode(embedded.sublist(0, 3)), 'ID3');
     expect(text, contains('TIT2'));
     expect(text, contains('TPE1'));
+    expect(text, contains('TALB'));
     expect(text, isNot(contains('USLT')));
     expect(embedded.sublist(embedded.length - sourceMp3.length), sourceMp3);
   });
@@ -114,23 +116,100 @@ void main() {
     expect(Id3LyricsEmbedder.extractLyricsBytes(embedded), lyrics);
   });
 
-  test('extracts embedded id3 title artist lyrics and cover metadata', () {
-    final sourceMp3 = <int>[0xFF, 0xFB, 0x90, 0x64, 0x00];
-    final coverBytes = Uint8List.fromList([0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]);
-    final embedded = Id3LyricsEmbedder.embedMetadataBytes(
-      sourceMp3,
-      title: 'Song',
-      artist: 'Artist',
-      lyrics: '[00:00.00]line',
-      cover: Id3CoverImage(mimeType: 'image/jpeg', bytes: coverBytes),
-    );
+  test('extracts lyrics from a user text lyrics frame', () {
+    final embedded = _id3WithFrames([
+      _id3Frame('TXXX', [
+        3,
+        ...utf8.encode('LYRICS'),
+        0,
+        ...utf8.encode('[00:00.00]line'),
+      ]),
+    ]);
 
-    final metadata = Id3LyricsEmbedder.extractMetadataBytes(embedded);
-
-    expect(metadata.title, 'Song');
-    expect(metadata.artist, 'Artist');
-    expect(metadata.lyrics, '[00:00.00]line');
-    expect(metadata.cover?.mimeType, 'image/jpeg');
-    expect(metadata.cover?.bytes, coverBytes);
+    expect(Id3LyricsEmbedder.extractLyricsBytes(embedded), '[00:00.00]line');
   });
+
+  test('extracts synchronized id3 lyrics as lrc text', () {
+    final embedded = _id3WithFrames([
+      _id3Frame('SYLT', [
+        3,
+        ...ascii.encode('eng'),
+        2,
+        1,
+        0,
+        ...utf8.encode('line'),
+        0,
+        ..._uint32(1200),
+      ]),
+    ]);
+
+    expect(Id3LyricsEmbedder.extractLyricsBytes(embedded), '[00:01.20]line');
+  });
+
+  test(
+    'extracts embedded id3 title artist album lyrics and cover metadata',
+    () {
+      final sourceMp3 = <int>[0xFF, 0xFB, 0x90, 0x64, 0x00];
+      final coverBytes = Uint8List.fromList([0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]);
+      final embedded = Id3LyricsEmbedder.embedMetadataBytes(
+        sourceMp3,
+        title: 'Song',
+        artist: 'Artist',
+        album: 'Album',
+        lyrics: '[00:00.00]line',
+        cover: Id3CoverImage(mimeType: 'image/jpeg', bytes: coverBytes),
+      );
+
+      final metadata = Id3LyricsEmbedder.extractMetadataBytes(embedded);
+
+      expect(metadata.title, 'Song');
+      expect(metadata.artist, 'Artist');
+      expect(metadata.album, 'Album');
+      expect(metadata.lyrics, '[00:00.00]line');
+      expect(metadata.cover?.mimeType, 'image/jpeg');
+      expect(metadata.cover?.bytes, coverBytes);
+    },
+  );
+}
+
+Uint8List _id3WithFrames(List<Uint8List> frames) {
+  final tagBody = BytesBuilder(copy: false);
+  for (final frame in frames) {
+    tagBody.add(frame);
+  }
+  final tagBodyBytes = tagBody.toBytes();
+  final output = BytesBuilder(copy: false)
+    ..add(ascii.encode('ID3'))
+    ..add([4, 0, 0])
+    ..add(_synchsafe(tagBodyBytes.length))
+    ..add(tagBodyBytes)
+    ..add([0xFF, 0xFB, 0x90, 0x64, 0x00]);
+  return output.toBytes();
+}
+
+Uint8List _id3Frame(String id, List<int> payload) {
+  final output = BytesBuilder(copy: false)
+    ..add(ascii.encode(id))
+    ..add(_uint32(payload.length))
+    ..add([0, 0])
+    ..add(payload);
+  return output.toBytes();
+}
+
+Uint8List _uint32(int value) {
+  return Uint8List.fromList([
+    (value >> 24) & 0xFF,
+    (value >> 16) & 0xFF,
+    (value >> 8) & 0xFF,
+    value & 0xFF,
+  ]);
+}
+
+Uint8List _synchsafe(int value) {
+  return Uint8List.fromList([
+    (value >> 21) & 0x7F,
+    (value >> 14) & 0x7F,
+    (value >> 7) & 0x7F,
+    value & 0x7F,
+  ]);
 }

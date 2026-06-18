@@ -66,6 +66,7 @@ class GequbaoSource implements MusicSource {
       rawMetadata: detail.rawMetadata,
       lyrics: detail.lyrics,
       coverUrl: detail.coverUrl,
+      album: detail.album,
     );
   }
 
@@ -279,10 +280,7 @@ class GequbaoParser {
     final appData = parseAppData(html);
     if (appData != null) {
       for (final entry in appData.entries) {
-        final value = entry.value;
-        if (value is String || value is num || value is bool) {
-          metadata[entry.key] = value.toString();
-        }
+        _collectAppDataMetadata(metadata, entry.key, entry.value);
       }
     }
     final pageTitle = _firstText(document, const [
@@ -307,6 +305,23 @@ class GequbaoParser {
         metadata['歌手'] ??
         metadata['演唱'] ??
         (parsedTitle.artist.isNotEmpty ? parsedTitle.artist : fallback.artist);
+    final album =
+        _firstMetadataValue(metadata, const [
+          'mp3_album',
+          'album',
+          'album_name',
+          'albumName',
+          'album_title',
+          'albumTitle',
+          'albumname',
+          'song_album',
+          'songAlbum',
+          'music_album',
+          'musicAlbum',
+          '专辑',
+        ]) ??
+        _extractAlbumFromDocument(document) ??
+        fallback.album;
     final sourceUrl = baseUrl.resolve(fallback.detailUrl).toString();
 
     return TrackDetail(
@@ -318,6 +333,7 @@ class GequbaoParser {
       lyrics: _extractLyrics(html, document, metadata),
       coverUrl:
           _extractCoverUrl(document, baseUrl, metadata) ?? fallback.coverUrl,
+      album: album,
     );
   }
 
@@ -333,6 +349,32 @@ class GequbaoParser {
       return jsonDecode(jsonText) as Map<String, dynamic>;
     } catch (_) {
       return null;
+    }
+  }
+
+  static void _collectAppDataMetadata(
+    Map<String, String> metadata,
+    String key,
+    Object? value,
+  ) {
+    if (value is String || value is num || value is bool) {
+      metadata[key] = value.toString();
+      return;
+    }
+    if (value is Map) {
+      for (final entry in value.entries) {
+        final childKey = entry.key.toString();
+        _collectAppDataMetadata(metadata, childKey, entry.value);
+        _collectAppDataMetadata(metadata, '${key}_$childKey', entry.value);
+      }
+    }
+    if (value is Iterable) {
+      var index = 0;
+      for (final item in value) {
+        _collectAppDataMetadata(metadata, key, item);
+        _collectAppDataMetadata(metadata, '${key}_$index', item);
+        index += 1;
+      }
     }
   }
 
@@ -658,13 +700,64 @@ class GequbaoParser {
 
     for (final line in lines) {
       final match = RegExp(
-        r'^(歌名|歌曲|歌手|演唱|专辑|音质|大小)[:：]\s*(.+)$',
+        r'^(歌名|歌曲|歌手|演唱|专辑|唱片|音质|大小)[:：]\s*(.+)$',
       ).firstMatch(line);
       if (match != null) {
         metadata[match.group(1)!] = match.group(2)!.trim();
       }
     }
     return metadata;
+  }
+
+  static String? _firstMetadataValue(
+    Map<String, String> metadata,
+    List<String> keys,
+  ) {
+    for (final key in keys) {
+      final value = metadata[key]?.trim();
+      if (value != null && value.isNotEmpty) {
+        return value;
+      }
+    }
+    final normalizedKeys = {for (final key in keys) key.toLowerCase()};
+    for (final entry in metadata.entries) {
+      final key = entry.key.trim().toLowerCase();
+      final value = entry.value.trim();
+      if (value.isNotEmpty && normalizedKeys.contains(key)) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  static String? _extractAlbumFromDocument(dom.Document document) {
+    for (final selector in const [
+      '[itemprop="inAlbum"]',
+      '[itemprop="album"]',
+      '.album',
+      '.album-name',
+      '.song-album',
+    ]) {
+      final text = _normalizeSpaces(
+        document.querySelector(selector)?.text ?? '',
+      );
+      if (text.isNotEmpty) {
+        return text;
+      }
+    }
+    for (final selector in const [
+      'meta[property="music:album"]',
+      'meta[name="music:album"]',
+      'meta[property="og:music:album"]',
+      'meta[name="album"]',
+    ]) {
+      final content = document.querySelector(selector)?.attributes['content'];
+      final text = _normalizeSpaces(content ?? '');
+      if (text.isNotEmpty) {
+        return text;
+      }
+    }
+    return null;
   }
 
   static String _firstText(dom.Document document, List<String> selectors) {
