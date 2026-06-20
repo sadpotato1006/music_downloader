@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:media_kit/media_kit.dart';
 
+import 'album_metadata_service.dart';
 import 'app_controller.dart';
 import 'gequbao_source.dart';
 import 'models.dart';
@@ -799,7 +800,7 @@ class _LibraryPageState extends State<LibraryPage> {
             textInputAction: TextInputAction.search,
             onSubmitted: (value) => Navigator.pop(context, value),
             decoration: const InputDecoration(
-              hintText: '歌名、歌手或专辑',
+              hintText: '歌名、歌手、专辑、歌词或拼音首字母',
               prefixIcon: Icon(Icons.search),
             ),
           ),
@@ -1008,6 +1009,35 @@ class _DirectoryScanButton extends StatelessWidget {
   }
 }
 
+class _AlbumMatchButton extends StatelessWidget {
+  const _AlbumMatchButton({required this.controller, required this.onPressed});
+
+  final AppController controller;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasMissingAlbums = controller.downloadedTracks.any(
+      (track) => track.album.trim().isEmpty,
+    );
+    final isBusy = controller.isMatchingLocalAlbums;
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: isBusy || !hasMissingAlbums ? null : onPressed,
+        icon: isBusy
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.album_outlined),
+        label: Text(isBusy ? '正在匹配专辑名称' : '匹配所有歌曲缺失专辑名称'),
+      ),
+    );
+  }
+}
+
 class _LibrarySortMenu extends StatelessWidget {
   const _LibrarySortMenu({required this.controller});
 
@@ -1142,9 +1172,18 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 12),
           _SettingPanel(
             title: '本地歌曲',
-            child: _DirectoryScanButton(
-              controller: controller,
-              onPressed: () => _scanDownloadDirectory(context),
+            child: Column(
+              children: [
+                _DirectoryScanButton(
+                  controller: controller,
+                  onPressed: () => _scanDownloadDirectory(context),
+                ),
+                const SizedBox(height: 10),
+                _AlbumMatchButton(
+                  controller: controller,
+                  onPressed: _matchMissingAlbums,
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 12),
@@ -1327,6 +1366,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _scanDownloadDirectory(BuildContext context) async {
     await controller.scanCurrentDownloadDirectory();
+  }
+
+  Future<void> _matchMissingAlbums() async {
+    await controller.matchMissingDownloadedAlbums();
   }
 
   Future<void> _setConcurrentDownloads(BuildContext context, int value) async {
@@ -1596,7 +1639,7 @@ class _ResponsiveTrackList extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final columns = _trackListColumnCount(context, constraints);
+        final columns = _trackListColumnCount(constraints);
         if (columns <= 1) {
           return ListView.separated(
             padding: EdgeInsets.zero,
@@ -1622,10 +1665,8 @@ class _ResponsiveTrackList extends StatelessWidget {
   }
 }
 
-int _trackListColumnCount(BuildContext context, BoxConstraints constraints) {
-  final window = MediaQuery.sizeOf(context);
-  final isWideAndShort = window.height / window.width <= 0.72;
-  if (!isWideAndShort || constraints.maxWidth < 980) {
+int _trackListColumnCount(BoxConstraints constraints) {
+  if (constraints.maxWidth < 980) {
     return 1;
   }
   if (constraints.maxWidth >= 1640) {
@@ -1896,8 +1937,12 @@ class _LyricsSheet extends StatefulWidget {
 }
 
 class _LyricsSheetState extends State<_LyricsSheet> {
+  static const _lyricsMinListPadding = 84.0;
+
   final ScrollController scrollController = ScrollController();
+  final Map<int, GlobalKey> _lyricLineKeys = {};
   int lastScrolledIndex = -1;
+  String? lastScrolledItemId;
 
   @override
   void initState() {
@@ -1926,7 +1971,12 @@ class _LyricsSheetState extends State<_LyricsSheet> {
       if (!mounted || !scrollController.hasClients) {
         return;
       }
-      final lines = _parseLyricLines(widget.controller.currentItem?.lyrics);
+      final item = widget.controller.currentItem;
+      if (item?.id != lastScrolledItemId) {
+        lastScrolledItemId = item?.id;
+        lastScrolledIndex = -1;
+      }
+      final lines = _parseLyricLines(item?.lyrics);
       final currentIndex = _currentLyricIndex(
         lines,
         widget.controller.player.position,
@@ -1935,18 +1985,16 @@ class _LyricsSheetState extends State<_LyricsSheet> {
         return;
       }
       lastScrolledIndex = currentIndex;
-      var target = currentIndex * 46.0 - 140;
-      if (target < 0) {
-        target = 0;
+      final lineContext = _lyricLineKeys[currentIndex]?.currentContext;
+      if (lineContext == null || !lineContext.mounted) {
+        return;
       }
-      final maxExtent = scrollController.position.maxScrollExtent;
-      if (target > maxExtent) {
-        target = maxExtent;
-      }
-      scrollController.animateTo(
-        target,
-        duration: const Duration(milliseconds: 260),
+      Scrollable.ensureVisible(
+        lineContext,
+        alignment: 0.5,
+        duration: const Duration(milliseconds: 240),
         curve: Curves.easeOutCubic,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
       );
     });
   }
@@ -2034,35 +2082,61 @@ class _LyricsSheetState extends State<_LyricsSheet> {
               Expanded(
                 child: lines.isEmpty
                     ? const _EmptyState(icon: Icons.lyrics, text: '这首歌没有内嵌歌词')
-                    : ListView.builder(
-                        controller: scrollController,
-                        padding: const EdgeInsets.symmetric(vertical: 84),
-                        itemCount: lines.length,
-                        itemBuilder: (context, index) {
-                          final selected = index == currentIndex;
-                          final line = lines[index];
-                          return InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: () => widget.controller.seekTo(line.time),
-                            child: AnimatedDefaultTextStyle(
-                              duration: const Duration(milliseconds: 160),
-                              style: TextStyle(
-                                color: selected ? _accentStrong : _muted,
-                                fontSize: selected ? 18 : 15,
-                                fontWeight: selected
-                                    ? FontWeight.w800
-                                    : FontWeight.w500,
-                                height: 1.45,
+                    : LayoutBuilder(
+                        builder: (context, constraints) {
+                          final verticalPadding =
+                              (constraints.maxHeight / 2 - 32)
+                                  .clamp(_lyricsMinListPadding, 260.0)
+                                  .toDouble();
+                          return SingleChildScrollView(
+                            controller: scrollController,
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(
+                                vertical: verticalPadding,
                               ),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                  horizontal: 8,
-                                ),
-                                child: Text(
-                                  line.text,
-                                  textAlign: TextAlign.center,
-                                ),
+                              child: Column(
+                                children: [
+                                  for (
+                                    var index = 0;
+                                    index < lines.length;
+                                    index += 1
+                                  )
+                                    InkWell(
+                                      key: _lyricLineKeys.putIfAbsent(
+                                        index,
+                                        GlobalKey.new,
+                                      ),
+                                      borderRadius: BorderRadius.circular(12),
+                                      onTap: () => widget.controller.seekTo(
+                                        lines[index].time,
+                                      ),
+                                      child: AnimatedDefaultTextStyle(
+                                        duration: const Duration(
+                                          milliseconds: 160,
+                                        ),
+                                        style: TextStyle(
+                                          color: index == currentIndex
+                                              ? _accentStrong
+                                              : _muted,
+                                          fontSize: 16,
+                                          fontWeight: index == currentIndex
+                                              ? FontWeight.w800
+                                              : FontWeight.w500,
+                                          height: 1.45,
+                                        ),
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 8,
+                                            horizontal: 8,
+                                          ),
+                                          child: Text(
+                                            lines[index].text,
+                                            textAlign: TextAlign.center,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
                               ),
                             ),
                           );
@@ -2136,10 +2210,10 @@ class _LyricsPlaybackControls extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         _LyricsRoundButton(
-          tooltip: singleLoop ? '单曲循环' : '随机播放',
-          icon: singleLoop ? Icons.repeat_one : Icons.shuffle,
-          selected: !singleLoop,
-          onPressed: controller.toggleLyricsPlaybackMode,
+          tooltip: singleLoop ? '关闭单曲循环' : '开启单曲循环',
+          icon: singleLoop ? Icons.repeat_one : Icons.repeat,
+          selected: singleLoop,
+          onPressed: controller.toggleSingleLoopMode,
         ),
         _LyricsRoundButton(
           tooltip: '上一首',
@@ -2319,22 +2393,62 @@ class _QueueSheet extends StatefulWidget {
 }
 
 class _QueueSheetState extends State<_QueueSheet> {
+  static const _queueItemExtent = 80.0;
+
+  final ScrollController queueScrollController = ScrollController();
+  int? _lastCenteredQueueIndex;
+
   @override
   void initState() {
     super.initState();
     widget.controller.addListener(_handleChanged);
+    _scheduleCurrentQueueScroll(force: true);
   }
 
   @override
   void dispose() {
     widget.controller.removeListener(_handleChanged);
+    queueScrollController.dispose();
     super.dispose();
   }
 
   void _handleChanged() {
     if (mounted) {
       setState(() {});
+      _scheduleCurrentQueueScroll();
     }
+  }
+
+  void _scheduleCurrentQueueScroll({bool force = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !queueScrollController.hasClients) {
+        return;
+      }
+      final index = widget.controller.currentQueueIndex;
+      final queueLength = widget.controller.queue.length;
+      if (index < 0 || index >= queueLength) {
+        return;
+      }
+      if (!force && _lastCenteredQueueIndex == index) {
+        return;
+      }
+      _lastCenteredQueueIndex = index;
+
+      final position = queueScrollController.position;
+      final rawTarget =
+          index * _queueItemExtent +
+          _queueItemExtent / 2 -
+          position.viewportDimension / 2;
+      final target = rawTarget.clamp(0.0, position.maxScrollExtent).toDouble();
+      if ((position.pixels - target).abs() < 2) {
+        return;
+      }
+      queueScrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    });
   }
 
   @override
@@ -2361,6 +2475,8 @@ class _QueueSheetState extends State<_QueueSheet> {
                 const Expanded(
                   child: Text(
                     '播放队列',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
                   ),
                 ),
@@ -2369,6 +2485,17 @@ class _QueueSheetState extends State<_QueueSheet> {
                   style: const TextStyle(color: _muted),
                 ),
                 const SizedBox(width: 10),
+                _IconAction(
+                  tooltip: '重新随机接下来的歌曲',
+                  icon: Icons.shuffle,
+                  selected:
+                      controller.shuffleEnabled &&
+                      controller.canReshuffleUpcomingQueue,
+                  onPressed: controller.canReshuffleUpcomingQueue
+                      ? () => controller.reshuffleUpcomingQueue()
+                      : null,
+                ),
+                const SizedBox(width: 4),
                 TextButton.icon(
                   onPressed: queue.isEmpty ? null : controller.clearQueue,
                   icon: const Icon(Icons.clear_all),
@@ -2381,6 +2508,8 @@ class _QueueSheetState extends State<_QueueSheet> {
               child: queue.isEmpty
                   ? const _EmptyState(icon: Icons.queue_music, text: '播放队列为空')
                   : ReorderableListView.builder(
+                      scrollController: queueScrollController,
+                      itemExtent: _queueItemExtent,
                       itemCount: queue.length,
                       buildDefaultDragHandles: false,
                       onReorderItem: controller.moveQueueItemTo,
@@ -2584,6 +2713,7 @@ Future<void> _showEditDownloadedTrackDialog(
 
   final titleController = TextEditingController(text: track.title);
   final artistController = TextEditingController(text: track.artist);
+  final albumController = TextEditingController(text: track.album);
   final lyricsController = TextEditingController(text: lyrics);
   final coverController = TextEditingController();
 
@@ -2613,6 +2743,15 @@ Future<void> _showEditDownloadedTrackDialog(
                   decoration: const InputDecoration(
                     labelText: '歌手',
                     prefixIcon: Icon(Icons.person_outline),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: albumController,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: '专辑',
+                    prefixIcon: Icon(Icons.album_outlined),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -2662,6 +2801,7 @@ Future<void> _showEditDownloadedTrackDialog(
       track,
       title: titleController.text,
       artist: artistController.text,
+      album: albumController.text,
       lyrics: lyricsController.text,
       coverInput: coverController.text,
     );
@@ -2672,12 +2812,126 @@ Future<void> _showEditDownloadedTrackDialog(
   } finally {
     titleController.dispose();
     artistController.dispose();
+    albumController.dispose();
     lyricsController.dispose();
     coverController.dispose();
   }
 }
 
-enum _LibraryTrackAction { edit, openFile, revealFile, removeRecord }
+Future<void> _fetchAlbumForDownloadedTrack(
+  BuildContext context,
+  AppController controller,
+  DownloadedTrack track,
+) async {
+  final candidates = await controller.findDownloadedAlbumCandidates(track);
+  if (!context.mounted) {
+    return;
+  }
+  if (candidates.isEmpty) {
+    return;
+  }
+
+  final best = candidates.first;
+  AlbumMetadataMatch? selected;
+  if (best.score >= AlbumMetadataService.highConfidenceScore) {
+    selected = best;
+  } else {
+    selected = await _showAlbumCandidateDialog(context, candidates);
+    if (!context.mounted || selected == null) {
+      return;
+    }
+  }
+
+  final success = await controller.applyDownloadedAlbumName(
+    track,
+    selected.album,
+  );
+  if (!context.mounted) {
+    return;
+  }
+  controller.showMessage(success ? '已设置专辑名称：${selected.album}' : '专辑名称写入失败');
+}
+
+Future<AlbumMetadataMatch?> _showAlbumCandidateDialog(
+  BuildContext context,
+  List<AlbumMetadataMatch> candidates,
+) {
+  return showDialog<AlbumMetadataMatch>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        title: const Text('选择专辑名称'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '没有找到高置信度结果，可以从下面的候选中手动选择一个。',
+                style: TextStyle(color: _muted, fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(context).height * 0.52,
+                ),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: candidates.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final candidate = candidates[index];
+                    final date = candidate.releaseDate?.trim();
+                    final info = [
+                      candidate.recordingArtist.trim().isEmpty
+                          ? '未知歌手'
+                          : candidate.recordingArtist.trim(),
+                      candidate.recordingTitle.trim().isEmpty
+                          ? null
+                          : candidate.recordingTitle.trim(),
+                      if (date != null && date.isNotEmpty) date,
+                      '置信度 ${candidate.score.round()}',
+                    ].whereType<String>().join(' · ');
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.album_outlined),
+                      title: Text(
+                        candidate.album,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        info,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () => Navigator.pop(context, candidate),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+enum _LibraryTrackAction {
+  edit,
+  fetchAlbum,
+  openFile,
+  revealFile,
+  removeRecord,
+}
 
 class _LibraryMoreActions extends StatelessWidget {
   const _LibraryMoreActions({required this.controller, required this.track});
@@ -2703,6 +2957,11 @@ class _LibraryMoreActions extends StatelessWidget {
             case _LibraryTrackAction.edit:
               _showEditDownloadedTrackDialog(context, controller, track);
               return;
+            case _LibraryTrackAction.fetchAlbum:
+              unawaited(
+                _fetchAlbumForDownloadedTrack(context, controller, track),
+              );
+              return;
             case _LibraryTrackAction.openFile:
               controller.openDownloadedFile(track);
               return;
@@ -2718,6 +2977,10 @@ class _LibraryMoreActions extends StatelessWidget {
           PopupMenuItem(
             value: _LibraryTrackAction.edit,
             child: _MoreActionLabel(icon: Icons.edit_outlined, label: '编辑信息'),
+          ),
+          PopupMenuItem(
+            value: _LibraryTrackAction.fetchAlbum,
+            child: _MoreActionLabel(icon: Icons.manage_search, label: '获取专辑名称'),
           ),
           PopupMenuItem(
             value: _LibraryTrackAction.openFile,

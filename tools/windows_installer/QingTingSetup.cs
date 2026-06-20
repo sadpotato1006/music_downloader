@@ -24,7 +24,7 @@ namespace QingTingInstaller
     {
         private const string AppId = "QingTing";
         private const string AppName = "\u9752\u542c";
-        private const string Version = "1.1.0";
+        private const string Version = "1.2.0";
         private const string Publisher = "Pobb";
 
         private readonly Panel content;
