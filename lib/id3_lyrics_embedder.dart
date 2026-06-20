@@ -52,68 +52,52 @@ class Id3LyricsEmbedder {
 
   static Id3Metadata extractMetadataBytes(List<int> bytes) {
     final source = Uint8List.fromList(bytes);
-    if (source.length < 10 ||
-        source[0] != 0x49 ||
-        source[1] != 0x44 ||
-        source[2] != 0x33) {
-      return const Id3Metadata();
-    }
-
-    final majorVersion = source[3];
-    if (majorVersion < 3 || majorVersion > 4) {
-      return const Id3Metadata();
-    }
-
-    final tagBodySize = _readSynchsafe(source, 6);
-    final tagEnd = (10 + tagBodySize).clamp(10, source.length);
-    var offset = 10;
     String? title;
     String? artist;
     String? album;
     String? lyrics;
     Id3CoverImage? cover;
 
-    while (offset + 10 <= tagEnd) {
-      final frameIdBytes = source.sublist(offset, offset + 4);
-      if (frameIdBytes.every((byte) => byte == 0)) {
-        break;
-      }
-
-      final frameId = ascii.decode(frameIdBytes, allowInvalid: true);
-      final frameSize = majorVersion == 4
-          ? _readSynchsafe(source, offset + 4)
-          : _readUint32(source, offset + 4);
-      if (frameSize <= 0 || offset + 10 + frameSize > tagEnd) {
-        break;
-      }
-
-      final payloadStart = offset + 10;
-      final payloadEnd = payloadStart + frameSize;
-      final payload = source.sublist(payloadStart, payloadEnd);
-      switch (frameId) {
+    for (final frame in _readId3Frames(source)) {
+      switch (frame.id) {
         case 'TIT2':
-          title ??= _parseTextFrame(payload);
+        case 'TT2':
+          title ??= _parseTextFrame(frame.payload);
           break;
         case 'TPE1':
-          artist ??= _parseTextFrame(payload);
+        case 'TP1':
+          artist ??= _parseTextFrame(frame.payload);
           break;
         case 'TALB':
-          album ??= _parseTextFrame(payload);
+        case 'TAL':
+          album ??= _parseTextFrame(frame.payload);
           break;
         case 'USLT':
-          lyrics ??= _parseUnsynchronizedLyricsFrame(payload);
+        case 'ULT':
+          lyrics ??= _parseUnsynchronizedLyricsFrame(frame.payload);
           break;
         case 'SYLT':
-          lyrics ??= _parseSynchronizedLyricsFrame(payload);
+        case 'SLT':
+          lyrics ??= _parseSynchronizedLyricsFrame(frame.payload);
           break;
         case 'TXXX':
-          lyrics ??= _parseUserTextLyricsFrame(payload);
+        case 'TXX':
+          lyrics ??= _parseUserTextLyricsFrame(frame.payload);
+          break;
+        case 'COMM':
+        case 'COM':
+          lyrics ??= _parseCommentLyricsFrame(frame.payload);
           break;
         case 'APIC':
-          cover ??= _parseAttachedPictureFrame(payload);
+          cover ??= _parseAttachedPictureFrame(frame.payload);
+          break;
+        case 'PIC':
+          cover ??= _parseAttachedPictureFrame(
+            frame.payload,
+            legacyPictureFrame: true,
+          );
           break;
       }
-      offset = payloadEnd;
     }
 
     return Id3Metadata(
@@ -134,102 +118,47 @@ class Id3LyricsEmbedder {
 
   static Id3CoverImage? extractCoverBytes(List<int> bytes) {
     final source = Uint8List.fromList(bytes);
-    if (source.length < 10 ||
-        source[0] != 0x49 ||
-        source[1] != 0x44 ||
-        source[2] != 0x33) {
-      return null;
-    }
-
-    final majorVersion = source[3];
-    if (majorVersion < 3 || majorVersion > 4) {
-      return null;
-    }
-
-    final tagBodySize = _readSynchsafe(source, 6);
-    final tagEnd = (10 + tagBodySize).clamp(10, source.length);
-    var offset = 10;
-
-    while (offset + 10 <= tagEnd) {
-      final frameIdBytes = source.sublist(offset, offset + 4);
-      if (frameIdBytes.every((byte) => byte == 0)) {
-        break;
+    for (final frame in _readId3Frames(source)) {
+      if (frame.id == 'APIC') {
+        return _parseAttachedPictureFrame(frame.payload);
       }
-
-      final frameId = ascii.decode(frameIdBytes, allowInvalid: true);
-      final frameSize = majorVersion == 4
-          ? _readSynchsafe(source, offset + 4)
-          : _readUint32(source, offset + 4);
-      if (frameSize <= 0 || offset + 10 + frameSize > tagEnd) {
-        break;
-      }
-
-      final payloadStart = offset + 10;
-      final payloadEnd = payloadStart + frameSize;
-      if (frameId == 'APIC') {
+      if (frame.id == 'PIC') {
         return _parseAttachedPictureFrame(
-          source.sublist(payloadStart, payloadEnd),
+          frame.payload,
+          legacyPictureFrame: true,
         );
       }
-      offset = payloadEnd;
     }
     return null;
   }
 
   static String? extractLyricsBytes(List<int> bytes) {
     final source = Uint8List.fromList(bytes);
-    if (source.length < 10 ||
-        source[0] != 0x49 ||
-        source[1] != 0x44 ||
-        source[2] != 0x33) {
-      return null;
-    }
-
-    final majorVersion = source[3];
-    if (majorVersion < 3 || majorVersion > 4) {
-      return null;
-    }
-
-    final tagBodySize = _readSynchsafe(source, 6);
-    final tagEnd = (10 + tagBodySize).clamp(10, source.length);
-    var offset = 10;
-
-    while (offset + 10 <= tagEnd) {
-      final frameIdBytes = source.sublist(offset, offset + 4);
-      if (frameIdBytes.every((byte) => byte == 0)) {
-        break;
-      }
-
-      final frameId = ascii.decode(frameIdBytes, allowInvalid: true);
-      final frameSize = majorVersion == 4
-          ? _readSynchsafe(source, offset + 4)
-          : _readUint32(source, offset + 4);
-      if (frameSize <= 0 || offset + 10 + frameSize > tagEnd) {
-        break;
-      }
-
-      final payloadStart = offset + 10;
-      final payloadEnd = payloadStart + frameSize;
-      final payload = source.sublist(payloadStart, payloadEnd);
-      if (frameId == 'USLT') {
-        final lyrics = _parseUnsynchronizedLyricsFrame(payload);
+    for (final frame in _readId3Frames(source)) {
+      if (frame.id == 'USLT' || frame.id == 'ULT') {
+        final lyrics = _parseUnsynchronizedLyricsFrame(frame.payload);
         if (lyrics != null) {
           return lyrics;
         }
       }
-      if (frameId == 'SYLT') {
-        final lyrics = _parseSynchronizedLyricsFrame(payload);
+      if (frame.id == 'SYLT' || frame.id == 'SLT') {
+        final lyrics = _parseSynchronizedLyricsFrame(frame.payload);
         if (lyrics != null) {
           return lyrics;
         }
       }
-      if (frameId == 'TXXX') {
-        final lyrics = _parseUserTextLyricsFrame(payload);
+      if (frame.id == 'TXXX' || frame.id == 'TXX') {
+        final lyrics = _parseUserTextLyricsFrame(frame.payload);
         if (lyrics != null) {
           return lyrics;
         }
       }
-      offset = payloadEnd;
+      if (frame.id == 'COMM' || frame.id == 'COM') {
+        final lyrics = _parseCommentLyricsFrame(frame.payload);
+        if (lyrics != null) {
+          return lyrics;
+        }
+      }
     }
     return null;
   }
@@ -318,6 +247,136 @@ class Id3LyricsEmbedder {
     return bytes.sublist(tagEnd);
   }
 
+  static Iterable<_Id3Frame> _readId3Frames(Uint8List source) sync* {
+    if (source.length < 10 ||
+        source[0] != 0x49 ||
+        source[1] != 0x44 ||
+        source[2] != 0x33) {
+      return;
+    }
+
+    final majorVersion = source[3];
+    if (majorVersion < 2 || majorVersion > 4) {
+      return;
+    }
+
+    final tagFlags = source[5];
+    final tagBodySize = _readSynchsafe(source, 6);
+    final tagEnd = (10 + tagBodySize).clamp(10, source.length).toInt();
+    var offset = 10;
+
+    if ((tagFlags & 0x40) != 0) {
+      if (majorVersion == 3 && offset + 4 <= tagEnd) {
+        offset += 4 + _readUint32(source, offset);
+      } else if (majorVersion == 4 && offset + 4 <= tagEnd) {
+        final extendedHeaderSize = _readSynchsafe(source, offset);
+        offset += extendedHeaderSize <= 0 ? 4 : extendedHeaderSize;
+      }
+      if (offset >= tagEnd) {
+        return;
+      }
+    }
+
+    final tagUnsynchronized = (tagFlags & 0x80) != 0;
+    while (offset + (majorVersion == 2 ? 6 : 10) <= tagEnd) {
+      final idLength = majorVersion == 2 ? 3 : 4;
+      final headerLength = majorVersion == 2 ? 6 : 10;
+      final frameIdBytes = source.sublist(offset, offset + idLength);
+      if (frameIdBytes.every((byte) => byte == 0)) {
+        break;
+      }
+
+      final frameId = ascii.decode(frameIdBytes, allowInvalid: true);
+      if (!_isValidFrameId(frameId)) {
+        break;
+      }
+
+      final frameSize = switch (majorVersion) {
+        2 => _readUint24(source, offset + 3),
+        4 => _readSynchsafe(source, offset + 4),
+        _ => _readUint32(source, offset + 4),
+      };
+      if (frameSize <= 0) {
+        break;
+      }
+
+      final payloadStart = offset + headerLength;
+      final payloadEnd = payloadStart + frameSize;
+      if (payloadEnd > tagEnd) {
+        break;
+      }
+
+      final formatFlags = majorVersion == 2 ? 0 : source[offset + 9];
+      final payload = _normalizeFramePayload(
+        source.sublist(payloadStart, payloadEnd),
+        majorVersion: majorVersion,
+        formatFlags: formatFlags,
+        tagUnsynchronized: tagUnsynchronized,
+      );
+      if (payload != null) {
+        yield _Id3Frame(frameId, payload);
+      }
+      offset = payloadEnd;
+    }
+  }
+
+  static Uint8List? _normalizeFramePayload(
+    Uint8List payload, {
+    required int majorVersion,
+    required int formatFlags,
+    required bool tagUnsynchronized,
+  }) {
+    var cursor = 0;
+    var frameUnsynchronized = false;
+
+    if (majorVersion == 3) {
+      if ((formatFlags & 0xC0) != 0) {
+        return null;
+      }
+      if ((formatFlags & 0x20) != 0) {
+        cursor += 1;
+      }
+    } else if (majorVersion == 4) {
+      if ((formatFlags & 0x0C) != 0) {
+        return null;
+      }
+      if ((formatFlags & 0x40) != 0) {
+        cursor += 1;
+      }
+      if ((formatFlags & 0x01) != 0) {
+        cursor += 4;
+      }
+      frameUnsynchronized = (formatFlags & 0x02) != 0;
+    }
+
+    if (cursor > payload.length) {
+      return null;
+    }
+
+    final normalized = payload.sublist(cursor);
+    return tagUnsynchronized || frameUnsynchronized
+        ? _removeUnsynchronization(normalized)
+        : normalized;
+  }
+
+  static bool _isValidFrameId(String frameId) {
+    return RegExp(r'^[A-Z0-9]{3,4}$').hasMatch(frameId);
+  }
+
+  static Uint8List _removeUnsynchronization(Uint8List bytes) {
+    final output = BytesBuilder(copy: false);
+    for (var index = 0; index < bytes.length; index += 1) {
+      final byte = bytes[index];
+      output.addByte(byte);
+      if (byte == 0xFF &&
+          index + 1 < bytes.length &&
+          bytes[index + 1] == 0x00) {
+        index += 1;
+      }
+    }
+    return output.toBytes();
+  }
+
   static Uint8List _textFrame(String id, String value) {
     final payload = BytesBuilder(copy: false)
       ..addByte(1)
@@ -346,12 +405,45 @@ class Id3LyricsEmbedder {
     return _frame('APIC', payload.toBytes());
   }
 
-  static Id3CoverImage? _parseAttachedPictureFrame(Uint8List payload) {
+  static Id3CoverImage? _parseAttachedPictureFrame(
+    Uint8List payload, {
+    bool legacyPictureFrame = false,
+  }) {
     if (payload.length < 5) {
       return null;
     }
 
     final encoding = payload[0];
+    if (legacyPictureFrame) {
+      if (payload.length < 6) {
+        return null;
+      }
+      final imageFormat = latin1
+          .decode(payload.sublist(1, 4), allowInvalid: true)
+          .trim()
+          .toLowerCase();
+      var legacyCursor = 5;
+      final legacyDescriptionEnd = encoding == 1 || encoding == 2
+          ? _indexOfDoubleZero(payload, legacyCursor)
+          : _indexOfByte(payload, 0, legacyCursor);
+      if (legacyDescriptionEnd == -1) {
+        return null;
+      }
+      legacyCursor =
+          legacyDescriptionEnd + ((encoding == 1 || encoding == 2) ? 2 : 1);
+      if (legacyCursor >= payload.length) {
+        return null;
+      }
+      final imageBytes = payload.sublist(legacyCursor);
+      if (imageBytes.isEmpty) {
+        return null;
+      }
+      return Id3CoverImage(
+        mimeType: _legacyPictureMimeType(imageFormat),
+        bytes: imageBytes,
+      );
+    }
+
     var cursor = 1;
     final mimeEnd = _indexOfByte(payload, 0, cursor);
     if (mimeEnd == -1 || mimeEnd + 2 >= payload.length) {
@@ -464,6 +556,34 @@ class Id3LyricsEmbedder {
     return lines.join('\n');
   }
 
+  static String? _parseCommentLyricsFrame(Uint8List payload) {
+    if (payload.length < 5) {
+      return null;
+    }
+    final encoding = payload[0];
+    var cursor = 4;
+    final descriptionEnd = _indexOfTextTerminator(payload, encoding, cursor);
+    if (descriptionEnd == -1) {
+      return null;
+    }
+    final description = _decodeId3Text(
+      encoding,
+      payload.sublist(cursor, descriptionEnd),
+    ).trim().toLowerCase();
+    cursor = descriptionEnd + _textTerminatorLength(encoding);
+    if (cursor >= payload.length) {
+      return null;
+    }
+    final value = _decodeId3Text(encoding, payload.sublist(cursor)).trim();
+    if (value.isEmpty) {
+      return null;
+    }
+    if (_isLyricsDescription(description) || _looksLikeLyricsText(value)) {
+      return value;
+    }
+    return null;
+  }
+
   static String? _parseUserTextLyricsFrame(Uint8List payload) {
     if (payload.isEmpty) {
       return null;
@@ -486,6 +606,13 @@ class Id3LyricsEmbedder {
     if (value.isEmpty) {
       return null;
     }
+    if (_isLyricsDescription(description) || _looksLikeLyricsText(value)) {
+      return value;
+    }
+    return null;
+  }
+
+  static bool _isLyricsDescription(String description) {
     const lyricDescriptions = {
       'lyrics',
       'lyric',
@@ -496,12 +623,33 @@ class Id3LyricsEmbedder {
       'lrc',
       '歌词',
     };
-    if (lyricDescriptions.contains(description) ||
+    return lyricDescriptions.contains(description) ||
         description.contains('lyric') ||
-        description.contains('歌词')) {
-      return value;
+        description.contains('lrc') ||
+        description.contains('歌词');
+  }
+
+  static bool _looksLikeLyricsText(String value) {
+    final timedLineCount = RegExp(
+      r'^\s*\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]',
+      multiLine: true,
+    ).allMatches(value).length;
+    if (timedLineCount >= 2) {
+      return true;
     }
-    return null;
+    final nonEmptyLines = value
+        .split(RegExp(r'[\r\n]+'))
+        .where((line) => line.trim().isNotEmpty)
+        .length;
+    return nonEmptyLines >= 4;
+  }
+
+  static String _legacyPictureMimeType(String imageFormat) {
+    return switch (imageFormat) {
+      'png' => 'image/png',
+      'jpg' || 'jpe' || 'jpeg' => 'image/jpeg',
+      _ => 'image/${imageFormat.isEmpty ? 'jpeg' : imageFormat}',
+    };
   }
 
   static Uint8List _frame(String id, Uint8List payload) {
@@ -525,6 +673,10 @@ class Id3LyricsEmbedder {
         (bytes[offset + 1] << 16) |
         (bytes[offset + 2] << 8) |
         bytes[offset + 3];
+  }
+
+  static int _readUint24(Uint8List bytes, int offset) {
+    return (bytes[offset] << 16) | (bytes[offset + 1] << 8) | bytes[offset + 2];
   }
 
   static Uint8List _writeSynchsafe(int value) {
@@ -656,4 +808,11 @@ class Id3Metadata {
   final String? album;
   final String? lyrics;
   final Id3CoverImage? cover;
+}
+
+class _Id3Frame {
+  const _Id3Frame(this.id, this.payload);
+
+  final String id;
+  final Uint8List payload;
 }

@@ -65,6 +65,8 @@ class PlayerService {
     );
   }
 
+  Future<void> play() => player.play();
+
   Future<void> playOrPause() => player.playOrPause();
 
   Future<void> pause() => player.pause();

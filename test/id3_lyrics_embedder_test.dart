@@ -129,6 +129,55 @@ void main() {
     expect(Id3LyricsEmbedder.extractLyricsBytes(embedded), '[00:00.00]line');
   });
 
+  test('extracts lyrics from an id3v2.2 unsynchronized lyrics frame', () {
+    final embedded = _id3v22WithFrames([
+      _id3v22Frame('ULT', [
+        3,
+        ...ascii.encode('eng'),
+        0,
+        ...utf8.encode('[00:00.00]line one\n[00:01.00]line two'),
+      ]),
+    ]);
+
+    expect(
+      Id3LyricsEmbedder.extractLyricsBytes(embedded),
+      '[00:00.00]line one\n[00:01.00]line two',
+    );
+  });
+
+  test('skips an id3v2.3 extended header before reading lyrics', () {
+    final embedded = _id3v23WithExtendedHeader([
+      _id3Frame('USLT', [
+        3,
+        ...ascii.encode('eng'),
+        0,
+        ...utf8.encode('[00:00.00]line one\n[00:01.00]line two'),
+      ]),
+    ]);
+
+    expect(
+      Id3LyricsEmbedder.extractLyricsBytes(embedded),
+      '[00:00.00]line one\n[00:01.00]line two',
+    );
+  });
+
+  test('extracts lyrics from an id3 comment frame', () {
+    final embedded = _id3WithFrames([
+      _id3Frame('COMM', [
+        3,
+        ...ascii.encode('eng'),
+        ...utf8.encode('Lyrics'),
+        0,
+        ...utf8.encode('first line\nsecond line\nthird line\nfourth line'),
+      ]),
+    ]);
+
+    expect(
+      Id3LyricsEmbedder.extractLyricsBytes(embedded),
+      'first line\nsecond line\nthird line\nfourth line',
+    );
+  });
+
   test('extracts synchronized id3 lyrics as lrc text', () {
     final embedded = _id3WithFrames([
       _id3Frame('SYLT', [
@@ -187,6 +236,39 @@ Uint8List _id3WithFrames(List<Uint8List> frames) {
   return output.toBytes();
 }
 
+Uint8List _id3v23WithExtendedHeader(List<Uint8List> frames) {
+  final tagBody = BytesBuilder(copy: false)
+    ..add(_uint32(6))
+    ..add([0, 0])
+    ..add(_uint32(0));
+  for (final frame in frames) {
+    tagBody.add(frame);
+  }
+  final tagBodyBytes = tagBody.toBytes();
+  final output = BytesBuilder(copy: false)
+    ..add(ascii.encode('ID3'))
+    ..add([3, 0, 0x40])
+    ..add(_synchsafe(tagBodyBytes.length))
+    ..add(tagBodyBytes)
+    ..add([0xFF, 0xFB, 0x90, 0x64, 0x00]);
+  return output.toBytes();
+}
+
+Uint8List _id3v22WithFrames(List<Uint8List> frames) {
+  final tagBody = BytesBuilder(copy: false);
+  for (final frame in frames) {
+    tagBody.add(frame);
+  }
+  final tagBodyBytes = tagBody.toBytes();
+  final output = BytesBuilder(copy: false)
+    ..add(ascii.encode('ID3'))
+    ..add([2, 0, 0])
+    ..add(_synchsafe(tagBodyBytes.length))
+    ..add(tagBodyBytes)
+    ..add([0xFF, 0xFB, 0x90, 0x64, 0x00]);
+  return output.toBytes();
+}
+
 Uint8List _id3Frame(String id, List<int> payload) {
   final output = BytesBuilder(copy: false)
     ..add(ascii.encode(id))
@@ -196,9 +278,25 @@ Uint8List _id3Frame(String id, List<int> payload) {
   return output.toBytes();
 }
 
+Uint8List _id3v22Frame(String id, List<int> payload) {
+  final output = BytesBuilder(copy: false)
+    ..add(ascii.encode(id))
+    ..add(_uint24(payload.length))
+    ..add(payload);
+  return output.toBytes();
+}
+
 Uint8List _uint32(int value) {
   return Uint8List.fromList([
     (value >> 24) & 0xFF,
+    (value >> 16) & 0xFF,
+    (value >> 8) & 0xFF,
+    value & 0xFF,
+  ]);
+}
+
+Uint8List _uint24(int value) {
+  return Uint8List.fromList([
     (value >> 16) & 0xFF,
     (value >> 8) & 0xFF,
     value & 0xFF,

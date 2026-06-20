@@ -307,6 +307,18 @@ void main() {
       volume: 42.5,
       autoPlayOnStartup: true,
       defaultStartupPageIndex: 2,
+      sourceSearchHistory: ['晴天', '七里香'],
+      librarySearchHistory: ['周杰伦', 'jay'],
+      desktopLyrics: DesktopLyricsSettings(
+        enabled: true,
+        fontSize: 28,
+        colorValue: 0xFFFFD166,
+        horizontalPosition: 0.2,
+        verticalPosition: 0.32,
+        delayMilliseconds: -500,
+        backgroundOpacity: 0.24,
+        locked: true,
+      ),
     );
 
     final restored = AppSettings.fromJson(settings.toJson());
@@ -316,6 +328,41 @@ void main() {
     expect(restored.volume, 42.5);
     expect(restored.autoPlayOnStartup, isTrue);
     expect(restored.defaultStartupPageIndex, 2);
+    expect(restored.sourceSearchHistory, ['晴天', '七里香']);
+    expect(restored.librarySearchHistory, ['周杰伦', 'jay']);
+    expect(restored.desktopLyrics.enabled, isTrue);
+    expect(restored.desktopLyrics.fontSize, 28);
+    expect(restored.desktopLyrics.colorValue, 0xFFFFD166);
+    expect(restored.desktopLyrics.horizontalPosition, 0.2);
+    expect(restored.desktopLyrics.verticalPosition, 0.32);
+    expect(restored.desktopLyrics.delayMilliseconds, -500);
+    expect(restored.desktopLyrics.backgroundOpacity, 0.24);
+    expect(restored.desktopLyrics.locked, isTrue);
+  });
+
+  test('normalizes search history', () {
+    final history = normalizeSearchHistory([
+      ' 晴天 ',
+      '七里香',
+      '晴天',
+      '',
+      '稻香',
+      '夜曲',
+      '简单爱',
+      '一路向北',
+      '搁浅',
+      '轨迹',
+      '花海',
+      '安静',
+      '半岛铁盒',
+      '黑色毛衣',
+      '青花瓷',
+    ]);
+
+    expect(history, hasLength(maxSearchHistoryItems));
+    expect(history.first, '晴天');
+    expect(history.where((item) => item == '晴天'), hasLength(1));
+    expect(history, isNot(contains('青花瓷')));
   });
 
   test('serializes persisted player queue items', () {

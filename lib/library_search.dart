@@ -15,10 +15,10 @@ class LibrarySearch {
       return true;
     }
 
-    return matchesText(track.title, normalizedQuery) ||
-        matchesText(track.artist, normalizedQuery) ||
-        matchesText(track.album, normalizedQuery) ||
-        matchesText(lyrics ?? '', normalizedQuery);
+    return LibrarySearchIndex.fromTrack(
+      track,
+      lyrics: lyrics,
+    ).matchesNormalizedQuery(normalizedQuery);
   }
 
   static bool matchesText(String text, String normalizedQuery) {
@@ -130,4 +130,83 @@ class LibrarySearch {
     r'''[\s\-_.,，。·・/\\:：;；'"“”‘’!?！？()[\]{}<>《》【】]+''',
   );
   static final RegExp _asciiLetterPattern = RegExp(r'^[a-z]+$');
+}
+
+class LibrarySearchIndex {
+  LibrarySearchIndex._({
+    required this.normalizedText,
+    required this.pinyinInitials,
+    required this.foldedPinyinInitials,
+    required this.fullPinyin,
+    required this.fieldPinyinInitials,
+    required this.fieldFullPinyin,
+    required this.normalizedLyrics,
+  });
+
+  factory LibrarySearchIndex.fromTrack(
+    DownloadedTrack track, {
+    String? lyrics,
+  }) {
+    final metadataFields = [
+      track.title,
+      track.artist,
+      track.album,
+    ].where((value) => value.trim().isNotEmpty).toList();
+    final metadataText = metadataFields.join(' ');
+    final pinyinInitials = LibrarySearch.normalize(
+      LibrarySearch._safeShortPinyin(metadataText),
+    );
+    return LibrarySearchIndex._(
+      normalizedText: LibrarySearch.normalize(metadataText),
+      pinyinInitials: pinyinInitials,
+      foldedPinyinInitials: LibrarySearch._foldRepeatedAsciiLetters(
+        pinyinInitials,
+      ),
+      fullPinyin: LibrarySearch.normalize(
+        LibrarySearch._safeFullPinyin(metadataText),
+      ),
+      fieldPinyinInitials: [
+        for (final field in metadataFields)
+          LibrarySearch.normalize(LibrarySearch._safeShortPinyin(field)),
+      ],
+      fieldFullPinyin: [
+        for (final field in metadataFields)
+          LibrarySearch.normalize(LibrarySearch._safeFullPinyin(field)),
+      ],
+      normalizedLyrics: LibrarySearch.normalize(lyrics ?? ''),
+    );
+  }
+
+  final String normalizedText;
+  final String pinyinInitials;
+  final String foldedPinyinInitials;
+  final String fullPinyin;
+  final List<String> fieldPinyinInitials;
+  final List<String> fieldFullPinyin;
+  final String normalizedLyrics;
+
+  bool matchesNormalizedQuery(String normalizedQuery) {
+    if (normalizedQuery.isEmpty) {
+      return true;
+    }
+    if (normalizedText.contains(normalizedQuery) ||
+        normalizedLyrics.contains(normalizedQuery) ||
+        pinyinInitials.contains(normalizedQuery) ||
+        foldedPinyinInitials.contains(normalizedQuery) ||
+        fullPinyin.contains(normalizedQuery) ||
+        fieldFullPinyin.any((field) => field.contains(normalizedQuery)) ||
+        fieldPinyinInitials.any(
+          (field) =>
+              field.contains(normalizedQuery) ||
+              LibrarySearch._foldRepeatedAsciiLetters(
+                field,
+              ).contains(normalizedQuery),
+        )) {
+      return true;
+    }
+    return fieldPinyinInitials.any(
+      (field) =>
+          LibrarySearch._isClosePinyinInitialQuery(normalizedQuery, field),
+    );
+  }
 }

@@ -4,6 +4,9 @@ enum RepeatMode { none, one, all }
 
 enum LibrarySortMode { downloadedAtDesc, titleAsc, artistAsc }
 
+const defaultDesktopLyricsSettings = DesktopLyricsSettings();
+const maxSearchHistoryItems = 12;
+
 class TrackSearchResult {
   const TrackSearchResult({
     required this.id,
@@ -292,6 +295,9 @@ class AppSettings {
     this.volume = 100,
     this.autoPlayOnStartup = false,
     this.defaultStartupPageIndex = 0,
+    this.desktopLyrics = defaultDesktopLyricsSettings,
+    this.sourceSearchHistory = const [],
+    this.librarySearchHistory = const [],
   });
 
   final String downloadDirectory;
@@ -301,6 +307,9 @@ class AppSettings {
   final double volume;
   final bool autoPlayOnStartup;
   final int defaultStartupPageIndex;
+  final DesktopLyricsSettings desktopLyrics;
+  final List<String> sourceSearchHistory;
+  final List<String> librarySearchHistory;
 
   AppSettings copyWith({
     String? downloadDirectory,
@@ -310,6 +319,9 @@ class AppSettings {
     double? volume,
     bool? autoPlayOnStartup,
     int? defaultStartupPageIndex,
+    DesktopLyricsSettings? desktopLyrics,
+    List<String>? sourceSearchHistory,
+    List<String>? librarySearchHistory,
   }) {
     return AppSettings(
       downloadDirectory: downloadDirectory ?? this.downloadDirectory,
@@ -320,6 +332,13 @@ class AppSettings {
       autoPlayOnStartup: autoPlayOnStartup ?? this.autoPlayOnStartup,
       defaultStartupPageIndex:
           defaultStartupPageIndex ?? this.defaultStartupPageIndex,
+      desktopLyrics: desktopLyrics ?? this.desktopLyrics,
+      sourceSearchHistory: normalizeSearchHistory(
+        sourceSearchHistory ?? this.sourceSearchHistory,
+      ),
+      librarySearchHistory: normalizeSearchHistory(
+        librarySearchHistory ?? this.librarySearchHistory,
+      ),
     );
   }
 
@@ -331,10 +350,14 @@ class AppSettings {
     'volume': volume,
     'autoPlayOnStartup': autoPlayOnStartup,
     'defaultStartupPageIndex': defaultStartupPageIndex,
+    'desktopLyrics': desktopLyrics.toJson(),
+    'sourceSearchHistory': sourceSearchHistory,
+    'librarySearchHistory': librarySearchHistory,
   };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
     final savedDefaultPage = json['defaultStartupPageIndex'] as int? ?? 0;
+    final desktopLyricsJson = json['desktopLyrics'];
     return AppSettings(
       downloadDirectory: json['downloadDirectory'] as String,
       preferredFormat: json['preferredFormat'] as String? ?? 'mp3',
@@ -343,7 +366,151 @@ class AppSettings {
       volume: (json['volume'] as num?)?.toDouble() ?? 100,
       autoPlayOnStartup: json['autoPlayOnStartup'] as bool? ?? false,
       defaultStartupPageIndex: savedDefaultPage == 2 ? 2 : 0,
+      desktopLyrics: desktopLyricsJson is Map
+          ? DesktopLyricsSettings.fromJson(
+              Map<String, dynamic>.from(desktopLyricsJson),
+            )
+          : defaultDesktopLyricsSettings,
+      sourceSearchHistory: normalizeSearchHistory(
+        (json['sourceSearchHistory'] as List?)?.cast<Object?>(),
+      ),
+      librarySearchHistory: normalizeSearchHistory(
+        (json['librarySearchHistory'] as List?)?.cast<Object?>(),
+      ),
     );
+  }
+}
+
+List<String> normalizeSearchHistory(Iterable<Object?>? values) {
+  if (values == null) {
+    return const [];
+  }
+  final normalized = <String>[];
+  for (final value in values) {
+    final text = value?.toString().trim() ?? '';
+    if (text.isEmpty) {
+      continue;
+    }
+    if (normalized.any((item) => item.toLowerCase() == text.toLowerCase())) {
+      continue;
+    }
+    normalized.add(text);
+    if (normalized.length >= maxSearchHistoryItems) {
+      break;
+    }
+  }
+  return List.unmodifiable(normalized);
+}
+
+class DesktopLyricsSettings {
+  const DesktopLyricsSettings({
+    this.enabled = false,
+    this.fontSize = 22,
+    this.colorValue = 0xFF4AA66A,
+    this.horizontalPosition = 0.5,
+    this.verticalPosition = 0.78,
+    this.delayMilliseconds = 0,
+    this.backgroundOpacity = 0.12,
+    this.locked = false,
+  });
+
+  final bool enabled;
+  final double fontSize;
+  final int colorValue;
+  final double horizontalPosition;
+  final double verticalPosition;
+  final int delayMilliseconds;
+  final double backgroundOpacity;
+  final bool locked;
+
+  DesktopLyricsSettings copyWith({
+    bool? enabled,
+    double? fontSize,
+    int? colorValue,
+    double? horizontalPosition,
+    double? verticalPosition,
+    int? delayMilliseconds,
+    double? backgroundOpacity,
+    bool? locked,
+  }) {
+    return DesktopLyricsSettings(
+      enabled: enabled ?? this.enabled,
+      fontSize: _clampDouble(fontSize ?? this.fontSize, 14, 42),
+      colorValue: colorValue ?? this.colorValue,
+      horizontalPosition: _clampDouble(
+        horizontalPosition ?? this.horizontalPosition,
+        0.0,
+        1.0,
+      ),
+      verticalPosition: _clampDouble(
+        verticalPosition ?? this.verticalPosition,
+        0.0,
+        1.0,
+      ),
+      delayMilliseconds: (delayMilliseconds ?? this.delayMilliseconds).clamp(
+        -3000,
+        3000,
+      ),
+      backgroundOpacity: _clampDouble(
+        backgroundOpacity ?? this.backgroundOpacity,
+        0,
+        0.45,
+      ),
+      locked: locked ?? this.locked,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'enabled': enabled,
+    'fontSize': fontSize,
+    'colorValue': colorValue,
+    'horizontalPosition': horizontalPosition,
+    'verticalPosition': verticalPosition,
+    'delayMilliseconds': delayMilliseconds,
+    'backgroundOpacity': backgroundOpacity,
+    'locked': locked,
+  };
+
+  factory DesktopLyricsSettings.fromJson(Map<String, dynamic> json) {
+    return DesktopLyricsSettings(
+      enabled: json['enabled'] as bool? ?? false,
+      fontSize: _clampDouble(
+        (json['fontSize'] as num?)?.toDouble() ?? 22,
+        14,
+        42,
+      ),
+      colorValue: json['colorValue'] as int? ?? 0xFF4AA66A,
+      horizontalPosition: _clampDouble(
+        (json['horizontalPosition'] as num?)?.toDouble() ?? 0.5,
+        0.0,
+        1.0,
+      ),
+      verticalPosition: _clampDouble(
+        (json['verticalPosition'] as num?)?.toDouble() ?? 0.78,
+        0.0,
+        1.0,
+      ),
+      delayMilliseconds: (json['delayMilliseconds'] as int? ?? 0).clamp(
+        -3000,
+        3000,
+      ),
+      backgroundOpacity: _clampDouble(
+        (json['backgroundOpacity'] as num?)?.toDouble() ?? 0.12,
+        0,
+        0.45,
+      ),
+      locked: json['locked'] as bool? ?? false,
+    );
+  }
+
+  static double _clampDouble(double value, double min, double max) {
+    if (value < min) {
+      return min;
+    }
+    if (value > max) {
+      return max;
+    }
+    return value;
   }
 }
 
