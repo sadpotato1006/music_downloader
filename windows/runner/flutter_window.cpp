@@ -12,6 +12,7 @@
 #include "desktop_lyrics_window.h"
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
+#include "window_state.h"
 
 namespace {
 
@@ -159,11 +160,6 @@ bool FlutterWindow::OnCreate() {
         flutter::EncodableValue(locked);
     desktop_lyrics_channel_->InvokeMethod(
         "lockChanged", std::make_unique<flutter::EncodableValue>(arguments));
-    if (locked) {
-      ShowTrayBalloon(
-          L"\u684C\u9762\u6B4C\u8BCD\u5DF2\u9501\u5B9A",
-          L"\u53EF\u5728\u8F6F\u4EF6\u6B4C\u8BCD\u8BBE\u7F6E\u4E2D\u5173\u95ED\u9501\u5B9A\uFF0C\u6216\u53F3\u952E\u6258\u76D8\u56FE\u6807\u9009\u62E9\u6B4C\u8BCD\u89E3\u9501\u3002");
-    }
   });
   desktop_lyrics_channel_->SetMethodCallHandler(
       [this](const auto& call, auto result) {
@@ -240,6 +236,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
   if (message == WM_CLOSE && !allow_window_close_) {
+    window_state::SaveWindowSize(hwnd);
     ShowWindow(hwnd, SW_HIDE);
     return 0;
   }
@@ -278,6 +275,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
+    case WM_EXITSIZEMOVE:
+      window_state::SaveWindowSize(hwnd);
+      break;
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
@@ -353,28 +353,11 @@ void FlutterWindow::UnlockDesktopLyricsFromTray() {
     desktop_lyrics_channel_->InvokeMethod(
         "lockChanged", std::make_unique<flutter::EncodableValue>(arguments));
   }
-  ShowTrayBalloon(L"\u684C\u9762\u6B4C\u8BCD\u5DF2\u89E3\u9501",
-                  L"\u73B0\u5728\u53EF\u4EE5\u62D6\u52A8\u6B4C\u8BCD\u8C03\u6574\u4F4D\u7F6E\u3002");
-}
-
-void FlutterWindow::ShowTrayBalloon(const wchar_t* title,
-                                    const wchar_t* message) {
-  if (!tray_icon_added_ || !GetHandle()) {
-    return;
-  }
-  NOTIFYICONDATAW data{};
-  data.cbSize = sizeof(data);
-  data.hWnd = GetHandle();
-  data.uID = kTrayIconId;
-  data.uFlags = NIF_INFO;
-  wcscpy_s(data.szInfoTitle, title);
-  wcscpy_s(data.szInfo, message);
-  data.dwInfoFlags = NIIF_INFO;
-  Shell_NotifyIconW(NIM_MODIFY, &data);
 }
 
 void FlutterWindow::ExitFromTray() {
   allow_window_close_ = true;
+  window_state::SaveWindowSize(GetHandle());
   RemoveTrayIcon();
   if (desktop_lyrics_window_) {
     desktop_lyrics_window_->Hide();

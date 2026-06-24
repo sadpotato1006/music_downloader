@@ -197,7 +197,7 @@ class GequbaoSource implements MusicSource {
       'Referer': referer ?? 'https://www.gequbao.com/',
       'Upgrade-Insecure-Requests': '1',
       'User-Agent':
-          'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 QingTing/1.0',
+          'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 QingTing/1.2.4',
     };
   }
 

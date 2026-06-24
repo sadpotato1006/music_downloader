@@ -12,8 +12,12 @@ namespace {
 
 constexpr const wchar_t kDesktopLyricsWindowClass[] =
     L"QingTingDesktopLyricsWindow";
+constexpr const wchar_t kDesktopLyricsUnlockButtonClass[] =
+    L"QingTingDesktopLyricsUnlockButton";
 constexpr UINT_PTR kHideControlsTimerId = 1;
+constexpr UINT_PTR kLockedHoverTimerId = 2;
 constexpr UINT kHideControlsDelayMs = 700;
+constexpr UINT kLockedHoverIntervalMs = 100;
 
 double ClampDouble(double value, double min_value, double max_value) {
   return std::clamp(value, min_value, max_value);
@@ -23,24 +27,21 @@ int ClampInt(int value, int min_value, int max_value) {
   return std::clamp(value, min_value, max_value);
 }
 
-void AddRoundedRectangle(Gdiplus::GraphicsPath& path,
-                         const Gdiplus::RectF& rect,
-                         float radius) {
+void AddRoundedRectangle(Gdiplus::GraphicsPath &path,
+                         const Gdiplus::RectF &rect, float radius) {
   const float diameter = radius * 2.0f;
   path.AddArc(rect.X, rect.Y, diameter, diameter, 180.0f, 90.0f);
   path.AddArc(rect.GetRight() - diameter, rect.Y, diameter, diameter, 270.0f,
               90.0f);
-  path.AddArc(rect.GetRight() - diameter, rect.GetBottom() - diameter,
-              diameter, diameter, 0.0f, 90.0f);
+  path.AddArc(rect.GetRight() - diameter, rect.GetBottom() - diameter, diameter,
+              diameter, 0.0f, 90.0f);
   path.AddArc(rect.X, rect.GetBottom() - diameter, diameter, diameter, 90.0f,
               90.0f);
   path.CloseFigure();
 }
 
-void DrawLockIcon(Gdiplus::Graphics& graphics,
-                  const Gdiplus::RectF& rect,
-                  const Gdiplus::Color& color,
-                  float scale) {
+void DrawLockIcon(Gdiplus::Graphics &graphics, const Gdiplus::RectF &rect,
+                  const Gdiplus::Color &color, float scale) {
   Gdiplus::Pen pen(color, std::max(1.6f, 1.8f * scale));
   Gdiplus::SolidBrush brush(color);
   const float body_width = rect.Width * 0.42f;
@@ -50,9 +51,33 @@ void DrawLockIcon(Gdiplus::Graphics& graphics,
   Gdiplus::RectF body(body_x, body_y, body_width, body_height);
   graphics.FillRectangle(&brush, body);
   Gdiplus::RectF shackle(body_x + body_width * 0.12f,
-                         rect.Y + rect.Height * 0.24f,
-                         body_width * 0.76f, rect.Height * 0.42f);
+                         rect.Y + rect.Height * 0.24f, body_width * 0.76f,
+                         rect.Height * 0.42f);
   graphics.DrawArc(&pen, shackle, 200.0f, 140.0f);
+}
+
+void DrawUnlockIcon(Gdiplus::Graphics &graphics, const Gdiplus::RectF &rect,
+                    const Gdiplus::Color &color, float scale) {
+  Gdiplus::Pen pen(color, std::max(1.6f, 1.8f * scale));
+  pen.SetStartCap(Gdiplus::LineCapRound);
+  pen.SetEndCap(Gdiplus::LineCapRound);
+  Gdiplus::SolidBrush brush(color);
+  const float body_width = rect.Width * 0.42f;
+  const float body_height = rect.Height * 0.32f;
+  const float body_x = rect.X + (rect.Width - body_width) / 2.0f;
+  const float body_y = rect.Y + rect.Height * 0.50f;
+  graphics.FillRectangle(&brush, body_x, body_y, body_width, body_height);
+
+  const float shackle_x = body_x + body_width * 0.10f;
+  const float shackle_y = rect.Y + rect.Height * 0.22f;
+  const float shackle_width = body_width * 0.76f;
+  const float shackle_height = rect.Height * 0.38f;
+  Gdiplus::RectF shackle(shackle_x, shackle_y, shackle_width, shackle_height);
+  graphics.DrawArc(&pen, shackle, 180.0f, 180.0f);
+  const float shackle_middle_y = shackle_y + shackle_height / 2.0f;
+  graphics.DrawLine(&pen, shackle_x, shackle_middle_y, shackle_x, body_y);
+  graphics.DrawLine(&pen, shackle_x + shackle_width, shackle_middle_y,
+                    shackle_x + shackle_width, body_y - rect.Height * 0.10f);
 }
 
 std::unique_ptr<Gdiplus::FontFamily> PreferredFontFamily() {
@@ -76,6 +101,10 @@ DesktopLyricsWindow::DesktopLyricsWindow() {
 
 DesktopLyricsWindow::~DesktopLyricsWindow() {
   Hide();
+  if (unlock_button_window_) {
+    DestroyWindow(unlock_button_window_);
+    unlock_button_window_ = nullptr;
+  }
   if (window_) {
     DestroyWindow(window_);
     window_ = nullptr;
@@ -86,14 +115,11 @@ DesktopLyricsWindow::~DesktopLyricsWindow() {
   }
 }
 
-void DesktopLyricsWindow::Update(bool enabled,
-                                 const std::wstring& text,
-                                 double font_size,
-                                 uint32_t color_value,
+void DesktopLyricsWindow::Update(bool enabled, const std::wstring &text,
+                                 double font_size, uint32_t color_value,
                                  double horizontal_position,
                                  double vertical_position,
-                                 double background_opacity,
-                                 bool locked) {
+                                 double background_opacity, bool locked) {
   if (!enabled || text.empty()) {
     Hide();
     return;
@@ -105,8 +131,10 @@ void DesktopLyricsWindow::Update(bool enabled,
   horizontal_position_ = ClampDouble(horizontal_position, 0.0, 1.0);
   vertical_position_ = ClampDouble(vertical_position, 0.0, 1.0);
   background_opacity_ = ClampDouble(background_opacity, 0.0, 0.85);
+  const bool lock_state_changed = locked_ != locked;
   locked_ = locked;
-  if (locked_) {
+  if (lock_state_changed) {
+    HideUnlockButton();
     hover_controls_ = false;
     lock_button_pressed_ = false;
     dragging_ = false;
@@ -116,14 +144,22 @@ void DesktopLyricsWindow::Update(bool enabled,
     return;
   }
   ApplyLockedWindowStyle();
+  if (locked_) {
+    SetTimer(window_, kLockedHoverTimerId, kLockedHoverIntervalMs, nullptr);
+  } else {
+    KillTimer(window_, kLockedHoverTimerId);
+    HideUnlockButton();
+  }
   Render();
 }
 
 void DesktopLyricsWindow::Hide() {
   if (window_) {
     KillTimer(window_, kHideControlsTimerId);
+    KillTimer(window_, kLockedHoverTimerId);
     ShowWindow(window_, SW_HIDE);
   }
+  HideUnlockButton();
   hover_controls_ = false;
   lock_button_pressed_ = false;
   dragging_ = false;
@@ -134,16 +170,20 @@ void DesktopLyricsWindow::SetLocked(bool locked) {
     return;
   }
   locked_ = locked;
-  if (locked_) {
-    if (window_) {
-      KillTimer(window_, kHideControlsTimerId);
+  if (window_) {
+    KillTimer(window_, kHideControlsTimerId);
+    if (locked_) {
+      SetTimer(window_, kLockedHoverTimerId, kLockedHoverIntervalMs, nullptr);
+    } else {
+      KillTimer(window_, kLockedHoverTimerId);
     }
-    hover_controls_ = false;
-    lock_button_pressed_ = false;
-    dragging_ = false;
-    if (GetCapture() == window_) {
-      ReleaseCapture();
-    }
+  }
+  HideUnlockButton();
+  hover_controls_ = false;
+  lock_button_pressed_ = false;
+  dragging_ = false;
+  if (GetCapture() == window_ || GetCapture() == unlock_button_window_) {
+    ReleaseCapture();
   }
   ApplyLockedWindowStyle();
   Render();
@@ -170,7 +210,21 @@ bool DesktopLyricsWindow::EnsureWindow() {
       WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
       kDesktopLyricsWindowClass, L"QingTing Desktop Lyrics", WS_POPUP, 0, 0, 1,
       1, nullptr, nullptr, GetModuleHandle(nullptr), this);
-  return window_ != nullptr;
+  if (!window_) {
+    return false;
+  }
+
+  unlock_button_window_ =
+      CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                      kDesktopLyricsUnlockButtonClass, L"", WS_POPUP, 0, 0, 1,
+                      1, window_, nullptr, GetModuleHandle(nullptr), this);
+  if (!unlock_button_window_) {
+    DestroyWindow(window_);
+    window_ = nullptr;
+    return false;
+  }
+
+  return true;
 }
 
 void DesktopLyricsWindow::ApplyLockedWindowStyle() {
@@ -200,6 +254,76 @@ void DesktopLyricsWindow::StartMouseLeaveTracking() {
   tracking_mouse_leave_ = TrackMouseEvent(&event) == TRUE;
 }
 
+void DesktopLyricsWindow::UpdateLockedHoverState() {
+  if (!window_ || !locked_ || !IsWindowVisible(window_)) {
+    HideUnlockButton();
+    hover_controls_ = false;
+    return;
+  }
+
+  POINT cursor{};
+  if (!GetCursorPos(&cursor)) {
+    return;
+  }
+
+  RECT hover_rect = content_screen_rect_;
+  InflateRect(&hover_rect, 8, 8);
+  if (hover_controls_ && unlock_button_window_ &&
+      IsWindowVisible(unlock_button_window_)) {
+    RECT button_rect{};
+    GetWindowRect(unlock_button_window_, &button_rect);
+    UnionRect(&hover_rect, &hover_rect, &button_rect);
+  }
+
+  const bool should_show = PtInRect(&hover_rect, cursor) == TRUE;
+  if (should_show == hover_controls_) {
+    if (should_show) {
+      PositionUnlockButton();
+    }
+    return;
+  }
+
+  hover_controls_ = should_show;
+  if (hover_controls_) {
+    PositionUnlockButton();
+  } else {
+    HideUnlockButton();
+  }
+}
+
+void DesktopLyricsWindow::PositionUnlockButton() {
+  if (!unlock_button_window_ || !locked_ || !hover_controls_) {
+    return;
+  }
+
+  const UINT dpi = window_ ? GetDpiForWindow(window_) : 96;
+  const int width = MulDiv(30, static_cast<int>(dpi), 96);
+  const int height = MulDiv(30, static_cast<int>(dpi), 96);
+  const int gap = MulDiv(4, static_cast<int>(dpi), 96);
+  const int content_width = std::max(
+      1,
+      static_cast<int>(content_screen_rect_.right - content_screen_rect_.left));
+  const int screen_width = GetSystemMetrics(SM_CXSCREEN);
+  const int left =
+      ClampInt(content_screen_rect_.left + (content_width - width) / 2, 0,
+               std::max(0, screen_width - width));
+  const int top =
+      std::max(0, static_cast<int>(content_screen_rect_.top) - height - gap);
+
+  HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, width, height);
+  if (region) {
+    SetWindowRgn(unlock_button_window_, region, TRUE);
+  }
+  SetWindowPos(unlock_button_window_, HWND_TOPMOST, left, top, width, height,
+               SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void DesktopLyricsWindow::HideUnlockButton() {
+  if (unlock_button_window_) {
+    ShowWindow(unlock_button_window_, SW_HIDE);
+  }
+}
+
 bool DesktopLyricsWindow::IsPointInLockButton(POINT point) const {
   return !locked_ && hover_controls_ && PtInRect(&lock_button_rect_, point);
 }
@@ -208,6 +332,13 @@ void DesktopLyricsWindow::LockFromButton() {
   SetLocked(true);
   if (lock_changed_callback_) {
     lock_changed_callback_(true);
+  }
+}
+
+void DesktopLyricsWindow::UnlockFromButton() {
+  SetLocked(false);
+  if (lock_changed_callback_) {
+    lock_changed_callback_(false);
   }
 }
 
@@ -231,24 +362,21 @@ void DesktopLyricsWindow::ContinueDrag() {
     return;
   }
 
-  const int width = std::max(
-      1,
-      static_cast<int>(drag_start_window_rect_.right -
-                       drag_start_window_rect_.left));
-  const int height = std::max(
-      1,
-      static_cast<int>(drag_start_window_rect_.bottom -
-                       drag_start_window_rect_.top));
+  const int width = std::max(1, static_cast<int>(drag_start_window_rect_.right -
+                                                 drag_start_window_rect_.left));
+  const int height =
+      std::max(1, static_cast<int>(drag_start_window_rect_.bottom -
+                                   drag_start_window_rect_.top));
   const int screen_width = GetSystemMetrics(SM_CXSCREEN);
   const int screen_height = GetSystemMetrics(SM_CYSCREEN);
   const int max_left = std::max(0, screen_width - width);
   const int max_top = std::max(0, screen_height - height);
-  const int left = ClampInt(
-      drag_start_window_rect_.left + cursor.x - drag_start_cursor_.x, 0,
-      max_left);
-  const int top = ClampInt(
-      drag_start_window_rect_.top + cursor.y - drag_start_cursor_.y, 0,
-      max_top);
+  const int left =
+      ClampInt(drag_start_window_rect_.left + cursor.x - drag_start_cursor_.x,
+               0, max_left);
+  const int top =
+      ClampInt(drag_start_window_rect_.top + cursor.y - drag_start_cursor_.y, 0,
+               max_top);
 
   horizontal_position_ =
       max_left > 0 ? static_cast<double>(left) / max_left : 0.5;
@@ -309,8 +437,7 @@ void DesktopLyricsWindow::Render() {
   measure_graphics.MeasureString(text_.c_str(), -1, &font, measure_rect,
                                  &format, &bounds);
 
-  int content_width =
-      static_cast<int>(std::ceil(bounds.Width)) + padding_x * 2;
+  int content_width = static_cast<int>(std::ceil(bounds.Width)) + padding_x * 2;
   int content_height =
       static_cast<int>(std::ceil(bounds.Height)) + padding_y * 2;
   content_width = ClampInt(content_width, 180, max_width);
@@ -334,10 +461,9 @@ void DesktopLyricsWindow::Render() {
   bitmap_info.bmiHeader.biBitCount = 32;
   bitmap_info.bmiHeader.biCompression = BI_RGB;
 
-  void* bits = nullptr;
-  HBITMAP bitmap =
-      CreateDIBSection(screen_dc, &bitmap_info, DIB_RGB_COLORS, &bits, nullptr,
-                       0);
+  void *bits = nullptr;
+  HBITMAP bitmap = CreateDIBSection(screen_dc, &bitmap_info, DIB_RGB_COLORS,
+                                    &bits, nullptr, 0);
   if (!bitmap) {
     ReleaseDC(nullptr, screen_dc);
     return;
@@ -366,8 +492,7 @@ void DesktopLyricsWindow::Render() {
 
   if (show_lock_button) {
     Gdiplus::SolidBrush hit_bridge(Gdiplus::Color(1, 255, 255, 255));
-    graphics.FillRectangle(&hit_bridge, 0.0f, 0.0f,
-                           static_cast<float>(width),
+    graphics.FillRectangle(&hit_bridge, 0.0f, 0.0f, static_cast<float>(width),
                            static_cast<float>(content_top));
 
     const int button_x = (width - lock_button_size) / 2;
@@ -391,11 +516,10 @@ void DesktopLyricsWindow::Render() {
     SetRectEmpty(&lock_button_rect_);
   }
 
-  Gdiplus::RectF text_rect(
-      static_cast<float>(content_left + padding_x),
-      static_cast<float>(content_top + padding_y),
-      static_cast<float>(content_width - padding_x * 2),
-      static_cast<float>(content_height - padding_y * 2));
+  Gdiplus::RectF text_rect(static_cast<float>(content_left + padding_x),
+                           static_cast<float>(content_top + padding_y),
+                           static_cast<float>(content_width - padding_x * 2),
+                           static_cast<float>(content_height - padding_y * 2));
   Gdiplus::RectF shadow_rect = text_rect;
   shadow_rect.Offset(0, static_cast<float>(1.5 * scale));
   Gdiplus::SolidBrush shadow_brush(Gdiplus::Color(120, 0, 0, 0));
@@ -413,14 +537,17 @@ void DesktopLyricsWindow::Render() {
   graphics.DrawString(text_.c_str(), -1, &font, text_rect, &format,
                       &text_brush);
 
-  const int content_screen_left = ClampInt(
-      static_cast<int>(
-          std::round((screen_width - content_width) * horizontal_position_)),
-      0, std::max(0, screen_width - content_width));
-  const int content_screen_top = ClampInt(
-      static_cast<int>(std::round((screen_height - content_height) *
-                                  vertical_position_)),
-      0, std::max(0, screen_height - content_height));
+  const int content_screen_left =
+      ClampInt(static_cast<int>(std::round((screen_width - content_width) *
+                                           horizontal_position_)),
+               0, std::max(0, screen_width - content_width));
+  const int content_screen_top =
+      ClampInt(static_cast<int>(std::round((screen_height - content_height) *
+                                           vertical_position_)),
+               0, std::max(0, screen_height - content_height));
+  content_screen_rect_ = {content_screen_left, content_screen_top,
+                          content_screen_left + content_width,
+                          content_screen_top + content_height};
   const int left = ClampInt(content_screen_left - content_left, 0,
                             std::max(0, screen_width - width));
   const int top = ClampInt(content_screen_top - content_top, 0,
@@ -437,6 +564,9 @@ void DesktopLyricsWindow::Render() {
                       &source, 0, &blend, ULW_ALPHA);
   SetWindowPos(window_, HWND_TOPMOST, left, top, width, height,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  if (locked_ && hover_controls_) {
+    PositionUnlockButton();
+  }
 
   SelectObject(memory_dc, old_bitmap);
   DeleteDC(memory_dc);
@@ -446,6 +576,7 @@ void DesktopLyricsWindow::Render() {
 
 ATOM DesktopLyricsWindow::RegisterWindowClass() {
   static ATOM atom = 0;
+  static ATOM unlock_button_atom = 0;
   if (atom != 0) {
     return atom;
   }
@@ -456,22 +587,33 @@ ATOM DesktopLyricsWindow::RegisterWindowClass() {
   window_class.lpszClassName = kDesktopLyricsWindowClass;
   window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
   atom = RegisterClassW(&window_class);
+  if (atom == 0) {
+    return 0;
+  }
+
+  WNDCLASSW unlock_button_class{};
+  unlock_button_class.lpfnWndProc = DesktopLyricsWindow::UnlockButtonWindowProc;
+  unlock_button_class.hInstance = GetModuleHandle(nullptr);
+  unlock_button_class.lpszClassName = kDesktopLyricsUnlockButtonClass;
+  unlock_button_class.hCursor = LoadCursor(nullptr, IDC_HAND);
+  unlock_button_atom = RegisterClassW(&unlock_button_class);
+  if (unlock_button_atom == 0) {
+    UnregisterClassW(kDesktopLyricsWindowClass, GetModuleHandle(nullptr));
+    atom = 0;
+  }
   return atom;
 }
 
-LRESULT CALLBACK DesktopLyricsWindow::WindowProc(HWND hwnd,
-                                                 UINT message,
-                                                 WPARAM wparam,
-                                                 LPARAM lparam) {
-  DesktopLyricsWindow* window = nullptr;
+LRESULT CALLBACK DesktopLyricsWindow::WindowProc(HWND hwnd, UINT message,
+                                                 WPARAM wparam, LPARAM lparam) {
+  DesktopLyricsWindow *window = nullptr;
   if (message == WM_NCCREATE) {
-    const auto create_struct = reinterpret_cast<CREATESTRUCTW*>(lparam);
-    window = reinterpret_cast<DesktopLyricsWindow*>(
-        create_struct->lpCreateParams);
-    SetWindowLongPtrW(
-        hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
+    const auto create_struct = reinterpret_cast<CREATESTRUCTW *>(lparam);
+    window =
+        reinterpret_cast<DesktopLyricsWindow *>(create_struct->lpCreateParams);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
   } else {
-    window = reinterpret_cast<DesktopLyricsWindow*>(
+    window = reinterpret_cast<DesktopLyricsWindow *>(
         GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   }
 
@@ -508,18 +650,20 @@ LRESULT CALLBACK DesktopLyricsWindow::WindowProc(HWND hwnd,
     case WM_MOUSELEAVE:
       if (window) {
         window->tracking_mouse_leave_ = false;
-        if (!window->dragging_ && !window->locked_ &&
-            window->hover_controls_) {
+        if (!window->dragging_ && !window->locked_ && window->hover_controls_) {
           SetTimer(hwnd, kHideControlsTimerId, kHideControlsDelayMs, nullptr);
         }
         return 0;
       }
       break;
     case WM_TIMER:
+      if (wparam == kLockedHoverTimerId && window) {
+        window->UpdateLockedHoverState();
+        return 0;
+      }
       if (wparam == kHideControlsTimerId && window) {
         KillTimer(hwnd, kHideControlsTimerId);
-        if (!window->dragging_ && !window->locked_ &&
-            window->hover_controls_) {
+        if (!window->dragging_ && !window->locked_ && window->hover_controls_) {
           POINT cursor{};
           RECT window_rect{};
           GetCursorPos(&cursor);
@@ -563,5 +707,74 @@ LRESULT CALLBACK DesktopLyricsWindow::WindowProc(HWND hwnd,
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
       break;
   }
+  return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+LRESULT CALLBACK DesktopLyricsWindow::UnlockButtonWindowProc(HWND hwnd,
+                                                             UINT message,
+                                                             WPARAM wparam,
+                                                             LPARAM lparam) {
+  DesktopLyricsWindow *window = nullptr;
+  if (message == WM_NCCREATE) {
+    const auto create_struct = reinterpret_cast<CREATESTRUCTW *>(lparam);
+    window =
+        reinterpret_cast<DesktopLyricsWindow *>(create_struct->lpCreateParams);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
+  } else {
+    window = reinterpret_cast<DesktopLyricsWindow *>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  }
+
+  switch (message) {
+    case WM_MOUSEACTIVATE:
+      return MA_NOACTIVATE;
+    case WM_ERASEBKGND:
+      return 1;
+    case WM_PAINT: {
+      PAINTSTRUCT paint{};
+      HDC dc = BeginPaint(hwnd, &paint);
+      RECT client{};
+      GetClientRect(hwnd, &client);
+      const UINT dpi = GetDpiForWindow(hwnd);
+      const float scale = std::max(1.0f, dpi / 96.0f);
+      Gdiplus::Graphics graphics(dc);
+      graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+      graphics.Clear(Gdiplus::Color(255, 255, 255, 255));
+      const float margin = std::max(1.0f, scale);
+      Gdiplus::RectF button_rect(
+          margin, margin,
+          std::max(1.0f, static_cast<float>(client.right) - margin * 2.0f),
+          std::max(1.0f, static_cast<float>(client.bottom) - margin * 2.0f));
+      Gdiplus::GraphicsPath button_path;
+      AddRoundedRectangle(button_path, button_rect, button_rect.Width / 2.0f);
+      Gdiplus::SolidBrush button_brush(Gdiplus::Color(255, 255, 255, 255));
+      Gdiplus::Pen button_border(Gdiplus::Color(255, 74, 166, 106),
+                                 std::max(1.0f, scale));
+      graphics.FillPath(&button_brush, &button_path);
+      graphics.DrawPath(&button_border, &button_path);
+      DrawUnlockIcon(graphics, button_rect, Gdiplus::Color(255, 31, 42, 36),
+                     scale);
+      EndPaint(hwnd, &paint);
+      return 0;
+    }
+    case WM_LBUTTONDOWN:
+      SetCapture(hwnd);
+      return 0;
+    case WM_LBUTTONUP: {
+      if (GetCapture() == hwnd) {
+        ReleaseCapture();
+      }
+      if (window) {
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (PtInRect(&client, point)) {
+          window->UnlockFromButton();
+        }
+      }
+      return 0;
+    }
+  }
+
   return DefWindowProcW(hwnd, message, wparam, lparam);
 }

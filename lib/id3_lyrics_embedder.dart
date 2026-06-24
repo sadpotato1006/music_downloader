@@ -23,31 +23,65 @@ class Id3LyricsEmbedder {
       return false;
     }
 
-    final bytes = await file.readAsBytes();
-    final embedded = embedMetadataBytes(
-      bytes,
+    final tagBytes = embedMetadataBytes(
+      const <int>[],
       title: title,
       artist: artist,
       album: cleanedAlbum,
       lyrics: cleanedLyrics,
       cover: cover,
     );
-    await file.writeAsBytes(embedded, flush: true);
-    return true;
+    final sourceOffset = await _existingId3TagLength(file);
+    final temporaryFile = File(
+      '${file.path}.qingting-${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
+
+    try {
+      RandomAccessFile? input;
+      RandomAccessFile? output;
+      try {
+        input = await file.open();
+        output = await temporaryFile.open(mode: FileMode.write);
+        await output.writeFrom(tagBytes);
+        await input.setPosition(sourceOffset);
+        while (true) {
+          final chunk = await input.read(64 * 1024);
+          if (chunk.isEmpty) {
+            break;
+          }
+          await output.writeFrom(chunk);
+        }
+        await output.flush();
+      } finally {
+        if (output != null) {
+          await output.close();
+        }
+        if (input != null) {
+          await input.close();
+        }
+      }
+      await _replaceFile(file, temporaryFile);
+      return true;
+    } catch (_) {
+      if (await temporaryFile.exists()) {
+        await temporaryFile.delete();
+      }
+      rethrow;
+    }
   }
 
   static Future<Id3CoverImage?> extractCover(File file) async {
     if (!await file.exists()) {
       return null;
     }
-    return extractCoverBytes(await file.readAsBytes());
+    return extractCoverBytes(await _readId3Tag(file));
   }
 
   static Future<Id3Metadata> extractMetadata(File file) async {
     if (!await file.exists()) {
       return const Id3Metadata();
     }
-    return extractMetadataBytes(await file.readAsBytes());
+    return extractMetadataBytes(await _readId3Tag(file));
   }
 
   static Id3Metadata extractMetadataBytes(List<int> bytes) {
@@ -113,7 +147,7 @@ class Id3LyricsEmbedder {
     if (!await file.exists()) {
       return null;
     }
-    return extractLyricsBytes(await file.readAsBytes());
+    return extractLyricsBytes(await _readId3Tag(file));
   }
 
   static Id3CoverImage? extractCoverBytes(List<int> bytes) {
@@ -224,6 +258,78 @@ class Id3LyricsEmbedder {
       ..add(bodyBytes)
       ..add(audioBytes);
     return output.toBytes();
+  }
+
+  static Future<Uint8List> _readId3Tag(File file) async {
+    final input = await file.open();
+    try {
+      final fileLength = await input.length();
+      if (fileLength < 10) {
+        return Uint8List(0);
+      }
+      final header = await input.read(10);
+      final tagLength = _id3TagLengthFromHeader(header, fileLength);
+      if (tagLength == 0) {
+        return Uint8List(0);
+      }
+      await input.setPosition(0);
+      return await input.read(tagLength);
+    } finally {
+      await input.close();
+    }
+  }
+
+  static Future<int> _existingId3TagLength(File file) async {
+    final input = await file.open();
+    try {
+      final fileLength = await input.length();
+      if (fileLength < 10) {
+        return 0;
+      }
+      return _id3TagLengthFromHeader(await input.read(10), fileLength);
+    } finally {
+      await input.close();
+    }
+  }
+
+  static int _id3TagLengthFromHeader(Uint8List header, int fileLength) {
+    if (header.length < 10 ||
+        header[0] != 0x49 ||
+        header[1] != 0x44 ||
+        header[2] != 0x33) {
+      return 0;
+    }
+
+    final majorVersion = header[3];
+    final flags = header[5];
+    var tagLength = 10 + _readSynchsafe(header, 6);
+    if (majorVersion == 4 && (flags & 0x10) != 0) {
+      tagLength += 10;
+    }
+    return tagLength <= fileLength ? tagLength : 0;
+  }
+
+  static Future<void> _replaceFile(File source, File replacement) async {
+    final backup = File(
+      '${source.path}.qingting-${DateTime.now().microsecondsSinceEpoch}.bak',
+    );
+    await source.rename(backup.path);
+    try {
+      await replacement.rename(source.path);
+    } catch (_) {
+      if (await backup.exists() && !await source.exists()) {
+        await backup.rename(source.path);
+      }
+      rethrow;
+    }
+
+    try {
+      if (await backup.exists()) {
+        await backup.delete();
+      }
+    } catch (_) {
+      // The replacement succeeded; a stale backup can be removed later.
+    }
   }
 
   static Uint8List _stripExistingTag(Uint8List bytes) {

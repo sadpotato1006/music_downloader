@@ -21,7 +21,7 @@ const _surface = Color(0xFFF7FAF8);
 const _line = Color(0xFFE5EFE8);
 const _networkImageHeaders = {
   'Referer': 'https://www.gequbao.com/',
-  'User-Agent': 'QingTing/1.0 (+personal-use)',
+  'User-Agent': 'QingTing/1.2.4 (+personal-use)',
 };
 const _desktopLyricColorOptions = [
   0xFF4AA66A,
@@ -347,6 +347,7 @@ class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
     );
     DesktopLyricsService.setLockChangedHandler(_handleDesktopLyricsLockChanged);
     widget.controller.addListener(_syncDesktopLyrics);
+    widget.controller.player.positionListenable.addListener(_syncDesktopLyrics);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _syncDesktopLyrics(force: true);
@@ -361,11 +362,15 @@ class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
       return;
     }
     oldWidget.controller.removeListener(_syncDesktopLyrics);
+    oldWidget.controller.player.positionListenable.removeListener(
+      _syncDesktopLyrics,
+    );
     DesktopLyricsService.setPositionChangedHandler(
       _handleDesktopLyricsPositionChanged,
     );
     DesktopLyricsService.setLockChangedHandler(_handleDesktopLyricsLockChanged);
     widget.controller.addListener(_syncDesktopLyrics);
+    widget.controller.player.positionListenable.addListener(_syncDesktopLyrics);
     _syncDesktopLyrics(force: true);
   }
 
@@ -380,6 +385,9 @@ class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     widget.controller.removeListener(_syncDesktopLyrics);
+    widget.controller.player.positionListenable.removeListener(
+      _syncDesktopLyrics,
+    );
     DesktopLyricsService.setPositionChangedHandler(null);
     DesktopLyricsService.setLockChangedHandler(null);
     unawaited(DesktopLyricsService.hide());
@@ -418,7 +426,7 @@ class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
       settings.copyWith(locked: locked),
     );
     widget.controller.showGlobalMessage(
-      locked ? '桌面歌词已锁定。可在歌词设置中关闭锁定，或右键托盘图标选择“歌词解锁”。' : '桌面歌词已解锁，可以拖动调整位置。',
+      locked ? '桌面歌词已锁定。将鼠标悬浮到歌词上可点击开锁图标，也可在设置或托盘菜单中解锁。' : '桌面歌词已解锁，可以拖动调整位置。',
     );
   }
 
@@ -901,39 +909,47 @@ class DownloadsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _PageFrame(
-      child: controller.downloadTasks.isEmpty
-          ? Column(
-              children: [
-                _DirectoryScanButton(
-                  controller: controller,
-                  onPressed: _scanDownloadDirectory,
+    return ValueListenableBuilder<int>(
+      valueListenable: controller.downloadProgressListenable,
+      builder: (context, _, _) {
+        return _PageFrame(
+          child: controller.downloadTasks.isEmpty
+              ? Column(
+                  children: [
+                    _DirectoryScanButton(
+                      controller: controller,
+                      onPressed: _scanDownloadDirectory,
+                    ),
+                    const SizedBox(height: 12),
+                    const Expanded(
+                      child: _EmptyState(
+                        icon: Icons.downloading,
+                        text: '还没有下载任务',
+                      ),
+                    ),
+                  ],
+                )
+              : Column(
+                  children: [
+                    _DirectoryScanButton(
+                      controller: controller,
+                      onPressed: _scanDownloadDirectory,
+                    ),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: ListView.separated(
+                        itemCount: controller.downloadTasks.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 10),
+                        itemBuilder: (context, index) {
+                          final task = controller.downloadTasks[index];
+                          return _TaskTile(controller: controller, task: task);
+                        },
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 12),
-                const Expanded(
-                  child: _EmptyState(icon: Icons.downloading, text: '还没有下载任务'),
-                ),
-              ],
-            )
-          : Column(
-              children: [
-                _DirectoryScanButton(
-                  controller: controller,
-                  onPressed: _scanDownloadDirectory,
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: ListView.separated(
-                    itemCount: controller.downloadTasks.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 10),
-                    itemBuilder: (context, index) {
-                      final task = controller.downloadTasks[index];
-                      return _TaskTile(controller: controller, task: task);
-                    },
-                  ),
-                ),
-              ],
-            ),
+        );
+      },
     );
   }
 }
@@ -1502,7 +1518,7 @@ class _LyricsSettingsSheet extends StatelessWidget {
                       '锁定桌面歌词',
                       style: TextStyle(fontWeight: FontWeight.w700),
                     ),
-                    subtitle: const Text('锁定后鼠标可点击歌词背后的内容，且不能拖动歌词。'),
+                    subtitle: const Text('锁定后歌词保持鼠标穿透；悬浮到歌词上会显示开锁图标。'),
                   ),
                 ],
                 const SizedBox(height: 10),
@@ -2514,39 +2530,41 @@ class MiniPlayer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final item = controller.currentItem;
-    final lyricLines = _parseLyricLines(item?.lyrics);
-    final currentLyricIndex = _currentLyricIndex(
-      lyricLines,
-      controller.player.position,
-    );
+    return ValueListenableBuilder<Duration>(
+      valueListenable: controller.player.positionListenable,
+      builder: (context, position, _) {
+        final item = controller.currentItem;
+        final lyricLines = _parseLyricLines(item?.lyrics);
+        final currentLyricIndex = _currentLyricIndex(lyricLines, position);
 
-    return SafeArea(
-      top: false,
-      child: Container(
-        height: isDesktop ? 78 : 82,
-        padding: EdgeInsets.symmetric(
-          horizontal: isDesktop ? 24 : 14,
-          vertical: isDesktop ? 10 : 8,
-        ),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          border: Border(top: BorderSide(color: _line)),
-        ),
-        child: isDesktop
-            ? _DesktopMiniPlayerContent(
-                controller: controller,
-                item: item,
-                lyricLines: lyricLines,
-                currentLyricIndex: currentLyricIndex,
-              )
-            : _MobileMiniPlayerContent(
-                controller: controller,
-                item: item,
-                lyricLines: lyricLines,
-                currentLyricIndex: currentLyricIndex,
-              ),
-      ),
+        return SafeArea(
+          top: false,
+          child: Container(
+            height: isDesktop ? 78 : 82,
+            padding: EdgeInsets.symmetric(
+              horizontal: isDesktop ? 24 : 14,
+              vertical: isDesktop ? 10 : 8,
+            ),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              border: Border(top: BorderSide(color: _line)),
+            ),
+            child: isDesktop
+                ? _DesktopMiniPlayerContent(
+                    controller: controller,
+                    item: item,
+                    lyricLines: lyricLines,
+                    currentLyricIndex: currentLyricIndex,
+                  )
+                : _MobileMiniPlayerContent(
+                    controller: controller,
+                    item: item,
+                    lyricLines: lyricLines,
+                    currentLyricIndex: currentLyricIndex,
+                  ),
+          ),
+        );
+      },
     );
   }
 }
@@ -3021,27 +3039,43 @@ class _LyricsSheet extends StatefulWidget {
 
 class _LyricsSheetState extends State<_LyricsSheet> {
   static const _lyricsMinListPadding = 84.0;
+  static const _estimatedLyricLineExtent = 58.0;
 
   final ScrollController scrollController = ScrollController();
   final Map<int, GlobalKey> _lyricLineKeys = {};
   int lastScrolledIndex = -1;
   String? lastScrolledItemId;
+  double _lyricsVerticalPadding = _lyricsMinListPadding;
 
   @override
   void initState() {
     super.initState();
     widget.controller.addListener(_handleControllerChanged);
+    widget.controller.player.positionListenable.addListener(
+      _handlePlayerPositionChanged,
+    );
     _scheduleScroll();
   }
 
   @override
   void dispose() {
     widget.controller.removeListener(_handleControllerChanged);
+    widget.controller.player.positionListenable.removeListener(
+      _handlePlayerPositionChanged,
+    );
     scrollController.dispose();
     super.dispose();
   }
 
   void _handleControllerChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    _scheduleScroll();
+  }
+
+  void _handlePlayerPositionChanged() {
     if (!mounted) {
       return;
     }
@@ -3067,11 +3101,38 @@ class _LyricsSheetState extends State<_LyricsSheet> {
       if (currentIndex < 0 || currentIndex == lastScrolledIndex) {
         return;
       }
-      lastScrolledIndex = currentIndex;
+      final itemId = item?.id;
       final lineContext = _lyricLineKeys[currentIndex]?.currentContext;
       if (lineContext == null || !lineContext.mounted) {
+        final estimatedTarget =
+            _lyricsVerticalPadding +
+            currentIndex * _estimatedLyricLineExtent -
+            scrollController.position.viewportDimension / 2;
+        scrollController.jumpTo(
+          estimatedTarget
+              .clamp(0.0, scrollController.position.maxScrollExtent)
+              .toDouble(),
+        );
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || widget.controller.currentItem?.id != itemId) {
+            return;
+          }
+          final builtContext = _lyricLineKeys[currentIndex]?.currentContext;
+          lastScrolledIndex = currentIndex;
+          if (builtContext == null || !builtContext.mounted) {
+            return;
+          }
+          Scrollable.ensureVisible(
+            builtContext,
+            alignment: 0.5,
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.easeOutCubic,
+            alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+          );
+        });
         return;
       }
+      lastScrolledIndex = currentIndex;
       Scrollable.ensureVisible(
         lineContext,
         alignment: 0.5,
@@ -3171,57 +3232,47 @@ class _LyricsSheetState extends State<_LyricsSheet> {
                               (constraints.maxHeight / 2 - 32)
                                   .clamp(_lyricsMinListPadding, 260.0)
                                   .toDouble();
-                          return SingleChildScrollView(
+                          _lyricsVerticalPadding = verticalPadding;
+                          return ListView.builder(
                             controller: scrollController,
-                            child: Padding(
-                              padding: EdgeInsets.symmetric(
-                                vertical: verticalPadding,
-                              ),
-                              child: Column(
-                                children: [
-                                  for (
-                                    var index = 0;
-                                    index < lines.length;
-                                    index += 1
-                                  )
-                                    InkWell(
-                                      key: _lyricLineKeys.putIfAbsent(
-                                        index,
-                                        GlobalKey.new,
-                                      ),
-                                      borderRadius: BorderRadius.circular(12),
-                                      onTap: () => widget.controller.seekTo(
-                                        lines[index].time,
-                                      ),
-                                      child: AnimatedDefaultTextStyle(
-                                        duration: const Duration(
-                                          milliseconds: 160,
-                                        ),
-                                        style: TextStyle(
-                                          color: index == currentIndex
-                                              ? _accentStrong
-                                              : _muted,
-                                          fontSize: 16,
-                                          fontWeight: index == currentIndex
-                                              ? FontWeight.w800
-                                              : FontWeight.w500,
-                                          height: 1.45,
-                                        ),
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            vertical: 8,
-                                            horizontal: 8,
-                                          ),
-                                          child: Text(
-                                            lines[index].text,
-                                            textAlign: TextAlign.center,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
+                            padding: EdgeInsets.symmetric(
+                              vertical: verticalPadding,
                             ),
+                            itemCount: lines.length,
+                            itemBuilder: (context, index) {
+                              return InkWell(
+                                key: _lyricLineKeys.putIfAbsent(
+                                  index,
+                                  GlobalKey.new,
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                                onTap: () =>
+                                    widget.controller.seekTo(lines[index].time),
+                                child: AnimatedDefaultTextStyle(
+                                  duration: const Duration(milliseconds: 160),
+                                  style: TextStyle(
+                                    color: index == currentIndex
+                                        ? _accentStrong
+                                        : _muted,
+                                    fontSize: 16,
+                                    fontWeight: index == currentIndex
+                                        ? FontWeight.w800
+                                        : FontWeight.w500,
+                                    height: 1.45,
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 8,
+                                      horizontal: 8,
+                                    ),
+                                    child: Text(
+                                      lines[index].text,
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
                           );
                         },
                       ),
@@ -3709,6 +3760,7 @@ class _TrackArtwork extends StatelessWidget {
   Widget build(BuildContext context) {
     final filePath = coverFilePath?.trim();
     final url = coverUrl?.trim();
+    final cacheSize = (size * MediaQuery.devicePixelRatioOf(context)).ceil();
     final fallback = _LeadingIconShell(
       size: size,
       borderRadius: borderRadius,
@@ -3722,6 +3774,8 @@ class _TrackArtwork extends StatelessWidget {
           File(filePath),
           width: size,
           height: size,
+          cacheWidth: cacheSize,
+          cacheHeight: cacheSize,
           fit: BoxFit.cover,
           filterQuality: FilterQuality.medium,
           errorBuilder: (_, _, _) => fallback,
@@ -3740,6 +3794,8 @@ class _TrackArtwork extends StatelessWidget {
         headers: _networkImageHeaders,
         width: size,
         height: size,
+        cacheWidth: cacheSize,
+        cacheHeight: cacheSize,
         fit: BoxFit.cover,
         filterQuality: FilterQuality.medium,
         errorBuilder: (_, _, _) => fallback,
@@ -4225,10 +4281,19 @@ class _LyricLine {
   final String text;
 }
 
+const _lyricLinesCacheLimit = 24;
+final Map<String, List<_LyricLine>> _lyricLinesCache = {};
+
 List<_LyricLine> _parseLyricLines(String? rawLyrics) {
   final raw = rawLyrics?.trim();
   if (raw == null || raw.isEmpty) {
     return const [];
+  }
+
+  final cached = _lyricLinesCache.remove(raw);
+  if (cached != null) {
+    _lyricLinesCache[raw] = cached;
+    return cached;
   }
 
   final timedLines = <_LyricLine>[];
@@ -4254,18 +4319,26 @@ List<_LyricLine> _parseLyricLines(String? rawLyrics) {
     }
   }
 
+  final parsed = <_LyricLine>[];
   if (timedLines.isNotEmpty) {
     timedLines.sort((a, b) => a.time.compareTo(b.time));
-    return timedLines;
+    parsed.addAll(timedLines);
+  } else {
+    parsed.addAll([
+      for (var index = 0; index < plainLines.length; index += 1)
+        _LyricLine(
+          time: Duration(seconds: index * 3),
+          text: plainLines[index],
+        ),
+    ]);
   }
 
-  return [
-    for (var index = 0; index < plainLines.length; index += 1)
-      _LyricLine(
-        time: Duration(seconds: index * 3),
-        text: plainLines[index],
-      ),
-  ];
+  final result = List<_LyricLine>.unmodifiable(parsed);
+  _lyricLinesCache[raw] = result;
+  if (_lyricLinesCache.length > _lyricLinesCacheLimit) {
+    _lyricLinesCache.remove(_lyricLinesCache.keys.first);
+  }
+  return result;
 }
 
 Duration _parseLyricTimestamp(RegExpMatch match) {
@@ -4288,13 +4361,18 @@ int _currentLyricIndex(List<_LyricLine> lines, Duration position) {
   if (lines.isEmpty) {
     return -1;
   }
+
+  var low = 0;
+  var high = lines.length - 1;
   var current = 0;
-  for (var index = 0; index < lines.length; index += 1) {
-    if (lines[index].time <= position) {
-      current = index;
-      continue;
+  while (low <= high) {
+    final middle = low + ((high - low) >> 1);
+    if (lines[middle].time <= position) {
+      current = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
     }
-    break;
   }
   return current;
 }

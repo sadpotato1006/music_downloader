@@ -15,14 +15,9 @@ class DesktopLyricsWindow {
   DesktopLyricsWindow();
   ~DesktopLyricsWindow();
 
-  void Update(bool enabled,
-              const std::wstring& text,
-              double font_size,
-              uint32_t color_value,
-              double horizontal_position,
-              double vertical_position,
-              double background_opacity,
-              bool locked);
+  void Update(bool enabled, const std::wstring &text, double font_size,
+              uint32_t color_value, double horizontal_position,
+              double vertical_position, double background_opacity, bool locked);
   void Hide();
   void SetLocked(bool locked);
   void SetPositionChangedCallback(PositionChangedCallback callback);
@@ -33,19 +28,24 @@ class DesktopLyricsWindow {
   void Render();
   void ApplyLockedWindowStyle();
   void StartMouseLeaveTracking();
+  void UpdateLockedHoverState();
+  void PositionUnlockButton();
+  void HideUnlockButton();
   bool IsPointInLockButton(POINT point) const;
   void LockFromButton();
+  void UnlockFromButton();
   void BeginDrag();
   void ContinueDrag();
   void EndDrag();
 
   static ATOM RegisterWindowClass();
-  static LRESULT CALLBACK WindowProc(HWND hwnd,
-                                     UINT message,
-                                     WPARAM wparam,
+  static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam,
                                      LPARAM lparam);
+  static LRESULT CALLBACK UnlockButtonWindowProc(HWND hwnd, UINT message,
+                                                 WPARAM wparam, LPARAM lparam);
 
   HWND window_ = nullptr;
+  HWND unlock_button_window_ = nullptr;
   ULONG_PTR gdiplus_token_ = 0;
   std::wstring text_;
   double font_size_ = 22.0;
@@ -59,6 +59,7 @@ class DesktopLyricsWindow {
   bool lock_button_pressed_ = false;
   bool dragging_ = false;
   RECT lock_button_rect_{};
+  RECT content_screen_rect_{};
   POINT drag_start_cursor_{};
   RECT drag_start_window_rect_{};
   PositionChangedCallback position_changed_callback_;

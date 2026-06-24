@@ -20,7 +20,7 @@ class AppController extends ChangeNotifier {
   AppController({
     required this.source,
     StorageService? storage,
-    PlayerService? player,
+    PlaybackService? player,
     Dio? downloadDio,
     AlbumMetadataService? albumMetadata,
   }) : storage = storage ?? StorageService(),
@@ -28,13 +28,14 @@ class AppController extends ChangeNotifier {
        albumMetadata = albumMetadata ?? AlbumMetadataService(),
        _downloadDio = downloadDio ?? Dio() {
     this.player.onChanged = _handlePlayerChanged;
+    this.player.positionListenable.addListener(_handlePlayerPositionChanged);
     this.player.onCompleted = _handlePlaybackCompleted;
     AndroidMediaControlsService.setHandler(_handleAndroidMediaControl);
   }
 
   final MusicSource source;
   final StorageService storage;
-  final PlayerService player;
+  final PlaybackService player;
   final AlbumMetadataService albumMetadata;
   final Dio _downloadDio;
   final Random _shuffleRandom = Random();
@@ -53,6 +54,8 @@ class AppController extends ChangeNotifier {
   DateTime? _lastSourceRequestAt;
   Timer? _settingsSaveDebounce;
   String? _lastMediaControlsSignature;
+  bool _isDisposed = false;
+  Future<void> _downloadedTracksSaveQueue = Future<void>.value();
 
   String searchQuery = '';
   bool isSearching = false;
@@ -66,6 +69,9 @@ class AppController extends ChangeNotifier {
 
   List<DownloadTask> downloadTasks = [];
   int _activeDownloads = 0;
+  final ValueNotifier<int> _downloadProgressListenable = ValueNotifier(0);
+  final Map<String, int> _lastDownloadProgressUpdateMillis = {};
+  static const _downloadProgressUpdateInterval = Duration(milliseconds: 100);
 
   List<DownloadedTrack> downloadedTracks = [];
   bool lastDirectoryNeedsAllFilesAccess = false;
@@ -78,11 +84,18 @@ class AppController extends ChangeNotifier {
   final Map<String, LibrarySearchIndex> _librarySearchIndexCache = {};
   final Set<String> _loadingLibraryLyricsKeys = {};
   int _libraryLyricsSearchGeneration = 0;
+  List<DownloadedTrack>? _visibleDownloadedTracksSource;
+  String _visibleDownloadedTracksQuery = '';
+  LibrarySortMode? _visibleDownloadedTracksSortMode;
+  List<DownloadedTrack> _visibleDownloadedTracksCache = const [];
 
   List<PlayerItem> queue = [];
   int currentQueueIndex = -1;
   RepeatMode repeatMode = RepeatMode.none;
   bool shuffleEnabled = true;
+
+  ValueListenable<int> get downloadProgressListenable =>
+      _downloadProgressListenable;
 
   PlayerItem? get currentItem {
     if (currentQueueIndex < 0 || currentQueueIndex >= queue.length) {
@@ -112,6 +125,12 @@ class AppController extends ChangeNotifier {
 
   List<DownloadedTrack> get visibleDownloadedTracks {
     final normalizedQuery = LibrarySearch.normalize(libraryQuery);
+    if (identical(_visibleDownloadedTracksSource, downloadedTracks) &&
+        _visibleDownloadedTracksQuery == normalizedQuery &&
+        _visibleDownloadedTracksSortMode == librarySortMode) {
+      return _visibleDownloadedTracksCache;
+    }
+
     final filtered = normalizedQuery.isEmpty
         ? List<DownloadedTrack>.from(downloadedTracks)
         : downloadedTracks.where((track) {
@@ -132,15 +151,20 @@ class AppController extends ChangeNotifier {
         ),
       };
     });
-    return filtered;
+
+    _visibleDownloadedTracksSource = downloadedTracks;
+    _visibleDownloadedTracksQuery = normalizedQuery;
+    _visibleDownloadedTracksSortMode = librarySortMode;
+    _visibleDownloadedTracksCache = List<DownloadedTrack>.unmodifiable(
+      filtered,
+    );
+    return _visibleDownloadedTracksCache;
   }
 
   Future<void> bootstrap() async {
     settings = await storage.loadSettings();
     await player.setVolume(settings!.volume.clamp(0, 100).toDouble());
-    downloadedTracks = await _hydrateDownloadedCoverCaches(
-      await storage.loadDownloadedTracks(),
-    );
+    downloadedTracks = await storage.loadDownloadedTracks();
     final savedQueue = await storage.loadPlayerQueue();
     queue = savedQueue.items;
     currentQueueIndex = savedQueue.normalizedCurrentIndex;
@@ -152,6 +176,7 @@ class AppController extends ChangeNotifier {
     isReady = true;
     notifyListeners();
     unawaited(_syncAndroidMediaControls(force: true));
+    unawaited(_hydrateDownloadedTracksInBackground());
     if (startupItem != null) {
       unawaited(player.open(startupItem));
     }
@@ -162,15 +187,17 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _handlePlayerPositionChanged() {
+    unawaited(_syncAndroidMediaControls());
+  }
+
   Future<void> _handleAndroidMediaControl(
     String action,
     Duration? position,
   ) async {
     switch (action) {
       case 'play':
-        if (currentItem != null) {
-          await player.play();
-        }
+        await _playCurrentItem();
         break;
       case 'pause':
         await player.pause();
@@ -312,6 +339,7 @@ class AppController extends ChangeNotifier {
     if (changed &&
         generation == _libraryLyricsSearchGeneration &&
         LibrarySearch.normalize(libraryQuery) == normalizedQuery) {
+      _visibleDownloadedTracksSource = null;
       notifyListeners();
     }
   }
@@ -526,7 +554,44 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> togglePlayPause() => player.playOrPause();
+  Future<void> togglePlayPause() async {
+    final item = currentItem;
+    if (item == null) {
+      return;
+    }
+    if (!player.isOpened(item)) {
+      await _openCurrentItemForPlayback();
+      return;
+    }
+    await player.playOrPause();
+  }
+
+  Future<void> _playCurrentItem() async {
+    final item = currentItem;
+    if (item == null) {
+      return;
+    }
+    if (!player.isOpened(item)) {
+      await _openCurrentItemForPlayback();
+      return;
+    }
+    await player.play();
+  }
+
+  Future<bool> _openCurrentItemForPlayback() async {
+    final index = currentQueueIndex;
+    if (index < 0 || index >= queue.length) {
+      return false;
+    }
+    try {
+      await playQueueAt(index);
+      return true;
+    } catch (error) {
+      globalMessage = '播放失败：${_friendlyUnexpectedError(error)}';
+      notifyListeners();
+      return false;
+    }
+  }
 
   Future<void> seekTo(Duration value) => player.seek(value);
 
@@ -915,7 +980,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     final key = _libraryLyricsCacheKey(track);
     _libraryLyricsSearchCache.remove(key);
     _loadingLibraryLyricsKeys.remove(key);
-    await storage.saveDownloadedTracks(downloadedTracks);
+    await _saveDownloadedTracks();
     notifyListeners();
   }
 
@@ -999,7 +1064,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             ),
           ),
         ];
-        await storage.saveDownloadedTracks(downloadedTracks);
+        await _saveDownloadedTracks();
         if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
           unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
         }
@@ -1120,7 +1185,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
               )
             : item,
     ];
-    await storage.saveDownloadedTracks(downloadedTracks);
+    await _saveDownloadedTracks();
     await _saveQueueState();
     globalMessage = null;
     unawaited(_syncAndroidMediaControls(force: true));
@@ -1677,7 +1742,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             ? item.copyWith(album: updated.album)
             : item,
     ];
-    await storage.saveDownloadedTracks(downloadedTracks);
+    await _saveDownloadedTracks();
     await _saveQueueState();
     notifyListeners();
   }
@@ -1729,12 +1794,27 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             ? item.copyWith(album: trimmedAlbum)
             : item,
     ];
-    await storage.saveDownloadedTracks(downloadedTracks);
+    await _saveDownloadedTracks();
     await _saveQueueState();
     if (notify) {
       notifyListeners();
     }
     return true;
+  }
+
+  Future<void> _saveDownloadedTracks() {
+    final snapshot = List<DownloadedTrack>.unmodifiable(downloadedTracks);
+    final previousSave = _downloadedTracksSaveQueue;
+    final operation = () async {
+      try {
+        await previousSave;
+      } catch (_) {
+        // A failed save must not prevent newer library state from persisting.
+      }
+      await storage.saveDownloadedTracks(snapshot);
+    }();
+    _downloadedTracksSaveQueue = operation;
+    return operation;
   }
 
   Future<void> _saveQueueState() {
@@ -1809,6 +1889,16 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         cancelToken: token,
         options: Options(headers: task.candidate.headers),
         onReceiveProgress: (received, total) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          final lastUpdate = _lastDownloadProgressUpdateMillis[taskId];
+          final isComplete = total > 0 && received >= total;
+          if (!isComplete &&
+              lastUpdate != null &&
+              now - lastUpdate <
+                  _downloadProgressUpdateInterval.inMilliseconds) {
+            return;
+          }
+          _lastDownloadProgressUpdateMillis[taskId] = now;
           _replaceTask(
             taskId,
             (task) => task.copyWith(
@@ -1817,7 +1907,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
               totalBytes: total > 0 ? total : null,
             ),
           );
-          notifyListeners();
+          _downloadProgressListenable.value += 1;
         },
       );
 
@@ -1857,6 +1947,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       );
     } finally {
       _cancelTokens.remove(taskId);
+      _lastDownloadProgressUpdateMillis.remove(taskId);
       notifyListeners();
     }
   }
@@ -1921,11 +2012,11 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Referer': referer,
-        'User-Agent': 'QingTing/1.0 (+personal-use)',
+        'User-Agent': 'QingTing/1.2.4 (+personal-use)',
       },
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'User-Agent': 'QingTing/1.0 (+personal-use)',
+        'User-Agent': 'QingTing/1.2.4 (+personal-use)',
       },
     ]) {
       try {
@@ -2075,45 +2166,119 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       ...downloadedTracks.where((track) => track.path != item.path),
     ];
     _libraryLyricsSearchCache.remove(_libraryLyricsCacheKey(item));
-    await storage.saveDownloadedTracks(downloadedTracks);
+    await _saveDownloadedTracks();
     if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
       unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
     }
   }
 
-  Future<List<DownloadedTrack>> _hydrateDownloadedCoverCaches(
-    List<DownloadedTrack> tracks,
-  ) async {
-    var changed = false;
-    final hydrated = <DownloadedTrack>[];
-    for (final track in tracks) {
-      var hydratedTrack = track;
-      final coverFilePath = await storage.ensureEmbeddedCoverCache(track);
-      if (coverFilePath != null && coverFilePath != track.coverFilePath) {
-        hydratedTrack = hydratedTrack.copyWith(coverFilePath: coverFilePath);
+  Future<void> _hydrateDownloadedTracksInBackground() async {
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    var pendingChanges = 0;
+    var hasChanges = false;
+
+    for (final track in List<DownloadedTrack>.from(downloadedTracks)) {
+      if (_isDisposed) {
+        break;
+      }
+      if (await _hydrateDownloadedTrack(track)) {
+        pendingChanges += 1;
+        hasChanges = true;
+      }
+      if (pendingChanges >= 8) {
+        if (!_isDisposed) {
+          notifyListeners();
+        }
+        pendingChanges = 0;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    if (hasChanges) {
+      try {
+        await _saveDownloadedTracks();
+      } catch (_) {
+        // Background hydration is best-effort and can retry next launch.
+      }
+    }
+    if (pendingChanges > 0 && !_isDisposed) {
+      notifyListeners();
+    }
+  }
+
+  Future<bool> _hydrateDownloadedTrack(DownloadedTrack snapshot) async {
+    final snapshotKey = _libraryLyricsCacheKey(snapshot);
+    var current = _downloadedTrackByKey(snapshotKey);
+    if (current == null || current.format.toLowerCase() != 'mp3') {
+      return false;
+    }
+
+    final currentCoverPath = current.coverFilePath?.trim();
+    final hasCover =
+        currentCoverPath != null &&
+        currentCoverPath.isNotEmpty &&
+        await File(currentCoverPath).exists();
+    if (hasCover && current.album.trim().isNotEmpty) {
+      return false;
+    }
+
+    try {
+      final metadata = await Id3LyricsEmbedder.extractMetadata(
+        File(current.path),
+      );
+      String? hydratedCoverPath;
+      if (!hasCover && metadata.cover != null) {
+        hydratedCoverPath = await storage.cacheCoverImage(
+          metadata.cover!,
+          cacheKey:
+              'startup-${current.id}-${p.basenameWithoutExtension(current.path)}',
+        );
+      }
+      final hydratedAlbum = metadata.album?.trim();
+
+      current = _downloadedTrackByKey(snapshotKey);
+      if (current == null) {
+        return false;
+      }
+
+      var updated = current;
+      var changed = false;
+      final latestCoverPath = current.coverFilePath?.trim();
+      final latestHasCover =
+          latestCoverPath != null &&
+          latestCoverPath.isNotEmpty &&
+          await File(latestCoverPath).exists();
+      if (!latestHasCover && hydratedCoverPath != null) {
+        updated = updated.copyWith(coverFilePath: hydratedCoverPath);
         changed = true;
       }
-      if (hydratedTrack.format.toLowerCase() == 'mp3' &&
-          hydratedTrack.album.trim().isEmpty) {
-        try {
-          final metadata = await Id3LyricsEmbedder.extractMetadata(
-            File(hydratedTrack.path),
-          );
-          final album = metadata.album?.trim();
-          if (album != null && album.isNotEmpty) {
-            hydratedTrack = hydratedTrack.copyWith(album: album);
-            changed = true;
-          }
-        } catch (_) {
-          // Keep the saved record if the file cannot be read.
-        }
+      if (updated.album.trim().isEmpty &&
+          hydratedAlbum != null &&
+          hydratedAlbum.isNotEmpty) {
+        updated = updated.copyWith(album: hydratedAlbum);
+        changed = true;
       }
-      hydrated.add(hydratedTrack);
+      if (!changed) {
+        return false;
+      }
+
+      downloadedTracks = [
+        for (final track in downloadedTracks)
+          _libraryLyricsCacheKey(track) == snapshotKey ? updated : track,
+      ];
+      return true;
+    } catch (_) {
+      return false;
     }
-    if (changed) {
-      await storage.saveDownloadedTracks(hydrated);
+  }
+
+  DownloadedTrack? _downloadedTrackByKey(String key) {
+    for (final track in downloadedTracks) {
+      if (_libraryLyricsCacheKey(track) == key) {
+        return track;
+      }
     }
-    return hydrated;
+    return null;
   }
 
   Future<_LocalAudioMetadata> _readLocalAudioMetadata(
@@ -2296,11 +2461,14 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
   @override
   void dispose() {
+    _isDisposed = true;
     AndroidMediaControlsService.setHandler(null);
     unawaited(AndroidMediaControlsService.hide());
     _settingsSaveDebounce?.cancel();
     player.onChanged = null;
+    player.positionListenable.removeListener(_handlePlayerPositionChanged);
     player.onCompleted = null;
+    _downloadProgressListenable.dispose();
     unawaited(player.dispose());
     super.dispose();
   }

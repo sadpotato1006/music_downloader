@@ -32,7 +32,6 @@ class FlutterWindow : public Win32Window {
   void ShowMainWindow();
   void ShowTrayMenu();
   void UnlockDesktopLyricsFromTray();
-  void ShowTrayBalloon(const wchar_t* title, const wchar_t* message);
   void ExitFromTray();
 
   // The project to run.

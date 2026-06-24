@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -219,6 +220,47 @@ void main() {
       expect(metadata.cover?.bytes, coverBytes);
     },
   );
+
+  test('file APIs replace tags while preserving the audio payload', () async {
+    final directory = await Directory.systemTemp.createTemp('qingting-id3-');
+    final file = File('${directory.path}/song.bin');
+    final audioBytes = Uint8List.fromList(
+      List<int>.generate(128 * 1024, (index) => index % 251),
+    );
+    await file.writeAsBytes(audioBytes);
+
+    try {
+      final embedded = await Id3LyricsEmbedder.embedMetadata(
+        file,
+        title: 'Song',
+        artist: 'Artist',
+        album: 'Album',
+        lyrics: '[00:00.00]line',
+      );
+      expect(embedded, isTrue);
+
+      final metadata = await Id3LyricsEmbedder.extractMetadata(file);
+      expect(metadata.title, 'Song');
+      expect(metadata.artist, 'Artist');
+      expect(metadata.album, 'Album');
+      expect(metadata.lyrics, '[00:00.00]line');
+
+      await Id3LyricsEmbedder.embedMetadata(
+        file,
+        title: 'Updated Song',
+        artist: 'Artist',
+        album: 'Updated Album',
+      );
+
+      final updated = await file.readAsBytes();
+      expect(updated.sublist(updated.length - audioBytes.length), audioBytes);
+      final text = latin1.decode(updated, allowInvalid: true);
+      expect(RegExp('TIT2').allMatches(text), hasLength(1));
+      expect(RegExp('TALB').allMatches(text), hasLength(1));
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
 }
 
 Uint8List _id3WithFrames(List<Uint8List> frames) {

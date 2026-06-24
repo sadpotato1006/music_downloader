@@ -4,6 +4,7 @@
 
 #include "flutter_window.h"
 #include "utils.h"
+#include "window_state.h"
 
 namespace {
 
@@ -60,7 +61,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1280, 720);
+  const auto saved_size = window_state::LoadWindowSize(1280, 720);
+  Win32Window::Size size(saved_size.width, saved_size.height);
   if (!window.Create(L"\u9752\u542C", origin, size)) {
     ::CoUninitialize();
     ReleaseMutex(single_instance_mutex);
