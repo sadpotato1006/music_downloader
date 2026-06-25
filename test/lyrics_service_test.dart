@@ -8,6 +8,7 @@ import 'package:qingting/lyrics_service.dart';
 void main() {
   test('prefers exact synced LRCLIB lyrics match', () async {
     final dio = Dio(BaseOptions(responseType: ResponseType.json))
+<<<<<<< HEAD
       ..httpClientAdapter = _LyricsAdapter([
         {
           'trackName': '晴天',
@@ -24,6 +25,9 @@ void main() {
           'syncedLyrics': _correctTimedLyrics,
         },
       ]);
+=======
+      ..httpClientAdapter = _LyricsAdapter();
+>>>>>>> 186e8b78b2c12c13a18b8487dfd1056318d499fc
     final service = LyricsService(
       dio: dio,
       baseUri: Uri.parse('https://lyrics.example.test/'),
@@ -35,6 +39,7 @@ void main() {
       duration: const Duration(minutes: 4, seconds: 29),
     );
 
+<<<<<<< HEAD
     expect(lyrics, _correctTimedLyrics);
   });
 
@@ -107,6 +112,13 @@ class _LyricsAdapter implements HttpClientAdapter {
 
   final List<Map<String, dynamic>> items;
 
+=======
+    expect(lyrics, '[00:01.00]故事的小黄花');
+  });
+}
+
+class _LyricsAdapter implements HttpClientAdapter {
+>>>>>>> 186e8b78b2c12c13a18b8487dfd1056318d499fc
   @override
   Future<ResponseBody> fetch(
     RequestOptions options,
@@ -117,7 +129,24 @@ class _LyricsAdapter implements HttpClientAdapter {
     expect(options.uri.queryParameters['track_name'], '晴天');
     expect(options.uri.queryParameters['artist_name'], '周杰伦');
     return ResponseBody.fromString(
+<<<<<<< HEAD
       jsonEncode(items),
+=======
+      jsonEncode([
+        {
+          'trackName': '晴天 (Live)',
+          'artistName': '其他歌手',
+          'duration': 300,
+          'plainLyrics': '错误结果',
+        },
+        {
+          'trackName': '晴天',
+          'artistName': '周杰伦',
+          'duration': 269,
+          'syncedLyrics': '[00:01.00]故事的小黄花',
+        },
+      ]),
+>>>>>>> 186e8b78b2c12c13a18b8487dfd1056318d499fc
       200,
       headers: {
         Headers.contentTypeHeader: ['application/json; charset=utf-8'],
