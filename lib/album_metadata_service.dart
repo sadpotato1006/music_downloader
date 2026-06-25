@@ -17,7 +17,7 @@ class AlbumMetadataService {
   DateTime? _lastRequestAt;
 
   static const _userAgent =
-      'QingTing/1.2.5 (https://github.com/sadpotato1006/music_downloader)';
+      'QingTing/1.3 (https://github.com/sadpotato1006/music_downloader)';
   static const highConfidenceScore = 72.0;
   static const _accompaniment = '\u4f34\u594f';
   static const _concert = '\u6f14\u5531\u4f1a';

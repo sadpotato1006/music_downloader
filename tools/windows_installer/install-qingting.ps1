@@ -12,7 +12,7 @@ function Join-Chars([int[]]$Codes) {
 
 $AppName = Join-Chars @(0x9752, 0x542C)
 $AppId = "QingTing"
-$Version = "1.2.5"
+$Version = "1.3"
 $Publisher = "Pobb"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PayloadPath = Join-Path $ScriptDir $Payload

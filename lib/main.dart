@@ -12,6 +12,7 @@ import 'app_controller.dart';
 import 'desktop_lyrics_service.dart';
 import 'gequbao_source.dart';
 import 'models.dart';
+import 'my_free_mp3_source.dart';
 
 const _accent = Color(0xFF8FD9A8);
 const _accentStrong = Color(0xFF4AA66A);
@@ -19,10 +20,16 @@ const _ink = Color(0xFF1F2A24);
 const _muted = Color(0xFF6B756F);
 const _surface = Color(0xFFF7FAF8);
 const _line = Color(0xFFE5EFE8);
-const _networkImageHeaders = {
-  'Referer': 'https://www.gequbao.com/',
-  'User-Agent': 'QingTing/1.2.5 (+personal-use)',
-};
+Map<String, String> _networkImageHeadersFor(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  return {
+    'Referer': host.contains('myfreemp3.ink')
+        ? 'https://myfreemp3.ink/'
+        : 'https://www.gequbao.com/',
+    'User-Agent': 'QingTing/1.3 (+personal-use)',
+  };
+}
+
 const _desktopLyricColorOptions = [
   0xFF4AA66A,
   0xFF1F2A24,
@@ -67,7 +74,12 @@ class QingTingApp extends StatefulWidget {
 }
 
 class _QingTingAppState extends State<QingTingApp> {
-  late final AppController controller = AppController(source: GequbaoSource());
+  late final gequbaoSource = GequbaoSource();
+  late final myFreeMp3Source = MyFreeMp3Source();
+  late final AppController controller = AppController(
+    source: gequbaoSource,
+    sources: [gequbaoSource, myFreeMp3Source],
+  );
 
   @override
   void initState() {
@@ -707,6 +719,28 @@ class _SearchPageState extends State<SearchPage> {
         children: [
           Row(
             children: [
+              const Text(
+                '音乐来源',
+                style: TextStyle(color: _muted, fontWeight: FontWeight.w700),
+              ),
+              const Spacer(),
+              OutlinedButton.icon(
+                onPressed:
+                    !controller.canSwitchSource ||
+                        controller.isSearching ||
+                        controller.resolvingPlayId != null ||
+                        controller.preparingDownloadId != null ||
+                        controller.preparingQueueNextId != null
+                    ? null
+                    : () => unawaited(controller.switchToNextSource()),
+                icon: const Icon(Icons.swap_horiz),
+                label: Text(controller.source.name),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
               Expanded(
                 child: TextField(
                   controller: textController,
@@ -759,7 +793,8 @@ class _SearchPageState extends State<SearchPage> {
                       return TrackTile(
                         title: result.title,
                         subtitle: result.displayArtist,
-                        showArtwork: false,
+                        tertiary: result.source,
+                        coverUrl: result.coverUrl,
                         onTap: () => controller.playSearchResult(result),
                         trailing: [
                           _IconAction(
@@ -779,7 +814,10 @@ class _SearchPageState extends State<SearchPage> {
                             icon: controller.preparingDownloadId == result.id
                                 ? Icons.more_horiz
                                 : Icons.download,
-                            onPressed: () => _startDownload(context, result),
+                            onPressed:
+                                controller.preparingDownloadId == result.id
+                                ? null
+                                : () => _startDownload(context, result),
                           ),
                         ],
                       );
@@ -854,41 +892,50 @@ class _SearchHistoryDropdown extends StatelessWidget {
     if (history.isEmpty) {
       return const SizedBox.shrink();
     }
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 220),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: _line),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.06),
-              blurRadius: 18,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        child: ListView.separated(
-          shrinkWrap: true,
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          itemCount: history.length,
-          separatorBuilder: (_, _) =>
-              const Divider(height: 1, indent: 44, endIndent: 12, color: _line),
-          itemBuilder: (context, index) {
-            final item = history[index];
-            return ListTile(
-              dense: true,
-              leading: const Icon(Icons.history, size: 18, color: _muted),
-              title: Text(
-                item,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w600),
+    return TextFieldTapRegion(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 220),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _line),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.06),
+                blurRadius: 18,
+                offset: const Offset(0, 8),
               ),
-              onTap: () => onSelected(item),
-            );
-          },
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: ListView.separated(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              itemCount: history.length,
+              separatorBuilder: (_, _) => const Divider(
+                height: 1,
+                indent: 44,
+                endIndent: 12,
+                color: _line,
+              ),
+              itemBuilder: (context, index) {
+                final item = history[index];
+                return ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.history, size: 18, color: _muted),
+                  title: Text(
+                    item,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  onTap: () => onSelected(item),
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
@@ -4453,7 +4500,7 @@ class _TrackArtwork extends StatelessWidget {
       borderRadius: BorderRadius.circular(borderRadius),
       child: Image.network(
         url,
-        headers: _networkImageHeaders,
+        headers: _networkImageHeadersFor(url),
         width: size,
         height: size,
         cacheWidth: cacheSize,
