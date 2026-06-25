@@ -10,6 +10,14 @@ abstract class MusicSource {
   Future<List<AudioCandidate>> resolveCandidates(TrackDetail detail);
 }
 
+abstract class DownloadMusicSource {
+  Future<List<AudioCandidate>> resolveDownloadCandidates(TrackDetail detail);
+}
+
+abstract class DeferredDownloadMusicSource {
+  Future<AudioCandidate> prepareDownloadCandidate(AudioCandidate candidate);
+}
+
 class MusicSourceException implements Exception {
   const MusicSourceException(this.message);
 

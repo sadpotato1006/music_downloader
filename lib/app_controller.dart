@@ -11,6 +11,7 @@ import 'android_media_controls_service.dart';
 import 'album_metadata_service.dart';
 import 'id3_lyrics_embedder.dart';
 import 'library_search.dart';
+import 'lyrics_service.dart';
 import 'models.dart';
 import 'music_source.dart';
 import 'player_service.dart';
@@ -19,13 +20,17 @@ import 'storage_service.dart';
 class AppController extends ChangeNotifier {
   AppController({
     required this.source,
+    List<MusicSource>? sources,
     StorageService? storage,
     PlaybackService? player,
     Dio? downloadDio,
     AlbumMetadataService? albumMetadata,
-  }) : storage = storage ?? StorageService(),
+    LyricsService? lyricsService,
+  }) : sources = List<MusicSource>.unmodifiable(sources ?? [source]),
+       storage = storage ?? StorageService(),
        player = player ?? PlayerService(),
        albumMetadata = albumMetadata ?? AlbumMetadataService(),
+       lyricsService = lyricsService ?? LyricsService(),
        _downloadDio = downloadDio ?? Dio() {
     this.player.onChanged = _handlePlayerChanged;
     this.player.positionListenable.addListener(_handlePlayerPositionChanged);
@@ -33,13 +38,16 @@ class AppController extends ChangeNotifier {
     AndroidMediaControlsService.setHandler(_handleAndroidMediaControl);
   }
 
-  final MusicSource source;
+  final List<MusicSource> sources;
+  MusicSource source;
   final StorageService storage;
   final PlaybackService player;
   final AlbumMetadataService albumMetadata;
+  final LyricsService lyricsService;
   final Dio _downloadDio;
   final Random _shuffleRandom = Random();
   final Map<String, CancelToken> _cancelTokens = {};
+  final Set<String> _preparingDownloadKeys = {};
   static const _sourceRequestGap = Duration(seconds: 2);
   static const _cooldown520 = Duration(minutes: 3);
   static const _cooldown403 = Duration(minutes: 10);
@@ -126,6 +134,8 @@ class AppController extends ChangeNotifier {
     }
     return '${sourceCooldownReason ?? '请求太频繁'}，请等待 ${_formatCooldown(remaining)} 后再试。';
   }
+
+  bool get canSwitchSource => sources.length > 1;
 
   List<DownloadedTrack> get visibleDownloadedTracks {
     final normalizedQuery = LibrarySearch.normalize(libraryQuery);
@@ -419,6 +429,30 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> switchToNextSource() async {
+    if (!canSwitchSource ||
+        isSearching ||
+        resolvingPlayId != null ||
+        preparingDownloadId != null ||
+        preparingQueueNextId != null) {
+      return;
+    }
+    final currentIndex = sources.indexWhere((item) => item.name == source.name);
+    source = sources[(currentIndex + 1) % sources.length];
+    sourceCooldownUntil = null;
+    sourceCooldownReason = null;
+    _lastSourceRequestAt = null;
+    searchResults = [];
+    searchError = null;
+    globalMessage = '已切换到 ${source.name}';
+    notifyListeners();
+
+    final keyword = searchQuery.trim();
+    if (keyword.isNotEmpty) {
+      await search(keyword);
+    }
+  }
+
   Future<void> search(String value) async {
     final keyword = value.trim();
     searchQuery = keyword;
@@ -501,12 +535,13 @@ class AppController extends ChangeNotifier {
 
   Future<void> playSearchResult(TrackSearchResult result) async {
     resolvingPlayId = result.id;
-    globalMessage = null;
+    globalMessage = '正在准备播放：${result.title}';
     notifyListeners();
 
     try {
       final item = await _resolveSearchResultPlayerItem(result, '播放');
       await _enqueueAndPlay(item);
+      globalMessage = '已开始播放：${item.title}';
     } on MusicSourceException catch (error) {
       globalMessage = error.message;
     } catch (error) {
@@ -953,16 +988,31 @@ class AppController extends ChangeNotifier {
       return const DownloadStartResult.failed('应用还没有准备好。');
     }
 
+    if (_isTrackDownloaded(result)) {
+      return DownloadStartResult.failed('“${result.title}”已经下载过了。');
+    }
+    if (_hasActiveDownloadTask(result)) {
+      return DownloadStartResult.failed('“${result.title}”已在下载队列中。');
+    }
+    final downloadKey = _downloadKey(result);
+    if (!_preparingDownloadKeys.add(downloadKey)) {
+      return DownloadStartResult.failed('“${result.title}”已在准备下载。');
+    }
+
     preparingDownloadId = result.id;
     globalMessage = null;
     notifyListeners();
 
     try {
+      final requestSource = _sourceForName(result.source);
       final detail = await _runSourceRequest(
         '下载',
-        () => source.loadDetail(result),
+        () => requestSource.loadDetail(result),
       );
-      final candidates = await source.resolveCandidates(detail);
+      final candidates = requestSource is DownloadMusicSource
+          ? await (requestSource as DownloadMusicSource)
+                .resolveDownloadCandidates(detail)
+          : await requestSource.resolveCandidates(detail);
       final candidate = _pickPreferredCandidate(candidates, allowNonMp3: true);
       if (candidate == null) {
         return const DownloadStartResult.failed('这个歌曲页面没有找到可下载的公开音频链接。');
@@ -1007,9 +1057,27 @@ class AppController extends ChangeNotifier {
         '创建下载任务失败：${_friendlyUnexpectedError(error)}',
       );
     } finally {
+      _preparingDownloadKeys.remove(downloadKey);
       preparingDownloadId = null;
       notifyListeners();
     }
+  }
+
+  String _downloadKey(TrackSearchResult result) =>
+      '${result.source}\u0000${result.id}';
+
+  bool _isTrackDownloaded(TrackSearchResult result) {
+    return downloadedTracks.any((track) => track.id == result.id);
+  }
+
+  bool _hasActiveDownloadTask(TrackSearchResult result) {
+    return downloadTasks.any(
+      (task) =>
+          task.track.id == result.id &&
+          task.track.source == result.source &&
+          task.status != DownloadStatus.failed &&
+          task.status != DownloadStatus.canceled,
+    );
   }
 
   void pauseDownload(String taskId) {
@@ -1663,7 +1731,9 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       return result;
     } on MusicSourceException catch (error) {
       _activateCooldownIfNeeded(error.message);
-      throw MusicSourceException(_friendlySourceMessage(error.message, action));
+      throw MusicSourceException(
+        _friendlySourceMessage(error.message, action, source.name),
+      );
     } catch (error) {
       throw MusicSourceException(
         '$action失败：${_friendlyUnexpectedError(error)}',
@@ -1683,7 +1753,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       return;
     }
     throw MusicSourceException(
-      '${sourceCooldownReason ?? '请求太频繁'}，青听已暂停访问歌曲宝 ${_formatCooldown(remaining)}。',
+      '${sourceCooldownReason ?? '请求太频繁'}，青听已暂停访问 ${source.name} ${_formatCooldown(remaining)}。',
     );
   }
 
@@ -1708,7 +1778,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         lower.contains('523') ||
         lower.contains('524')) {
       cooldown = _cooldown520;
-      reason = '歌曲宝临时拦截或异常返回';
+      reason = '${source.name} 临时拦截或异常返回';
     } else if (lower.contains('429') || lower.contains('频繁')) {
       cooldown = _cooldown429;
       reason = '请求太频繁';
@@ -1716,7 +1786,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         lower.contains('拒绝') ||
         lower.contains('验证')) {
       cooldown = _cooldown403;
-      reason = '歌曲宝拒绝访问';
+      reason = '${source.name} 拒绝访问';
     }
     if (cooldown == null) {
       return;
@@ -1734,19 +1804,23 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     sourceCooldownReason = null;
   }
 
-  String _friendlySourceMessage(String message, String action) {
+  String _friendlySourceMessage(
+    String message,
+    String action,
+    String sourceName,
+  ) {
     final lower = message.toLowerCase();
     if (lower.contains('520')) {
-      return '歌曲宝返回 HTTP 520，通常是短时间请求太多或被网站临时拦截。青听已自动冷却几分钟，稍后再试。';
+      return '$sourceName 返回 HTTP 520，通常是短时间请求太多或被网站临时拦截。青听已自动冷却几分钟，稍后再试。';
     }
     if (lower.contains('403') || lower.contains('拒绝')) {
-      return '歌曲宝拒绝了这次$action请求。可能是访问太频繁、链接过期，或该页面不允许程序读取。';
+      return '$sourceName 拒绝了这次$action请求。可能是访问太频繁、链接过期，或该页面不允许程序读取。';
     }
     if (lower.contains('429') || lower.contains('频繁')) {
-      return '请求太频繁，青听已暂停访问歌曲宝一会儿，稍后再试。';
+      return '请求太频繁，青听已暂停访问 $sourceName 一会儿，稍后再试。';
     }
     if (lower.contains('验证')) {
-      return '歌曲宝要求验证后才能继续，青听不会绕过验证。请稍后重试。';
+      return '$sourceName 要求验证后才能继续，青听不会绕过验证。请稍后重试。';
     }
     if (lower.contains('timeout') || lower.contains('timed out')) {
       return '$action超时，请检查网络后重试。';
@@ -1870,12 +1944,20 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     TrackSearchResult result,
     String action,
   ) async {
+    final requestSource = _sourceForName(result.source);
     final detail = await _runSourceRequest(
       action,
-      () => source.loadDetail(result),
+      () => requestSource.loadDetail(result),
+    );
+    final candidatesFuture = requestSource.resolveCandidates(detail);
+    final lyricsFuture = _lyricsForTrack(
+      existingLyrics: detail.lyrics,
+      title: detail.title,
+      artist: detail.artist,
+      durationText: result.duration,
     );
     final candidate = _pickPreferredCandidate(
-      await source.resolveCandidates(detail),
+      await candidatesFuture,
       allowNonMp3: true,
     );
     if (candidate == null) {
@@ -1888,7 +1970,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       uri: candidate.url,
       headers: candidate.headers,
       coverUrl: detail.coverUrl ?? result.coverUrl,
-      lyrics: detail.lyrics,
+      lyrics: await lyricsFuture,
       album: detail.album,
     );
   }
@@ -2186,11 +2268,41 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     notifyListeners();
 
     try {
+      var activeTask = task;
+      final lyricsFuture = _lyricsForTrack(
+        existingLyrics: task.lyrics,
+        title: task.track.title,
+        artist: task.track.artist,
+        durationText: task.track.duration,
+      );
+      final taskSource = _sourceForName(task.track.source);
+      if (taskSource is DeferredDownloadMusicSource) {
+        final candidate = await (taskSource as DeferredDownloadMusicSource)
+            .prepareDownloadCandidate(activeTask.candidate);
+        activeTask = activeTask.copyWith(candidate: candidate);
+        _replaceTask(
+          taskId,
+          (current) => current.copyWith(candidate: candidate),
+        );
+      }
+      final lyrics = await lyricsFuture;
+      final currentTask = _taskById(taskId);
+      if (currentTask == null ||
+          currentTask.status == DownloadStatus.canceled ||
+          currentTask.status == DownloadStatus.paused) {
+        return;
+      }
+      activeTask = currentTask.copyWith(
+        candidate: activeTask.candidate,
+        lyrics: lyrics ?? currentTask.lyrics,
+      );
+      _replaceTask(taskId, (_) => activeTask);
+
       await _downloadDio.download(
-        task.candidate.url,
-        task.savePath,
+        activeTask.candidate.url,
+        activeTask.savePath,
         cancelToken: token,
-        options: Options(headers: task.candidate.headers),
+        options: Options(headers: activeTask.candidate.headers),
         onReceiveProgress: (received, total) {
           final now = DateTime.now().millisecondsSinceEpoch;
           final lastUpdate = _lastDownloadProgressUpdateMillis[taskId];
@@ -2232,27 +2344,77 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         (task) => task.copyWith(status: DownloadStatus.completed, progress: 1),
       );
       await _addDownloadedTrack(completedTask);
+      globalMessage = '下载完成：${completedTask.track.title}';
     } on DioException catch (error) {
       if (CancelToken.isCancel(error)) {
         return;
       }
+      final message = _downloadErrorMessage(
+        error,
+        sourceName: task.track.source,
+      );
       _replaceTask(
         taskId,
-        (task) => task.copyWith(
-          status: DownloadStatus.failed,
-          error: _downloadErrorMessage(error),
-        ),
+        (task) => task.copyWith(status: DownloadStatus.failed, error: message),
       );
+      globalMessage = '下载失败：${task.track.title}。$message';
     } catch (error) {
+      final message = '$error';
       _replaceTask(
         taskId,
-        (task) => task.copyWith(status: DownloadStatus.failed, error: '$error'),
+        (task) => task.copyWith(status: DownloadStatus.failed, error: message),
       );
+      globalMessage = '下载失败：${task.track.title}。$message';
     } finally {
       _cancelTokens.remove(taskId);
       _lastDownloadProgressUpdateMillis.remove(taskId);
       notifyListeners();
     }
+  }
+
+  MusicSource _sourceForName(String sourceName) {
+    for (final item in sources) {
+      if (item.name == sourceName) {
+        return item;
+      }
+    }
+    return source;
+  }
+
+  Future<String?> _lyricsForTrack({
+    required String? existingLyrics,
+    required String title,
+    required String artist,
+    required String? durationText,
+  }) async {
+    final existing = existingLyrics?.trim();
+    if (existing != null && existing.isNotEmpty) {
+      return existing;
+    }
+    return lyricsService.findLyrics(
+      title: title,
+      artist: artist,
+      duration: _parseTrackDuration(durationText),
+    );
+  }
+
+  Duration? _parseTrackDuration(String? value) {
+    final parts = value
+        ?.trim()
+        .split(':')
+        .map(int.tryParse)
+        .toList(growable: false);
+    if (parts == null ||
+        parts.isEmpty ||
+        parts.any((part) => part == null) ||
+        parts.length > 3) {
+      return null;
+    }
+    var seconds = 0;
+    for (final part in parts) {
+      seconds = seconds * 60 + part!;
+    }
+    return Duration(seconds: seconds);
   }
 
   Future<DownloadTask> _matchAlbumForDownloadTask(DownloadTask task) async {
@@ -2315,11 +2477,11 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Referer': referer,
-        'User-Agent': 'QingTing/1.2.5 (+personal-use)',
+        'User-Agent': 'QingTing/1.3 (+personal-use)',
       },
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'User-Agent': 'QingTing/1.2.5 (+personal-use)',
+        'User-Agent': 'QingTing/1.3 (+personal-use)',
       },
     ]) {
       try {
@@ -2673,17 +2835,22 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     return '';
   }
 
-  String _downloadErrorMessage(DioException error) {
+  String _downloadErrorMessage(
+    DioException error, {
+    required String sourceName,
+  }) {
     final status = error.response?.statusCode;
     if (status == 403) {
-      return '下载链接被拒绝访问。可能是歌曲宝临时拦截、下载地址过期，或该资源不允许公开下载。';
+      return '下载链接被拒绝访问。可能是 $sourceName 临时拦截、下载地址过期，或该资源不允许公开下载。';
     }
     if (status == 404) {
       return '下载链接不存在或已经失效。请重新搜索后再试。';
     }
     if (status == 429 || status == 520) {
-      _activateCooldownIfNeeded('HTTP $status');
-      return '歌曲宝返回 HTTP $status，可能是请求太频繁。青听已自动冷却，稍后再试。';
+      if (sourceName == source.name) {
+        _activateCooldownIfNeeded('HTTP $status');
+      }
+      return '$sourceName 返回 HTTP $status，可能是请求太频繁。青听已自动冷却，稍后再试。';
     }
     if (status != null) {
       return '下载失败：HTTP $status。';

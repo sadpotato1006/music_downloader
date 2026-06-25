@@ -167,6 +167,7 @@ class DownloadTask {
   final String album;
 
   DownloadTask copyWith({
+    AudioCandidate? candidate,
     DownloadStatus? status,
     double? progress,
     String? savePath,
@@ -179,7 +180,7 @@ class DownloadTask {
     return DownloadTask(
       id: id,
       track: track,
-      candidate: candidate,
+      candidate: candidate ?? this.candidate,
       status: status ?? this.status,
       progress: progress ?? this.progress,
       savePath: savePath ?? this.savePath,
