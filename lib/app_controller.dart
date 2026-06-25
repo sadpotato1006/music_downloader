@@ -56,6 +56,7 @@ class AppController extends ChangeNotifier {
   String? _lastMediaControlsSignature;
   bool _isDisposed = false;
   Future<void> _downloadedTracksSaveQueue = Future<void>.value();
+  Future<void> _myMusicSaveQueue = Future<void>.value();
 
   String searchQuery = '';
   bool isSearching = false;
@@ -74,6 +75,9 @@ class AppController extends ChangeNotifier {
   static const _downloadProgressUpdateInterval = Duration(milliseconds: 100);
 
   List<DownloadedTrack> downloadedTracks = [];
+  MyMusicData myMusic = const MyMusicData();
+  static const int maxRecentPlaybacks = 100;
+
   bool lastDirectoryNeedsAllFilesAccess = false;
   bool isScanningDownloadDirectory = false;
   bool isMatchingLocalAlbums = false;
@@ -161,8 +165,62 @@ class AppController extends ChangeNotifier {
     return _visibleDownloadedTracksCache;
   }
 
+  List<DownloadedTrack> get favoriteTracks =>
+      _tracksForPaths(myMusic.favoriteTrackPaths);
+
+  List<DownloadedTrack> get recentTracks => _tracksForPaths(
+    myMusic.recentPlaybacks.map((playback) => playback.trackPath),
+  );
+
+  List<DownloadedTrack> tracksForPlaylist(String playlistId) {
+    final playlist = playlistById(playlistId);
+    return playlist == null
+        ? const <DownloadedTrack>[]
+        : _tracksForPaths(playlist.trackPaths);
+  }
+
+  MusicPlaylist? playlistById(String playlistId) {
+    for (final playlist in myMusic.playlists) {
+      if (playlist.id == playlistId) {
+        return playlist;
+      }
+    }
+    return null;
+  }
+
+  bool isFavorite(DownloadedTrack track) {
+    final key = _trackPathKey(track.path);
+    return myMusic.favoriteTrackPaths.any((path) => _trackPathKey(path) == key);
+  }
+
+  bool isTrackInPlaylist(String playlistId, DownloadedTrack track) {
+    final playlist = playlistById(playlistId);
+    if (playlist == null) {
+      return false;
+    }
+    final key = _trackPathKey(track.path);
+    return playlist.trackPaths.any((path) => _trackPathKey(path) == key);
+  }
+
+  List<DownloadedTrack> _tracksForPaths(Iterable<String> paths) {
+    final tracksByPath = {
+      for (final track in downloadedTracks) _trackPathKey(track.path): track,
+    };
+    final result = <DownloadedTrack>[];
+    final seen = <String>{};
+    for (final path in paths) {
+      final key = _trackPathKey(path);
+      final track = tracksByPath[key];
+      if (track != null && seen.add(key)) {
+        result.add(track);
+      }
+    }
+    return List<DownloadedTrack>.unmodifiable(result);
+  }
+
   Future<void> bootstrap() async {
     settings = await storage.loadSettings();
+    myMusic = await storage.loadMyMusic();
     await player.setVolume(settings!.volume.clamp(0, 100).toDouble());
     downloadedTracks = await storage.loadDownloadedTracks();
     final savedQueue = await storage.loadPlayerQueue();
@@ -510,6 +568,180 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<void> toggleFavorite(DownloadedTrack track) async {
+    final key = _trackPathKey(track.path);
+    final wasFavorite = isFavorite(track);
+    final updated = wasFavorite
+        ? myMusic.favoriteTrackPaths
+              .where((path) => _trackPathKey(path) != key)
+              .toList()
+        : [
+            track.path,
+            ...myMusic.favoriteTrackPaths.where(
+              (path) => _trackPathKey(path) != key,
+            ),
+          ];
+    myMusic = myMusic.copyWith(favoriteTrackPaths: updated);
+    await _saveMyMusic();
+    globalMessage = wasFavorite
+        ? '已取消喜欢：${track.title}'
+        : '已添加到我喜欢：${track.title}';
+    notifyListeners();
+  }
+
+  Future<MusicPlaylist?> createPlaylist(String name) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      globalMessage = '歌单名称不能为空';
+      notifyListeners();
+      return null;
+    }
+    if (myMusic.playlists.any(
+      (playlist) => playlist.name.trim().toLowerCase() == trimmed.toLowerCase(),
+    )) {
+      globalMessage = '已存在同名歌单';
+      notifyListeners();
+      return null;
+    }
+
+    final now = DateTime.now();
+    final playlist = MusicPlaylist(
+      id: 'playlist-${now.microsecondsSinceEpoch}',
+      name: trimmed,
+      trackPaths: const [],
+      createdAt: now,
+    );
+    myMusic = myMusic.copyWith(playlists: [playlist, ...myMusic.playlists]);
+    await _saveMyMusic();
+    globalMessage = '已创建歌单：$trimmed';
+    notifyListeners();
+    return playlist;
+  }
+
+  Future<bool> renamePlaylist(String playlistId, String name) async {
+    final trimmed = name.trim();
+    final current = playlistById(playlistId);
+    if (current == null || trimmed.isEmpty) {
+      return false;
+    }
+    if (myMusic.playlists.any(
+      (playlist) =>
+          playlist.id != playlistId &&
+          playlist.name.trim().toLowerCase() == trimmed.toLowerCase(),
+    )) {
+      globalMessage = '已存在同名歌单';
+      notifyListeners();
+      return false;
+    }
+    myMusic = myMusic.copyWith(
+      playlists: [
+        for (final playlist in myMusic.playlists)
+          playlist.id == playlistId
+              ? playlist.copyWith(name: trimmed)
+              : playlist,
+      ],
+    );
+    await _saveMyMusic();
+    globalMessage = '已重命名歌单：$trimmed';
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> deletePlaylist(String playlistId) async {
+    final playlist = playlistById(playlistId);
+    if (playlist == null) {
+      return;
+    }
+    myMusic = myMusic.copyWith(
+      playlists: myMusic.playlists
+          .where((item) => item.id != playlistId)
+          .toList(),
+    );
+    await _saveMyMusic();
+    globalMessage = '已删除歌单：${playlist.name}';
+    notifyListeners();
+  }
+
+  Future<bool> setTrackInPlaylist(
+    String playlistId,
+    DownloadedTrack track, {
+    required bool included,
+  }) async {
+    final playlist = playlistById(playlistId);
+    if (playlist == null) {
+      return false;
+    }
+    final key = _trackPathKey(track.path);
+    final alreadyIncluded = playlist.trackPaths.any(
+      (path) => _trackPathKey(path) == key,
+    );
+    if (alreadyIncluded == included) {
+      return true;
+    }
+    final paths = included
+        ? [track.path, ...playlist.trackPaths]
+        : playlist.trackPaths
+              .where((path) => _trackPathKey(path) != key)
+              .toList();
+    myMusic = myMusic.copyWith(
+      playlists: [
+        for (final item in myMusic.playlists)
+          item.id == playlistId ? item.copyWith(trackPaths: paths) : item,
+      ],
+    );
+    await _saveMyMusic();
+    globalMessage = included
+        ? '已将“${track.title}”加入歌单“${playlist.name}”'
+        : '已从歌单“${playlist.name}”移除“${track.title}”';
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> clearRecentPlaybacks() async {
+    if (myMusic.recentPlaybacks.isEmpty) {
+      return;
+    }
+    myMusic = myMusic.copyWith(recentPlaybacks: const []);
+    await _saveMyMusic();
+    globalMessage = '已清空最近播放';
+    notifyListeners();
+  }
+
+  Future<void> playDownloadedCollection(
+    Iterable<DownloadedTrack> tracks, {
+    bool shuffle = false,
+  }) async {
+    final ordered = List<DownloadedTrack>.from(tracks);
+    if (ordered.isEmpty) {
+      globalMessage = '当前列表中没有歌曲';
+      notifyListeners();
+      return;
+    }
+    if (shuffle) {
+      ordered.shuffle(_shuffleRandom);
+    }
+    final items = <PlayerItem>[];
+    for (final track in ordered) {
+      final item = await _playerItemFromDownloadedTrack(
+        track,
+        includeLyrics: false,
+        showMissingMessage: false,
+      );
+      if (item != null) {
+        items.add(item);
+      }
+    }
+    if (items.isEmpty) {
+      globalMessage = '没有可播放的歌曲，请检查本地文件是否存在';
+      notifyListeners();
+      return;
+    }
+    queue = items;
+    currentQueueIndex = 0;
+    shuffleEnabled = shuffle;
+    await playQueueAt(0);
+  }
+
   Future<void> playQueueAt(int index) async {
     if (index < 0 || index >= queue.length) {
       return;
@@ -526,6 +758,7 @@ class AppController extends ChangeNotifier {
     notifyListeners();
     unawaited(_syncAndroidMediaControls(force: true));
     await player.open(item);
+    await _recordRecentPlayback(item);
   }
 
   Future<void> playNext() async {
@@ -980,6 +1213,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     final key = _libraryLyricsCacheKey(track);
     _libraryLyricsSearchCache.remove(key);
     _loadingLibraryLyricsKeys.remove(key);
+    await _removeTrackFromMyMusic(track.path);
     await _saveDownloadedTracks();
     notifyListeners();
   }
@@ -1802,6 +2036,75 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     return true;
   }
 
+  Future<void> _recordRecentPlayback(PlayerItem item) async {
+    final localPath = item.localPath?.trim();
+    if (localPath == null || localPath.isEmpty) {
+      return;
+    }
+    final key = _trackPathKey(localPath);
+    if (!downloadedTracks.any((track) => _trackPathKey(track.path) == key)) {
+      return;
+    }
+    final updated = <RecentPlayback>[
+      RecentPlayback(trackPath: localPath, playedAt: DateTime.now()),
+      ...myMusic.recentPlaybacks.where(
+        (playback) => _trackPathKey(playback.trackPath) != key,
+      ),
+    ];
+    myMusic = myMusic.copyWith(
+      recentPlaybacks: updated.take(maxRecentPlaybacks).toList(),
+    );
+    await _saveMyMusic();
+    notifyListeners();
+  }
+
+  Future<void> _removeTrackFromMyMusic(String trackPath) async {
+    final key = _trackPathKey(trackPath);
+    myMusic = myMusic.copyWith(
+      favoriteTrackPaths: myMusic.favoriteTrackPaths
+          .where((path) => _trackPathKey(path) != key)
+          .toList(),
+      playlists: [
+        for (final playlist in myMusic.playlists)
+          playlist.copyWith(
+            trackPaths: playlist.trackPaths
+                .where((path) => _trackPathKey(path) != key)
+                .toList(),
+          ),
+      ],
+      recentPlaybacks: myMusic.recentPlaybacks
+          .where((playback) => _trackPathKey(playback.trackPath) != key)
+          .toList(),
+    );
+    await _saveMyMusic();
+  }
+
+  Future<void> _saveMyMusic() {
+    final snapshot = MyMusicData(
+      favoriteTrackPaths: List<String>.unmodifiable(myMusic.favoriteTrackPaths),
+      playlists: [
+        for (final playlist in myMusic.playlists)
+          playlist.copyWith(
+            trackPaths: List<String>.unmodifiable(playlist.trackPaths),
+          ),
+      ],
+      recentPlaybacks: List<RecentPlayback>.unmodifiable(
+        myMusic.recentPlaybacks,
+      ),
+    );
+    final previousSave = _myMusicSaveQueue;
+    final operation = () async {
+      try {
+        await previousSave;
+      } catch (_) {
+        // A failed save must not prevent newer collection state from saving.
+      }
+      await storage.saveMyMusic(snapshot);
+    }();
+    _myMusicSaveQueue = operation;
+    return operation;
+  }
+
   Future<void> _saveDownloadedTracks() {
     final snapshot = List<DownloadedTrack>.unmodifiable(downloadedTracks);
     final previousSave = _downloadedTracksSaveQueue;
@@ -2012,11 +2315,11 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Referer': referer,
-        'User-Agent': 'QingTing/1.2.4 (+personal-use)',
+        'User-Agent': 'QingTing/1.2.5 (+personal-use)',
       },
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'User-Agent': 'QingTing/1.2.4 (+personal-use)',
+        'User-Agent': 'QingTing/1.2.5 (+personal-use)',
       },
     ]) {
       try {
@@ -2433,6 +2736,11 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
   int _compareText(String left, String right) {
     return left.toLowerCase().compareTo(right.toLowerCase());
+  }
+
+  String _trackPathKey(String value) {
+    final normalized = p.normalize(value.trim());
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
   }
 
   String _normalizeManualDownloadPath(String value) {

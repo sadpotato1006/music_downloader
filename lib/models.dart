@@ -286,6 +286,136 @@ class DownloadedTrack {
   }
 }
 
+class MusicPlaylist {
+  const MusicPlaylist({
+    required this.id,
+    required this.name,
+    required this.trackPaths,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String name;
+  final List<String> trackPaths;
+  final DateTime createdAt;
+
+  MusicPlaylist copyWith({
+    String? id,
+    String? name,
+    List<String>? trackPaths,
+    DateTime? createdAt,
+  }) {
+    return MusicPlaylist(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      trackPaths: trackPaths ?? this.trackPaths,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'trackPaths': trackPaths,
+    'createdAt': createdAt.toIso8601String(),
+  };
+
+  factory MusicPlaylist.fromJson(Map<String, dynamic> json) {
+    return MusicPlaylist(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? '未命名歌单',
+      trackPaths: (json['trackPaths'] as List<dynamic>? ?? const <dynamic>[])
+          .map((item) => item.toString())
+          .where((item) => item.trim().isNotEmpty)
+          .toList(),
+      createdAt:
+          DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  }
+}
+
+class RecentPlayback {
+  const RecentPlayback({required this.trackPath, required this.playedAt});
+
+  final String trackPath;
+  final DateTime playedAt;
+
+  Map<String, dynamic> toJson() => {
+    'trackPath': trackPath,
+    'playedAt': playedAt.toIso8601String(),
+  };
+
+  factory RecentPlayback.fromJson(Map<String, dynamic> json) {
+    return RecentPlayback(
+      trackPath: json['trackPath'] as String? ?? '',
+      playedAt:
+          DateTime.tryParse(json['playedAt'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  }
+}
+
+class MyMusicData {
+  const MyMusicData({
+    this.favoriteTrackPaths = const [],
+    this.playlists = const [],
+    this.recentPlaybacks = const [],
+  });
+
+  final List<String> favoriteTrackPaths;
+  final List<MusicPlaylist> playlists;
+  final List<RecentPlayback> recentPlaybacks;
+
+  MyMusicData copyWith({
+    List<String>? favoriteTrackPaths,
+    List<MusicPlaylist>? playlists,
+    List<RecentPlayback>? recentPlaybacks,
+  }) {
+    return MyMusicData(
+      favoriteTrackPaths: favoriteTrackPaths ?? this.favoriteTrackPaths,
+      playlists: playlists ?? this.playlists,
+      recentPlaybacks: recentPlaybacks ?? this.recentPlaybacks,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'favoriteTrackPaths': favoriteTrackPaths,
+    'playlists': playlists.map((playlist) => playlist.toJson()).toList(),
+    'recentPlaybacks': recentPlaybacks
+        .map((playback) => playback.toJson())
+        .toList(),
+  };
+
+  factory MyMusicData.fromJson(Map<String, dynamic> json) {
+    final rawPlaylists =
+        json['playlists'] as List<dynamic>? ?? const <dynamic>[];
+    final rawRecent =
+        json['recentPlaybacks'] as List<dynamic>? ?? const <dynamic>[];
+    return MyMusicData(
+      favoriteTrackPaths:
+          (json['favoriteTrackPaths'] as List<dynamic>? ?? const <dynamic>[])
+              .map((item) => item.toString())
+              .where((item) => item.trim().isNotEmpty)
+              .toList(),
+      playlists: rawPlaylists
+          .whereType<Map>()
+          .map(
+            (item) => MusicPlaylist.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .where((playlist) => playlist.id.trim().isNotEmpty)
+          .toList(),
+      recentPlaybacks: rawRecent
+          .whereType<Map>()
+          .map(
+            (item) => RecentPlayback.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .where((playback) => playback.trackPath.trim().isNotEmpty)
+          .toList(),
+    );
+  }
+}
+
 class AppSettings {
   const AppSettings({
     required this.downloadDirectory,

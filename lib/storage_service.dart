@@ -11,6 +11,7 @@ class StorageService {
   static const _settingsFileName = 'settings.json';
   static const _libraryFileName = 'downloads.json';
   static const _queueFileName = 'queue.json';
+  static const _myMusicFileName = 'my_music.json';
 
   Future<AppSettings> loadSettings() async {
     final file = await _supportFile(_settingsFileName);
@@ -59,6 +60,28 @@ class StorageService {
       const JsonEncoder.withIndent(
         '  ',
       ).convert(tracks.map((track) => track.toJson()).toList()),
+    );
+  }
+
+  Future<MyMusicData> loadMyMusic() async {
+    final file = await _supportFile(_myMusicFileName);
+    if (!await file.exists()) {
+      return const MyMusicData();
+    }
+
+    try {
+      final json =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      return MyMusicData.fromJson(json);
+    } catch (_) {
+      return const MyMusicData();
+    }
+  }
+
+  Future<void> saveMyMusic(MyMusicData data) async {
+    final file = await _supportFile(_myMusicFileName);
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(data.toJson()),
     );
   }
 

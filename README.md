@@ -6,7 +6,7 @@
 
 青听是一款使用 Flutter 开发的个人音乐工具，支持在 Android 和 Windows 上搜索、播放、下载及管理音乐。
 
-当前版本：`v1.2.4+14`
+当前版本：`v1.2.5+15`
 
 > 本项目仅解析公开可访问的网页内容，不处理登录、付费、验证码、DRM 或其他访问限制。
 
@@ -36,6 +36,7 @@
 - 扫描下载目录，将已有歌曲导入本地曲库
 - 按歌名、歌手、专辑、歌词、拼音或拼音首字母搜索
 - 编辑本地歌曲的歌名、歌手、专辑、歌词和封面
+- 通过歌曲的“更多”菜单收藏或取消收藏，创建自定义歌单并查看最近播放
 - 打开歌曲文件或所在目录
 - 批量补全缺失的专辑名称
 
@@ -100,6 +101,8 @@ flutter run -d <device-id>
 
 ## 检查与测试
 
+仓库中的源码、脚本和文档统一使用 UTF-8 编码；编辑器建议启用 `.editorconfig` 支持，避免中文提示被错误转码。
+
 ```powershell
 flutter analyze
 flutter test
@@ -149,10 +152,10 @@ flutter build windows --release
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File tools\windows_installer\build-windows-installer.ps1 `
-  -Version 1.2.4
+  -Version 1.2.5
 ```
 
-安装程序输出到 `dist\QingTingSetup-v1_2_4.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。
+安装程序输出到 `dist\QingTingSetup-v1_2_5.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。
 
 ## 项目结构
 
