@@ -6,9 +6,16 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.MediaRouter
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
@@ -25,9 +32,18 @@ class MainActivity : FlutterActivity() {
     private val storageChannel = "qingting/storage"
     private val desktopLyricsChannel = "qingting/desktop_lyrics"
     private val mediaControlsChannel = "qingting/media_controls"
+    private val audioRouteChannel = "qingting/audio_route"
     private var lyricOverlayView: TextView? = null
     private var lyricOverlayParams: WindowManager.LayoutParams? = null
     private var androidMediaControls: AndroidMediaControls? = null
+    private var audioRouteMethodChannel: MethodChannel? = null
+    private var audioDeviceCallback: AudioDeviceCallback? = null
+    private var mediaRouter: MediaRouter? = null
+    private var mediaRouterCallback: MediaRouter.Callback? = null
+    private var bluetoothAudioDeviceIds = emptySet<Int>()
+    private var selectedBluetoothRouteKey: String? = null
+    private var audioRouteInitialized = false
+    private var lastBluetoothRouteNotificationAt = 0L
     private val overlayWindowManager: WindowManager by lazy {
         getSystemService(Context.WINDOW_SERVICE) as WindowManager
     }
@@ -87,13 +103,165 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        startAudioRouteMonitoring(flutterEngine)
     }
 
     override fun onDestroy() {
+        stopAudioRouteMonitoring()
         hideDesktopLyricsOverlay()
         androidMediaControls?.destroy()
         androidMediaControls = null
         super.onDestroy()
+    }
+
+    private fun startAudioRouteMonitoring(flutterEngine: FlutterEngine) {
+        stopAudioRouteMonitoring()
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioRouteMethodChannel =
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, audioRouteChannel)
+        bluetoothAudioDeviceIds = connectedBluetoothAudioDeviceIds(audioManager)
+        val mediaRouter = getSystemService(Context.MEDIA_ROUTER_SERVICE) as MediaRouter
+        this.mediaRouter = mediaRouter
+        updateSelectedAudioRoute(mediaRouter)
+        val mediaRouterCallback = object : MediaRouter.SimpleCallback() {
+            override fun onRouteSelected(
+                router: MediaRouter,
+                type: Int,
+                info: MediaRouter.RouteInfo,
+            ) {
+                updateSelectedAudioRoute(router)
+            }
+
+            override fun onRouteUnselected(
+                router: MediaRouter,
+                type: Int,
+                info: MediaRouter.RouteInfo,
+            ) {
+                updateSelectedAudioRoute(router)
+            }
+
+            override fun onRouteChanged(
+                router: MediaRouter,
+                info: MediaRouter.RouteInfo,
+            ) {
+                updateSelectedAudioRoute(router)
+            }
+        }
+        this.mediaRouterCallback = mediaRouterCallback
+        mediaRouter.addCallback(
+            MediaRouter.ROUTE_TYPE_LIVE_AUDIO,
+            mediaRouterCallback,
+            MediaRouter.CALLBACK_FLAG_UNFILTERED_EVENTS,
+        )
+        val callback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+                bluetoothAudioDeviceIds = connectedBluetoothAudioDeviceIds(audioManager)
+                updateSelectedAudioRoute(mediaRouter)
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+                val removedConnectedBluetoothDevice = removedDevices.any {
+                    isBluetoothMediaOutput(it) && bluetoothAudioDeviceIds.contains(it.id)
+                }
+                bluetoothAudioDeviceIds = connectedBluetoothAudioDeviceIds(audioManager)
+                if (
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.N &&
+                    removedConnectedBluetoothDevice
+                ) {
+                    notifyBluetoothRouteChanged()
+                }
+                updateSelectedAudioRoute(mediaRouter)
+            }
+        }
+        audioDeviceCallback = callback
+        audioManager.registerAudioDeviceCallback(
+            callback,
+            Handler(Looper.getMainLooper()),
+        )
+    }
+
+    private fun stopAudioRouteMonitoring() {
+        val callback = audioDeviceCallback
+        if (callback != null) {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            try {
+                audioManager.unregisterAudioDeviceCallback(callback)
+            } catch (_: Exception) {
+            }
+        }
+        val router = mediaRouter
+        val routerCallback = mediaRouterCallback
+        if (router != null && routerCallback != null) {
+            router.removeCallback(routerCallback)
+        }
+        audioDeviceCallback = null
+        mediaRouter = null
+        mediaRouterCallback = null
+        audioRouteMethodChannel = null
+        bluetoothAudioDeviceIds = emptySet()
+        selectedBluetoothRouteKey = null
+        audioRouteInitialized = false
+        lastBluetoothRouteNotificationAt = 0L
+    }
+
+    private fun updateSelectedAudioRoute(router: MediaRouter) {
+        val route = router.getSelectedRoute(MediaRouter.ROUTE_TYPE_LIVE_AUDIO)
+        val nextBluetoothRouteKey =
+            if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                route.deviceType == MediaRouter.RouteInfo.DEVICE_TYPE_BLUETOOTH
+            ) {
+                route.name.toString()
+            } else {
+                null
+            }
+        val routeLostOrSwitched =
+            audioRouteInitialized &&
+                selectedBluetoothRouteKey != null &&
+                selectedBluetoothRouteKey != nextBluetoothRouteKey
+        selectedBluetoothRouteKey = nextBluetoothRouteKey
+        audioRouteInitialized = true
+        if (routeLostOrSwitched) {
+            notifyBluetoothRouteChanged()
+        }
+    }
+
+    private fun notifyBluetoothRouteChanged() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastBluetoothRouteNotificationAt < 750L) {
+            return
+        }
+        lastBluetoothRouteNotificationAt = now
+        audioRouteMethodChannel?.invokeMethod(
+            "bluetoothDisconnectedOrSwitched",
+            null,
+        )
+    }
+
+    private fun connectedBluetoothAudioDeviceIds(audioManager: AudioManager): Set<Int> {
+        return audioManager
+            .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .asSequence()
+            .filter(::isBluetoothMediaOutput)
+            .map(AudioDeviceInfo::getId)
+            .toSet()
+    }
+
+    private fun isBluetoothMediaOutput(device: AudioDeviceInfo): Boolean {
+        if (!device.isSink) {
+            return false
+        }
+        return when (device.type) {
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_HEARING_AID,
+            -> true
+            AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_BLE_SPEAKER,
+            -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            AudioDeviceInfo.TYPE_BLE_BROADCAST ->
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+            else -> false
+        }
     }
 
     private fun hasAllFilesAccess(): Boolean {

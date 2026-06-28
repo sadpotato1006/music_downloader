@@ -26,7 +26,7 @@ Map<String, String> _networkImageHeadersFor(String url) {
     'Referer': host.contains('myfreemp3.ink')
         ? 'https://myfreemp3.ink/'
         : 'https://www.gequbao.com/',
-    'User-Agent': 'QingTing/1.3 (+personal-use)',
+    'User-Agent': 'QingTing/1.3.1 (+personal-use)',
   };
 }
 
@@ -4735,6 +4735,7 @@ Future<AlbumMetadataMatch?> _showAlbumCandidateDialog(
                     final candidate = candidates[index];
                     final date = candidate.releaseDate?.trim();
                     final info = [
+                      candidate.sourceLabel,
                       candidate.recordingArtist.trim().isEmpty
                           ? '未知歌手'
                           : candidate.recordingArtist.trim(),

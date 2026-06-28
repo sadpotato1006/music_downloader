@@ -9,6 +9,7 @@
 #include <string>
 #include <variant>
 
+#include "bluetooth_audio_monitor.h"
 #include "desktop_lyrics_window.h"
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
@@ -17,6 +18,7 @@
 namespace {
 
 constexpr const char kDesktopLyricsChannel[] = "qingting/desktop_lyrics";
+constexpr const char kAudioRouteChannel[] = "qingting/audio_route";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTrayOpenCommand = 40001;
@@ -131,6 +133,22 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   AddTrayIcon();
+  audio_route_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kAudioRouteChannel,
+          &flutter::StandardMethodCodec::GetInstance());
+  auto* bluetooth_audio_monitor = new BluetoothAudioMonitor(
+      GetHandle(), [this]() {
+        if (audio_route_channel_) {
+          audio_route_channel_->InvokeMethod(
+              "bluetoothDisconnectedOrSwitched", nullptr);
+        }
+      });
+  if (bluetooth_audio_monitor->Start()) {
+    bluetooth_audio_monitor_ = bluetooth_audio_monitor;
+  } else {
+    bluetooth_audio_monitor->Release();
+  }
   desktop_lyrics_window_ = std::make_unique<DesktopLyricsWindow>();
   desktop_lyrics_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -218,6 +236,13 @@ bool FlutterWindow::OnCreate() {
 void FlutterWindow::OnDestroy() {
   RemoveTrayIcon();
 
+  if (bluetooth_audio_monitor_) {
+    bluetooth_audio_monitor_->Stop();
+    bluetooth_audio_monitor_->Release();
+    bluetooth_audio_monitor_ = nullptr;
+  }
+  audio_route_channel_ = nullptr;
+
   if (desktop_lyrics_window_) {
     desktop_lyrics_window_->Hide();
   }
@@ -235,6 +260,12 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == kBluetoothAudioRouteChangedMessage) {
+    if (bluetooth_audio_monitor_) {
+      bluetooth_audio_monitor_->Refresh();
+    }
+    return 0;
+  }
   if (message == WM_CLOSE && !allow_window_close_) {
     window_state::SaveWindowSize(hwnd);
     ShowWindow(hwnd, SW_HIDE);

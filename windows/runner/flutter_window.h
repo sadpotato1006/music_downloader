@@ -11,6 +11,7 @@
 #include "win32_window.h"
 
 class DesktopLyricsWindow;
+class BluetoothAudioMonitor;
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -44,6 +45,11 @@ class FlutterWindow : public Win32Window {
 
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       desktop_lyrics_channel_;
+
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      audio_route_channel_;
+
+  BluetoothAudioMonitor* bluetooth_audio_monitor_ = nullptr;
 
   bool tray_icon_added_ = false;
   bool allow_window_close_ = false;

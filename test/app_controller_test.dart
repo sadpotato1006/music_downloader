@@ -1,6 +1,10 @@
+import 'dart:io';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qingting/album_metadata_service.dart';
 import 'package:qingting/app_controller.dart';
 import 'package:qingting/lyrics_service.dart';
 import 'package:qingting/main.dart' as app;
@@ -92,6 +96,57 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'download replaces a source album with the default Apple match',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-album-match-',
+      );
+      final savePath =
+          '${directory.path}${Platform.pathSeparator}album-match.m4a';
+      final source = _AlbumDownloadMusicSource();
+      final albumMetadata = _RecordingAlbumMetadataService();
+      final dio = Dio()..httpClientAdapter = const _AudioDownloadAdapter();
+      final controller = AppController(
+        source: source,
+        storage: _DownloadStorageService(savePath),
+        player: _FakePlaybackService(),
+        downloadDio: dio,
+        albumMetadata: albumMetadata,
+      );
+
+      try {
+        final start = await controller.startDownload(
+          source.result,
+          allowNonMp3: true,
+        );
+        expect(start.didStart, isTrue);
+
+        for (var attempt = 0; attempt < 100; attempt += 1) {
+          final status = controller.downloadTasks.single.status;
+          if (status == DownloadStatus.completed ||
+              status == DownloadStatus.failed) {
+            break;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+
+        final task = controller.downloadTasks.single;
+        expect(task.status, DownloadStatus.completed, reason: task.error);
+        expect(albumMetadata.calls, 1);
+        expect(
+          albumMetadata.receivedDuration,
+          const Duration(minutes: 3, seconds: 20),
+        );
+        expect(task.album, 'Apple Album');
+        expect(controller.downloadedTracks.single.album, 'Apple Album');
+      } finally {
+        controller.dispose();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
   test('online playback resolves lyrics and reports playback state', () async {
     final source = _PlayableMusicSource();
     final player = _FakePlaybackService();
@@ -108,6 +163,25 @@ void main() {
     expect(player.openedItem?.uri, 'https://example.test/generated.mp3');
     expect(player.openedItem?.lyrics, contains('[00:01.00]测试歌词'));
     expect(controller.globalMessage, '已开始播放：测试歌曲');
+    controller.dispose();
+  });
+
+  test('pauses only when bluetooth changes during playback', () async {
+    final player = _FakePlaybackService()..isPlaying = true;
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: player,
+    );
+
+    await controller.handleBluetoothAudioRouteChanged();
+
+    expect(player.pauseCalls, 1);
+    expect(player.isPlaying, isFalse);
+
+    await controller.handleBluetoothAudioRouteChanged();
+
+    expect(player.pauseCalls, 1);
     controller.dispose();
   });
 
@@ -159,6 +233,7 @@ class _FakePlaybackService implements PlaybackService {
   PlayerItem? openedItem;
   int openCalls = 0;
   int playOrPauseCalls = 0;
+  int pauseCalls = 0;
 
   @override
   bool isPlaying = false;
@@ -198,6 +273,7 @@ class _FakePlaybackService implements PlaybackService {
 
   @override
   Future<void> pause() async {
+    pauseCalls += 1;
     isPlaying = false;
   }
 
@@ -228,6 +304,115 @@ class _FakeStorageService extends StorageService {
     int currentIndex, {
     required bool shuffleEnabled,
   }) async {}
+}
+
+class _DownloadStorageService extends _FakeStorageService {
+  _DownloadStorageService(this.savePath);
+
+  final String savePath;
+
+  @override
+  Future<String> uniqueSavePath({
+    required String downloadDirectory,
+    required String title,
+    required String artist,
+    required String format,
+  }) async => savePath;
+
+  @override
+  Future<String?> cacheEmbeddedCover(
+    File audioFile, {
+    required String cacheKey,
+  }) async => null;
+
+  @override
+  Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {}
+}
+
+class _RecordingAlbumMetadataService extends AlbumMetadataService {
+  int calls = 0;
+  Duration? receivedDuration;
+
+  @override
+  Future<AlbumMetadataMatch?> findBestAlbum({
+    required String title,
+    required String artist,
+    String? lyrics,
+    Duration? duration,
+  }) async {
+    calls += 1;
+    receivedDuration = duration;
+    return const AlbumMetadataMatch(
+      album: 'Apple Album',
+      recordingTitle: 'Test Song',
+      recordingArtist: 'Test Artist',
+      score: 96,
+      recordingId: 'apple:track-1',
+      releaseId: 'apple:album-1',
+    );
+  }
+}
+
+class _AudioDownloadAdapter implements HttpClientAdapter {
+  const _AudioDownloadAdapter();
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    return ResponseBody.fromBytes(
+      Uint8List.fromList(const [0, 0, 0, 20, 102, 116, 121, 112]),
+      200,
+      headers: {
+        Headers.contentLengthHeader: ['8'],
+        Headers.contentTypeHeader: ['audio/mp4'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _AlbumDownloadMusicSource implements MusicSource {
+  TrackSearchResult get result => const TrackSearchResult(
+    id: 'album-download',
+    title: 'Test Song',
+    artist: 'Test Artist',
+    source: 'album-download-source',
+    detailUrl: 'https://example.test/detail',
+    duration: '3:20',
+    album: 'Site Album',
+  );
+
+  @override
+  String get name => 'album-download-source';
+
+  @override
+  Future<List<TrackSearchResult>> search(String keyword, {int page = 1}) async {
+    return [result];
+  }
+
+  @override
+  Future<TrackDetail> loadDetail(TrackSearchResult result) async {
+    return TrackDetail(
+      title: result.title,
+      artist: result.artist,
+      sourceUrl: result.detailUrl,
+      candidates: const [],
+      rawMetadata: const {},
+      album: 'Site Album',
+    );
+  }
+
+  @override
+  Future<List<AudioCandidate>> resolveCandidates(TrackDetail detail) async {
+    return const [
+      AudioCandidate(url: 'https://example.test/test.m4a', format: 'm4a'),
+    ];
+  }
 }
 
 class _FakeMusicSource implements MusicSource {

@@ -6,6 +6,58 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/album_metadata_service.dart';
 
 void main() {
+  test('uses Apple as the default source and caches the result', () async {
+    final adapter = _AppleAlbumAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final service = AlbumMetadataService(
+      dio: dio,
+      appleDio: dio,
+      baseUri: Uri.parse('https://musicbrainz.test/ws/2/'),
+      appleBaseUri: Uri.parse('https://itunes.test/'),
+      requestGap: Duration.zero,
+      appleRequestGap: Duration.zero,
+    );
+
+    final first = await service.findBestAlbum(
+      title: '晴天',
+      artist: '周杰伦',
+      duration: const Duration(minutes: 4, seconds: 29),
+    );
+    final second = await service.findBestAlbum(
+      title: '晴天',
+      artist: '周杰伦',
+      duration: const Duration(minutes: 4, seconds: 29),
+    );
+
+    expect(first?.album, '叶惠美');
+    expect(second?.album, '叶惠美');
+    expect(adapter.appleCalls, 1);
+    expect(adapter.musicBrainzCalls, 0);
+  });
+
+  test('rejects an Apple result with a mismatched duration', () async {
+    final adapter = _AppleAlbumAdapter(trackTimeMillis: 300000);
+    final dio = Dio()..httpClientAdapter = adapter;
+    final service = AlbumMetadataService(
+      dio: dio,
+      appleDio: dio,
+      baseUri: Uri.parse('https://musicbrainz.test/ws/2/'),
+      appleBaseUri: Uri.parse('https://itunes.test/'),
+      requestGap: Duration.zero,
+      appleRequestGap: Duration.zero,
+    );
+
+    final match = await service.findBestAlbum(
+      title: '晴天',
+      artist: '周杰伦',
+      duration: const Duration(minutes: 4, seconds: 29),
+    );
+
+    expect(match, isNull);
+    expect(adapter.appleCalls, 1);
+    expect(adapter.musicBrainzCalls, greaterThan(0));
+  });
+
   test('prefers an official artist album over compilation releases', () async {
     final dio = Dio()..httpClientAdapter = _FakeMusicBrainzAdapter();
     final service = AlbumMetadataService(
@@ -68,6 +120,48 @@ void main() {
       );
     },
   );
+}
+
+class _AppleAlbumAdapter implements HttpClientAdapter {
+  _AppleAlbumAdapter({this.trackTimeMillis = 269000});
+
+  final int trackTimeMillis;
+  int appleCalls = 0;
+  int musicBrainzCalls = 0;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    if (options.uri.path == '/search') {
+      appleCalls += 1;
+      expect(options.uri.queryParameters['country'], 'CN');
+      expect(options.uri.queryParameters['entity'], 'song');
+      return _javascriptResponse({
+        'resultCount': 1,
+        'results': [
+          {
+            'wrapperType': 'track',
+            'kind': 'song',
+            'trackId': 1850000001,
+            'collectionId': 1850000000,
+            'trackName': '晴天',
+            'artistName': '周杰伦',
+            'collectionName': '叶惠美',
+            'trackTimeMillis': trackTimeMillis,
+            'releaseDate': '2003-07-31T12:00:00Z',
+          },
+        ],
+      });
+    }
+    musicBrainzCalls += 1;
+    return _jsonResponse({'recordings': []});
+  }
+
+  @override
+  void close({bool force = false}) {}
 }
 
 class _FakeMusicBrainzAdapter implements HttpClientAdapter {
@@ -220,6 +314,16 @@ ResponseBody _jsonResponse(Map<String, Object?> body) {
     200,
     headers: {
       Headers.contentTypeHeader: ['application/json; charset=utf-8'],
+    },
+  );
+}
+
+ResponseBody _javascriptResponse(Map<String, Object?> body) {
+  return ResponseBody.fromString(
+    jsonEncode(body),
+    200,
+    headers: {
+      Headers.contentTypeHeader: ['text/javascript; charset=utf-8'],
     },
   );
 }

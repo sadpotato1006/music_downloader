@@ -6,7 +6,7 @@
 
 青听是一款使用 Flutter 开发的个人音乐工具，支持在 Android 和 Windows 上搜索、播放、下载及管理音乐。
 
-当前版本：`v1.3.0+16`
+当前版本：`v1.3.1+17`
 
 > 本项目仅解析公开可访问的网页内容，不处理登录、付费、验证码、DRM 或其他访问限制。
 
@@ -22,7 +22,7 @@
 - 优先选择 MP3；仅找到其他格式时会先征求确认
 - 下载 MP3 后写入歌名、歌手、专辑、歌词和封面等 ID3 信息
 - MY FREE MP3 缺少内置歌词时会通过 LRCLIB 匹配歌词，再写入下载文件
-- 通过 MusicBrainz 匹配和补全缺失的专辑名称
+- 缺失专辑名称时默认通过 Apple iTunes Search API 匹配，Apple 无可靠结果时再使用 MusicBrainz 兜底
 
 ### 播放与歌词
 
@@ -30,6 +30,7 @@
 - 查看、调整和持久化播放队列
 - 完整歌词页支持同步滚动、点击跳转和拖动播放进度
 - Android 支持通知栏与锁屏媒体控制
+- Android 和 Windows 在当前蓝牙音频断开或切换设备时自动暂停；连接蓝牙时不会暂停
 - Windows 支持置顶桌面歌词、自由拖动和鼠标穿透锁定；锁定后悬浮歌词可通过开锁图标一键解锁
 - Windows 会记住主窗口上次的正常尺寸，下次启动时自动恢复
 - Android 支持系统悬浮歌词，需要授予悬浮窗权限
@@ -50,6 +51,7 @@
 | 在线搜索、播放与下载 | 支持 | 支持 |
 | 本地曲库 | 支持 | 支持 |
 | 系统媒体控制 | 通知栏、锁屏 | 应用内 |
+| 蓝牙断开或切换自动暂停 | 支持 | 支持 |
 | 桌面歌词 | 系统悬浮窗 | 置顶独立窗口 |
 | 下载目录设置 | 手动输入路径 | 文件夹选择器 |
 | 后台运行 | 系统媒体通知 | 关闭后最小化到托盘 |
@@ -112,7 +114,7 @@ flutter analyze
 flutter test
 ```
 
-主要测试覆盖歌曲来源解析、在线歌词匹配、ID3 歌词读写、专辑元数据匹配和本地曲库搜索。
+主要测试覆盖歌曲来源解析、在线歌词匹配、ID3 歌词读写、Apple/MusicBrainz 专辑元数据匹配和本地曲库搜索。
 
 ## Android 构建
 
@@ -156,10 +158,10 @@ flutter build windows --release
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File tools\windows_installer\build-windows-installer.ps1 `
-  -Version 1.3
+  -Version 1.3.1
 ```
 
-安装程序输出到 `dist\QingTingSetup-v1_3.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。
+安装程序输出到 `dist\QingTingSetup-v1_3_1.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。
 
 ## 项目结构
 
@@ -176,7 +178,7 @@ assets/                      应用资源
 
 - 歌曲搜索与详情来自[歌曲宝](https://www.gequbao.com/)的公开页面，以及 [MY FREE MP3](https://myfreemp3.ink/) 前端公开使用的搜索、试听与下载接口。
 - 缺失歌词的在线歌曲会尝试使用 [LRCLIB](https://lrclib.net/) 的公开接口进行匹配；未找到可靠结果时不会写入歌词。
-- 专辑元数据来自 [MusicBrainz](https://musicbrainz.org/) 的公开接口。
+- 缺失的专辑元数据默认来自 [Apple iTunes Search API](https://developer.apple.com/library/archive/documentation/AudioVideo/Conceptual/iTuneSearchAPI/)，无法可靠匹配时再使用 [MusicBrainz](https://musicbrainz.org/) 兜底。
 - 页面结构、接口签名规则、资源地址或第三方服务策略变化时，相关功能可能暂时不可用。
 - 项目不会尝试绕过登录、付费、验证码、访问频率限制或版权保护措施。
 - 音乐资源的版权归原作者及权利人所有。如有侵权，请联系内容提供方或项目维护者处理。

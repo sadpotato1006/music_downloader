@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
@@ -6,19 +7,33 @@ class AlbumMetadataService {
   AlbumMetadataService({
     Dio? dio,
     Uri? baseUri,
+    Dio? appleDio,
+    Uri? appleBaseUri,
     this.requestGap = const Duration(milliseconds: 1100),
+    this.appleRequestGap = const Duration(seconds: 3),
+    this.appleCountry = 'CN',
   }) : _dio = dio ?? Dio(),
-       _baseUri = baseUri ?? Uri.parse('https://musicbrainz.org/ws/2/');
+       _appleDio = appleDio ?? dio ?? Dio(),
+       _baseUri = baseUri ?? Uri.parse('https://musicbrainz.org/ws/2/'),
+       _appleBaseUri = appleBaseUri ?? Uri.parse('https://itunes.apple.com/');
 
   final Dio _dio;
+  final Dio _appleDio;
   final Uri _baseUri;
+  final Uri _appleBaseUri;
   final Duration requestGap;
+  final Duration appleRequestGap;
+  final String appleCountry;
   Future<void> _requestQueue = Future<void>.value();
+  Future<void> _appleRequestQueue = Future<void>.value();
   DateTime? _lastRequestAt;
+  DateTime? _lastAppleRequestAt;
+  final Map<String, List<AlbumMetadataMatch>> _appleCandidateCache = {};
 
   static const _userAgent =
-      'QingTing/1.3 (https://github.com/sadpotato1006/music_downloader)';
+      'QingTing/1.3.1 (https://github.com/sadpotato1006/music_downloader)';
   static const highConfidenceScore = 72.0;
+  static const _appleCacheLimit = 128;
   static const _accompaniment = '\u4f34\u594f';
   static const _concert = '\u6f14\u5531\u4f1a';
   static const _liveScene = '\u73b0\u573a';
@@ -29,11 +44,13 @@ class AlbumMetadataService {
     required String title,
     required String artist,
     String? lyrics,
+    Duration? duration,
   }) async {
     final candidates = await findAlbumCandidates(
       title: title,
       artist: artist,
       lyrics: lyrics,
+      duration: duration,
       limit: 1,
     );
     if (candidates.isEmpty || candidates.first.score < highConfidenceScore) {
@@ -46,12 +63,23 @@ class AlbumMetadataService {
     required String title,
     required String artist,
     String? lyrics,
+    Duration? duration,
     int limit = 5,
   }) async {
     final cleanedTitle = _cleanTitle(title);
     final cleanedArtist = _cleanArtist(artist);
     if (cleanedTitle.isEmpty) {
       return const [];
+    }
+
+    final appleCandidates = await _findAppleCandidates(
+      title: cleanedTitle,
+      artist: cleanedArtist,
+      duration: duration,
+    );
+    if (appleCandidates.isNotEmpty &&
+        appleCandidates.first.score >= highConfidenceScore) {
+      return appleCandidates.take(limit).toList();
     }
 
     final lyricHint = _lyricTitleArtistHint(lyrics);
@@ -64,7 +92,11 @@ class AlbumMetadataService {
       _SearchHint(title: cleanedTitle, artist: ''),
     ];
 
-    final candidatesByAlbum = <String, AlbumMetadataMatch>{};
+    final candidatesByAlbum = <String, AlbumMetadataMatch>{
+      for (final candidate in appleCandidates)
+        _normalizeText('${candidate.album}\n${candidate.recordingArtist}'):
+            candidate,
+    };
     final searched = <String>{};
     for (final query in queries) {
       final key = '${query.title}\n${query.artist}';
@@ -109,6 +141,111 @@ class AlbumMetadataService {
 
     final candidates = candidatesByAlbum.values.toList()..sort();
     return candidates.take(limit).toList();
+  }
+
+  Future<List<AlbumMetadataMatch>> _findAppleCandidates({
+    required String title,
+    required String artist,
+    required Duration? duration,
+  }) async {
+    final cacheKey = [
+      _normalizeText(title),
+      _normalizeText(artist),
+      duration?.inSeconds ?? -1,
+      appleCountry.toUpperCase(),
+    ].join('\n');
+    final cached = _appleCandidateCache.remove(cacheKey);
+    if (cached != null) {
+      _appleCandidateCache[cacheKey] = cached;
+      return cached;
+    }
+
+    final term = [
+      title,
+      artist,
+    ].where((value) => value.trim().isNotEmpty).join(' ');
+    final data = await _getAppleJson({
+      'term': term,
+      'country': appleCountry,
+      'media': 'music',
+      'entity': 'song',
+      'limit': '25',
+    });
+    final results = data?['results'];
+    if (results is! List) {
+      if (data != null) {
+        _appleCandidateCache[cacheKey] = const [];
+        if (_appleCandidateCache.length > _appleCacheLimit) {
+          _appleCandidateCache.remove(_appleCandidateCache.keys.first);
+        }
+      }
+      return const [];
+    }
+
+    final candidatesByAlbum = <String, AlbumMetadataMatch>{};
+    for (final raw in results.whereType<Map>()) {
+      final candidate = _matchFromAppleResult(
+        Map<String, dynamic>.from(raw),
+        title: title,
+        artist: artist,
+        duration: duration,
+      );
+      if (candidate == null) {
+        continue;
+      }
+      final key = _normalizeText(
+        '${candidate.album}\n${candidate.recordingArtist}',
+      );
+      final existing = candidatesByAlbum[key];
+      if (existing == null || candidate.compareTo(existing) < 0) {
+        candidatesByAlbum[key] = candidate;
+      }
+    }
+
+    final candidates = candidatesByAlbum.values.toList()..sort();
+    final result = List<AlbumMetadataMatch>.unmodifiable(candidates);
+    _appleCandidateCache[cacheKey] = result;
+    if (_appleCandidateCache.length > _appleCacheLimit) {
+      _appleCandidateCache.remove(_appleCandidateCache.keys.first);
+    }
+    return result;
+  }
+
+  Future<Map<String, dynamic>?> _getAppleJson(Map<String, String> query) {
+    return _enqueueAppleRequest(() async {
+      final uri = _appleBaseUri
+          .resolve('/search')
+          .replace(queryParameters: query);
+      try {
+        final response = await _appleDio.getUri<Object?>(
+          uri,
+          options: Options(
+            receiveTimeout: const Duration(seconds: 10),
+            headers: const {
+              'Accept': 'application/json',
+              'User-Agent': _userAgent,
+            },
+          ),
+        );
+        Object? data = response.data;
+        if (data is String) {
+          try {
+            data = jsonDecode(data);
+          } on FormatException {
+            return null;
+          }
+        }
+        if (data is Map<String, dynamic>) {
+          return data;
+        }
+        if (data is Map) {
+          return Map<String, dynamic>.from(data);
+        }
+      } catch (_) {
+        return null;
+      }
+      return null;
+    });
   }
 
   Future<List<Map<String, dynamic>>> _searchRecordings(_SearchHint hint) async {
@@ -187,6 +324,19 @@ class AlbumMetadataService {
     return completer.future;
   }
 
+  Future<T> _enqueueAppleRequest<T>(Future<T> Function() request) {
+    final completer = Completer<T>();
+    _appleRequestQueue = _appleRequestQueue.then((_) async {
+      try {
+        await _respectAppleRateLimit();
+        completer.complete(await request());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+    return completer.future;
+  }
+
   Future<void> _respectRateLimit() async {
     final last = _lastRequestAt;
     if (last != null && requestGap > Duration.zero) {
@@ -196,6 +346,91 @@ class AlbumMetadataService {
       }
     }
     _lastRequestAt = DateTime.now();
+  }
+
+  Future<void> _respectAppleRateLimit() async {
+    final last = _lastAppleRequestAt;
+    if (last != null && appleRequestGap > Duration.zero) {
+      final remaining = appleRequestGap - DateTime.now().difference(last);
+      if (remaining > Duration.zero) {
+        await Future<void>.delayed(remaining);
+      }
+    }
+    _lastAppleRequestAt = DateTime.now();
+  }
+
+  AlbumMetadataMatch? _matchFromAppleResult(
+    Map<String, dynamic> item, {
+    required String title,
+    required String artist,
+    required Duration? duration,
+  }) {
+    final kind = (item['kind'] as String? ?? '').trim().toLowerCase();
+    if (kind.isNotEmpty && kind != 'song') {
+      return null;
+    }
+
+    final album = (item['collectionName'] as String? ?? '').trim();
+    final recordingTitle = (item['trackName'] as String? ?? '').trim();
+    final recordingArtist = (item['artistName'] as String? ?? '').trim();
+    final collectionArtist = (item['collectionArtistName'] as String? ?? '')
+        .trim();
+    if (album.isEmpty || recordingTitle.isEmpty) {
+      return null;
+    }
+
+    final titleScore = _textSimilarity(title, recordingTitle);
+    final artistScore = artist.isEmpty
+        ? 0.7
+        : [
+            _textSimilarity(artist, recordingArtist),
+            _textSimilarity(artist, collectionArtist),
+          ].reduce((a, b) => a > b ? a : b);
+    if (titleScore < 0.72 || artistScore < 0.48) {
+      return null;
+    }
+
+    var durationScore = duration == null ? 0.72 : 0.4;
+    final trackTimeMillis = item['trackTimeMillis'];
+    if (duration != null && trackTimeMillis is num && trackTimeMillis > 0) {
+      final delta = (trackTimeMillis.toDouble() - duration.inMilliseconds)
+          .abs();
+      if (delta > 8000) {
+        return null;
+      }
+      durationScore = delta <= 2000
+          ? 1
+          : delta <= 4000
+          ? 0.9
+          : 0.75;
+    }
+
+    var score = titleScore * 42 + artistScore * 34 + durationScore * 20;
+    final normalizedVersion = _normalizeText('$recordingTitle\n$album');
+    if (normalizedVersion.contains('karaoke') ||
+        normalizedVersion.contains('instrumental') ||
+        normalizedVersion.contains(_normalizeText(_accompaniment))) {
+      score -= 12;
+    }
+    if (normalizedVersion.contains('live') ||
+        normalizedVersion.contains(_normalizeText(_concert)) ||
+        normalizedVersion.contains(_normalizeText(_liveScene))) {
+      score -= 9;
+    }
+
+    final trackId = item['trackId']?.toString();
+    final collectionId = item['collectionId']?.toString();
+    return AlbumMetadataMatch(
+      album: album,
+      recordingTitle: recordingTitle,
+      recordingArtist: recordingArtist.isEmpty
+          ? collectionArtist
+          : recordingArtist,
+      recordingId: trackId == null ? null : 'apple:$trackId',
+      releaseId: collectionId == null ? null : 'apple:$collectionId',
+      releaseDate: item['releaseDate'] as String?,
+      score: score.clamp(0, 100).toDouble(),
+    );
   }
 
   AlbumMetadataMatch? _matchFromRecordingRelease(
@@ -451,6 +686,12 @@ class AlbumMetadataMatch implements Comparable<AlbumMetadataMatch> {
   final String? releaseId;
   final String? releaseGroupId;
   final String? releaseDate;
+
+  bool get isApple =>
+      (recordingId?.startsWith('apple:') ?? false) ||
+      (releaseId?.startsWith('apple:') ?? false);
+
+  String get sourceLabel => isApple ? 'Apple iTunes' : 'MusicBrainz';
 
   @override
   int compareTo(AlbumMetadataMatch other) {

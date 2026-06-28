@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'android_storage_access.dart';
 import 'android_media_controls_service.dart';
 import 'album_metadata_service.dart';
+import 'audio_route_service.dart';
 import 'id3_lyrics_embedder.dart';
 import 'library_search.dart';
 import 'lyrics_service.dart';
@@ -36,6 +37,9 @@ class AppController extends ChangeNotifier {
     this.player.positionListenable.addListener(_handlePlayerPositionChanged);
     this.player.onCompleted = _handlePlaybackCompleted;
     AndroidMediaControlsService.setHandler(_handleAndroidMediaControl);
+    AudioRouteService.setBluetoothRouteChangedHandler(
+      handleBluetoothAudioRouteChanged,
+    );
   }
 
   final List<MusicSource> sources;
@@ -286,6 +290,14 @@ class AppController extends ChangeNotifier {
         break;
     }
     await _syncAndroidMediaControls(force: true);
+  }
+
+  @visibleForTesting
+  Future<void> handleBluetoothAudioRouteChanged() async {
+    if (!player.isPlaying) {
+      return;
+    }
+    await player.pause();
   }
 
   Future<void> _syncAndroidMediaControls({bool force = false}) async {
@@ -2419,23 +2431,20 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
   Future<DownloadTask> _matchAlbumForDownloadTask(DownloadTask task) async {
     final existingAlbum = task.album.trim();
-    if (existingAlbum.isNotEmpty) {
-      return task.copyWith(album: existingAlbum);
-    }
-
     try {
       final match = await albumMetadata.findBestAlbum(
         title: task.track.title,
         artist: task.track.artist,
         lyrics: task.lyrics,
+        duration: _parseTrackDuration(task.track.duration),
       );
       final album = match?.album.trim();
       if (album == null || album.isEmpty) {
-        return task;
+        return task.copyWith(album: existingAlbum);
       }
       return task.copyWith(album: album);
     } catch (_) {
-      return task;
+      return task.copyWith(album: existingAlbum);
     }
   }
 
@@ -2477,11 +2486,11 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Referer': referer,
-        'User-Agent': 'QingTing/1.3 (+personal-use)',
+        'User-Agent': 'QingTing/1.3.1 (+personal-use)',
       },
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'User-Agent': 'QingTing/1.3 (+personal-use)',
+        'User-Agent': 'QingTing/1.3.1 (+personal-use)',
       },
     ]) {
       try {
@@ -2938,6 +2947,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   void dispose() {
     _isDisposed = true;
     AndroidMediaControlsService.setHandler(null);
+    AudioRouteService.setBluetoothRouteChangedHandler(null);
     unawaited(AndroidMediaControlsService.hide());
     _settingsSaveDebounce?.cancel();
     player.onChanged = null;
