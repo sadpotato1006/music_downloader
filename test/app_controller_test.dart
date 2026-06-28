@@ -96,6 +96,183 @@ void main() {
     controller.dispose();
   });
 
+  test('bootstrap restores a saved disabled shuffle mode', () async {
+    const item = PlayerItem(
+      id: 'saved-item',
+      title: 'Saved Song',
+      artist: 'Saved Artist',
+      uri: 'https://example.test/saved.mp3',
+    );
+    final storage = _BootstrapStorageService(
+      queue: const SavedPlayerQueue(
+        items: [item],
+        currentIndex: 0,
+        shuffleEnabled: false,
+      ),
+    );
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: storage,
+      player: _FakePlaybackService(),
+    );
+
+    await controller.bootstrap();
+
+    expect(controller.shuffleEnabled, isFalse);
+    controller.dispose();
+  });
+
+  test('bootstrap pauses an interrupted persisted download', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-restored-download-',
+    );
+    final savePath = '${directory.path}${Platform.pathSeparator}partial.m4a';
+    await File(savePath).writeAsBytes(const [1, 2, 3]);
+    final source = _AlbumDownloadMusicSource();
+    final interrupted = DownloadTask(
+      id: 'interrupted-task',
+      track: source.result,
+      candidate: const AudioCandidate(
+        url: 'https://example.test/test.m4a',
+        format: 'm4a',
+      ),
+      status: DownloadStatus.downloading,
+      progress: 0.1,
+      savePath: savePath,
+      receivedBytes: 1,
+      totalBytes: 6,
+    );
+    final storage = _BootstrapStorageService(tasks: [interrupted]);
+    final controller = AppController(
+      source: source,
+      storage: storage,
+      player: _FakePlaybackService(),
+    );
+
+    try {
+      await controller.bootstrap();
+
+      final restored = controller.downloadTasks.single;
+      expect(restored.status, DownloadStatus.paused);
+      expect(restored.receivedBytes, 3);
+      expect(restored.progress, 0.5);
+      expect(storage.savedTasks.single.status, DownloadStatus.paused);
+    } finally {
+      controller.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('resume download appends a valid HTTP range response', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-range-download-',
+    );
+    final savePath = '${directory.path}${Platform.pathSeparator}resume.m4a';
+    await File(savePath).writeAsBytes(const [1, 2, 3]);
+    final source = _AlbumDownloadMusicSource();
+    final adapter = _RangeAudioDownloadAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final controller = AppController(
+      source: source,
+      storage: _DownloadStorageService(savePath),
+      player: _FakePlaybackService(),
+      downloadDio: dio,
+      albumMetadata: _RecordingAlbumMetadataService(),
+    );
+    controller.downloadTasks = [
+      DownloadTask(
+        id: 'range-task',
+        track: source.result,
+        candidate: const AudioCandidate(
+          url: 'https://example.test/test.m4a',
+          format: 'm4a',
+        ),
+        status: DownloadStatus.paused,
+        progress: 0.5,
+        savePath: savePath,
+        receivedBytes: 3,
+        totalBytes: 6,
+      ),
+    ];
+
+    try {
+      controller.retryDownload('range-task');
+      for (var attempt = 0; attempt < 100; attempt += 1) {
+        final status = controller.downloadTasks.single.status;
+        if (status == DownloadStatus.completed ||
+            status == DownloadStatus.failed) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      final task = controller.downloadTasks.single;
+      expect(task.status, DownloadStatus.completed, reason: task.error);
+      expect(adapter.rangeHeader, 'bytes=3-');
+      expect(await File(savePath).readAsBytes(), const [1, 2, 3, 4, 5, 6]);
+      expect(task.resumeValidator, '"range-etag"');
+    } finally {
+      controller.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('resume download overwrites when the server ignores range', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-range-fallback-',
+    );
+    final savePath = '${directory.path}${Platform.pathSeparator}fallback.m4a';
+    await File(savePath).writeAsBytes(const [1, 2, 3]);
+    final source = _AlbumDownloadMusicSource();
+    final adapter = _RangeAudioDownloadAdapter(
+      statusCode: 200,
+      payload: const [7, 8],
+      contentRange: null,
+    );
+    final controller = AppController(
+      source: source,
+      storage: _DownloadStorageService(savePath),
+      player: _FakePlaybackService(),
+      downloadDio: Dio()..httpClientAdapter = adapter,
+      albumMetadata: _RecordingAlbumMetadataService(),
+    );
+    controller.downloadTasks = [
+      DownloadTask(
+        id: 'range-fallback-task',
+        track: source.result,
+        candidate: const AudioCandidate(
+          url: 'https://example.test/test.m4a',
+          format: 'm4a',
+        ),
+        status: DownloadStatus.paused,
+        progress: 0.5,
+        savePath: savePath,
+        receivedBytes: 3,
+        totalBytes: 6,
+      ),
+    ];
+
+    try {
+      controller.retryDownload('range-fallback-task');
+      for (var attempt = 0; attempt < 100; attempt += 1) {
+        final status = controller.downloadTasks.single.status;
+        if (status == DownloadStatus.completed ||
+            status == DownloadStatus.failed) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      final task = controller.downloadTasks.single;
+      expect(task.status, DownloadStatus.completed, reason: task.error);
+      expect(adapter.rangeHeader, 'bytes=3-');
+      expect(await File(savePath).readAsBytes(), const [7, 8]);
+    } finally {
+      controller.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
   test(
     'download replaces a source album with the default Apple match',
     () async {
@@ -304,6 +481,42 @@ class _FakeStorageService extends StorageService {
     int currentIndex, {
     required bool shuffleEnabled,
   }) async {}
+
+  @override
+  Future<void> saveDownloadTasks(List<DownloadTask> tasks) async {}
+}
+
+class _BootstrapStorageService extends _FakeStorageService {
+  _BootstrapStorageService({
+    this.queue = const SavedPlayerQueue(items: [], currentIndex: -1),
+    this.tasks = const [],
+  });
+
+  final SavedPlayerQueue queue;
+  final List<DownloadTask> tasks;
+  List<DownloadTask> savedTasks = const [];
+
+  @override
+  Future<AppSettings> loadSettings() async {
+    return const AppSettings(downloadDirectory: '');
+  }
+
+  @override
+  Future<MyMusicData> loadMyMusic() async => const MyMusicData();
+
+  @override
+  Future<List<DownloadedTrack>> loadDownloadedTracks() async => const [];
+
+  @override
+  Future<SavedPlayerQueue> loadPlayerQueue() async => queue;
+
+  @override
+  Future<List<DownloadTask>> loadDownloadTasks() async => tasks;
+
+  @override
+  Future<void> saveDownloadTasks(List<DownloadTask> tasks) async {
+    savedTasks = List<DownloadTask>.from(tasks);
+  }
 }
 
 class _DownloadStorageService extends _FakeStorageService {
@@ -367,6 +580,41 @@ class _AudioDownloadAdapter implements HttpClientAdapter {
       200,
       headers: {
         Headers.contentLengthHeader: ['8'],
+        Headers.contentTypeHeader: ['audio/mp4'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _RangeAudioDownloadAdapter implements HttpClientAdapter {
+  _RangeAudioDownloadAdapter({
+    this.statusCode = 206,
+    this.payload = const [4, 5, 6],
+    this.contentRange = 'bytes 3-5/6',
+  });
+
+  final int statusCode;
+  final List<int> payload;
+  final String? contentRange;
+  String? rangeHeader;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    rangeHeader = options.headers[HttpHeaders.rangeHeader]?.toString();
+    return ResponseBody.fromBytes(
+      Uint8List.fromList(payload),
+      statusCode,
+      headers: {
+        Headers.contentLengthHeader: ['${payload.length}'],
+        if (contentRange != null) 'content-range': [contentRange!],
+        'etag': ['"range-etag"'],
         Headers.contentTypeHeader: ['audio/mp4'],
       },
     );

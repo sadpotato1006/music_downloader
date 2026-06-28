@@ -6,7 +6,7 @@
 
 青听是一款使用 Flutter 开发的个人音乐工具，支持在 Android 和 Windows 上搜索、播放、下载及管理音乐。
 
-当前版本：`v1.3.1+17`
+当前版本：`v1.3.2+18`
 
 > 本项目仅解析公开可访问的网页内容，不处理登录、付费、验证码、DRM 或其他访问限制。
 
@@ -18,11 +18,12 @@
 - 搜索歌曲并查看历史搜索记录，切换来源后会自动重新搜索当前关键词
 - 在线播放，或将歌曲加入下载队列
 - 下载任务会立即显示“已加入下载队列”，完成或失败后继续显示结果通知，并拦截同一首歌曲的重复下载
-- 显示下载进度，支持暂停、取消和失败重试
+- 显示下载进度，支持暂停、取消和失败重试；未完成任务会跨重启保留
+- 暂停或异常中断后优先通过 HTTP Range 断点续传；服务器不支持时安全回退为重新下载
 - 优先选择 MP3；仅找到其他格式时会先征求确认
 - 下载 MP3 后写入歌名、歌手、专辑、歌词和封面等 ID3 信息
 - MY FREE MP3 缺少内置歌词时会通过 LRCLIB 匹配歌词，再写入下载文件
-- 缺失专辑名称时默认通过 Apple iTunes Search API 匹配，Apple 无可靠结果时再使用 MusicBrainz 兜底
+- 下载完成后默认通过 Apple iTunes Search API 校验专辑名称，Apple 无可靠结果时再使用 MusicBrainz，均失败时保留音乐网站原值
 
 ### 播放与歌词
 
@@ -43,6 +44,7 @@
 - 通过歌曲的“更多”菜单收藏或取消收藏，创建自定义歌单并查看最近播放
 - 打开歌曲文件或所在目录
 - 批量补全缺失的专辑名称
+- 设置、曲库、歌单、播放队列和下载任务采用原子写入并保留上一代备份，文件异常时自动恢复
 
 ### 平台体验
 
@@ -114,7 +116,7 @@ flutter analyze
 flutter test
 ```
 
-主要测试覆盖歌曲来源解析、在线歌词匹配、ID3 歌词读写、Apple/MusicBrainz 专辑元数据匹配和本地曲库搜索。
+主要测试覆盖歌曲来源解析、在线歌词匹配、ID3 歌词读写、Apple/MusicBrainz 专辑元数据匹配、原子存储恢复、断点续传和本地曲库搜索。
 
 ## Android 构建
 
@@ -158,10 +160,10 @@ flutter build windows --release
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File tools\windows_installer\build-windows-installer.ps1 `
-  -Version 1.3.1
+  -Version 1.3.2
 ```
 
-安装程序输出到 `dist\QingTingSetup-v1_3_1.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。
+安装程序输出到 `dist\QingTingSetup-v1_3_2.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。升级采用临时目录验证和原子替换；含有个人文件且不属于青听的非空目录不会被清理。
 
 ## 项目结构
 

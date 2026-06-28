@@ -24,8 +24,9 @@ namespace QingTingInstaller
     {
         private const string AppId = "QingTing";
         private const string AppName = "\u9752\u542c";
-        private const string Version = "1.3.1";
+        private const string Version = "1.3.2";
         private const string Publisher = "Pobb";
+        private const string InstallMarkerFileName = ".qingting-installation";
 
         private readonly Panel content;
         private readonly Button backButton;
@@ -41,10 +42,7 @@ namespace QingTingInstaller
 
         public InstallerForm()
         {
-            installDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Programs",
-                "QingTing");
+            installDir = DefaultInstallDirectory();
 
             Text = "青听安装向导";
             StartPosition = FormStartPosition.CenterScreen;
@@ -248,6 +246,18 @@ namespace QingTingInstaller
                 MessageBox.Show(this, "请选择安装位置。", "青听安装向导", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
+            if (page == 1)
+            {
+                try
+                {
+                    installDir = ValidateInstallDirectory(installDir);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, ex.Message, "青听安装向导", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
 
             page++;
             ShowPage();
@@ -275,11 +285,17 @@ namespace QingTingInstaller
         {
             SetProgress(status, progress, "正在准备安装目录...", 10);
 
-            if (Directory.Exists(installDir))
+            installDir = ValidateInstallDirectory(installDir);
+            string parentDirectory = Path.GetDirectoryName(installDir);
+            if (string.IsNullOrEmpty(parentDirectory))
             {
-                Directory.Delete(installDir, true);
+                throw new InvalidOperationException("安装目录无效。");
             }
-            Directory.CreateDirectory(installDir);
+            Directory.CreateDirectory(parentDirectory);
+
+            string stagingDirectory = installDir + ".installing-" + Guid.NewGuid().ToString("N");
+            string previousDirectory = installDir + ".previous-" + Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(stagingDirectory);
 
             SetProgress(status, progress, "正在解压应用文件...", 35);
             string tempZip = Path.Combine(Path.GetTempPath(), "QingTingPayload-" + Guid.NewGuid().ToString("N") + ".zip");
@@ -297,13 +313,71 @@ namespace QingTingInstaller
                     }
                 }
 
-                ZipFile.ExtractToDirectory(tempZip, installDir);
+                ZipFile.ExtractToDirectory(tempZip, stagingDirectory);
+
+                string stagedExe = Path.Combine(stagingDirectory, "qingting.exe");
+                if (!File.Exists(stagedExe))
+                {
+                    throw new FileNotFoundException("安装包内未找到 qingting.exe。", stagedExe);
+                }
+                File.WriteAllText(
+                    Path.Combine(stagingDirectory, InstallMarkerFileName),
+                    AppId + "|" + Version,
+                    new UTF8Encoding(false));
+
+                bool previousMoved = false;
+                bool newInstallMoved = false;
+                try
+                {
+                    if (Directory.Exists(installDir))
+                    {
+                        Directory.Move(installDir, previousDirectory);
+                        previousMoved = true;
+                    }
+                    Directory.Move(stagingDirectory, installDir);
+                    newInstallMoved = true;
+                }
+                catch
+                {
+                    if (newInstallMoved && Directory.Exists(installDir))
+                    {
+                        Directory.Delete(installDir, true);
+                    }
+                    if (previousMoved && Directory.Exists(previousDirectory))
+                    {
+                        Directory.Move(previousDirectory, installDir);
+                    }
+                    throw;
+                }
+
+                if (previousMoved && Directory.Exists(previousDirectory))
+                {
+                    try
+                    {
+                        Directory.Delete(previousDirectory, true);
+                    }
+                    catch
+                    {
+                        // The new installation is complete; a locked old directory can be removed later.
+                    }
+                }
             }
             finally
             {
                 if (File.Exists(tempZip))
                 {
                     File.Delete(tempZip);
+                }
+                if (Directory.Exists(stagingDirectory))
+                {
+                    try
+                    {
+                        Directory.Delete(stagingDirectory, true);
+                    }
+                    catch
+                    {
+                        // Best-effort cleanup; never remove or mask a valid previous installation.
+                    }
                 }
             }
 
@@ -334,6 +408,93 @@ namespace QingTingInstaller
             RegisterUninstallEntry(uninstallBat);
 
             SetProgress(status, progress, "安装完成。", 100);
+        }
+
+        private static string DefaultInstallDirectory()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs",
+                "QingTing");
+        }
+
+        private static string ValidateInstallDirectory(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new InvalidOperationException("请选择安装位置。");
+            }
+
+            string fullPath = Path.GetFullPath(Environment.ExpandEnvironmentVariables(path.Trim()));
+            fullPath = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string root = Path.GetPathRoot(fullPath);
+            if (string.IsNullOrEmpty(root) || SamePath(fullPath, root))
+            {
+                throw new InvalidOperationException("不能将青听安装到磁盘根目录。");
+            }
+
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string[] protectedDirectories = new string[]
+            {
+                userProfile,
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                Path.Combine(userProfile, "Downloads")
+            };
+            foreach (string protectedDirectory in protectedDirectories)
+            {
+                if (!string.IsNullOrWhiteSpace(protectedDirectory) && SamePath(fullPath, protectedDirectory))
+                {
+                    throw new InvalidOperationException("该目录包含用户或系统文件，请选择一个专用于青听的子目录。");
+                }
+            }
+
+            if (Directory.Exists(fullPath) && Directory.GetFileSystemEntries(fullPath).Length > 0)
+            {
+                if (!IsManagedInstall(fullPath) && !IsLegacyDefaultInstall(fullPath))
+                {
+                    throw new InvalidOperationException(
+                        "所选目录不是青听管理的安装目录，并且里面已有文件。请新建一个空目录，避免覆盖个人数据。");
+                }
+            }
+            return fullPath;
+        }
+
+        private static bool IsManagedInstall(string path)
+        {
+            string marker = Path.Combine(path, InstallMarkerFileName);
+            if (!File.Exists(marker))
+            {
+                return false;
+            }
+            try
+            {
+                return File.ReadAllText(marker).StartsWith(AppId + "|", StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsLegacyDefaultInstall(string path)
+        {
+            return SamePath(path, DefaultInstallDirectory()) &&
+                File.Exists(Path.Combine(path, "qingting.exe")) &&
+                File.Exists(Path.Combine(path, "flutter_windows.dll")) &&
+                Directory.Exists(Path.Combine(path, "data"));
+        }
+
+        private static bool SamePath(string left, string right)
+        {
+            string normalizedLeft = Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string normalizedRight = Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string BoolText(bool value)

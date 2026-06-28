@@ -69,6 +69,7 @@ class AppController extends ChangeNotifier {
   bool _isDisposed = false;
   Future<void> _downloadedTracksSaveQueue = Future<void>.value();
   Future<void> _myMusicSaveQueue = Future<void>.value();
+  Future<void> _downloadTasksSaveQueue = Future<void>.value();
 
   String searchQuery = '';
   bool isSearching = false;
@@ -237,18 +238,19 @@ class AppController extends ChangeNotifier {
     myMusic = await storage.loadMyMusic();
     await player.setVolume(settings!.volume.clamp(0, 100).toDouble());
     downloadedTracks = await storage.loadDownloadedTracks();
+    downloadTasks = await storage.loadDownloadTasks();
+    await _restoreDownloadTasks();
     final savedQueue = await storage.loadPlayerQueue();
     queue = savedQueue.items;
     currentQueueIndex = savedQueue.normalizedCurrentIndex;
-    shuffleEnabled = savedQueue.items.isEmpty
-        ? savedQueue.shuffleEnabled
-        : true;
+    shuffleEnabled = savedQueue.shuffleEnabled;
     selectedIndex = settings!.defaultStartupPageIndex == 2 ? 2 : 0;
     final startupItem = settings!.autoPlayOnStartup ? currentItem : null;
     isReady = true;
     notifyListeners();
     unawaited(_syncAndroidMediaControls(force: true));
     unawaited(_hydrateDownloadedTracksInBackground());
+    _scheduleDownloads();
     if (startupItem != null) {
       unawaited(player.open(startupItem));
     }
@@ -1060,6 +1062,7 @@ class AppController extends ChangeNotifier {
         album: detail.album,
       );
       downloadTasks = [task, ...downloadTasks];
+      await _saveDownloadTasks();
       _scheduleDownloads();
       return const DownloadStartResult.started();
     } on MusicSourceException catch (error) {
@@ -1087,19 +1090,25 @@ class AppController extends ChangeNotifier {
       (task) =>
           task.track.id == result.id &&
           task.track.source == result.source &&
-          task.status != DownloadStatus.failed &&
-          task.status != DownloadStatus.canceled,
+          (task.status == DownloadStatus.queued ||
+              task.status == DownloadStatus.downloading ||
+              task.status == DownloadStatus.paused),
     );
   }
 
   void pauseDownload(String taskId) {
+    final current = _taskById(taskId);
+    if (current == null ||
+        current.status == DownloadStatus.completed ||
+        current.status == DownloadStatus.canceled) {
+      return;
+    }
     _replaceTask(
       taskId,
-      (task) => task.status == DownloadStatus.queued
-          ? task.copyWith(status: DownloadStatus.paused)
-          : task.copyWith(status: DownloadStatus.paused),
+      (task) => task.copyWith(status: DownloadStatus.paused),
     );
     _cancelTokens[taskId]?.cancel('paused');
+    unawaited(_persistDownloadTasksBestEffort());
     notifyListeners();
   }
 
@@ -1113,6 +1122,7 @@ class AppController extends ChangeNotifier {
     if (task != null) {
       unawaited(_deletePartialFile(task.savePath));
     }
+    unawaited(_persistDownloadTasksBestEffort());
     notifyListeners();
     _scheduleDownloads();
   }
@@ -1120,14 +1130,9 @@ class AppController extends ChangeNotifier {
   void retryDownload(String taskId) {
     _replaceTask(
       taskId,
-      (task) => task.copyWith(
-        status: DownloadStatus.queued,
-        progress: 0,
-        error: null,
-        receivedBytes: 0,
-        totalBytes: null,
-      ),
+      (task) => task.copyWith(status: DownloadStatus.queued, error: null),
     );
+    unawaited(_persistDownloadTasksBestEffort());
     notifyListeners();
     _scheduleDownloads();
   }
@@ -2214,6 +2219,85 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     return operation;
   }
 
+  Future<void> _restoreDownloadTasks() async {
+    if (downloadTasks.isEmpty) {
+      return;
+    }
+    var changed = false;
+    final restored = <DownloadTask>[];
+    for (final task in downloadTasks) {
+      if (task.status == DownloadStatus.completed ||
+          task.status == DownloadStatus.canceled) {
+        changed = true;
+      }
+      final file = File(task.savePath);
+      final exists = await file.exists();
+      final receivedBytes = exists ? await file.length() : 0;
+      var status = task.status;
+      var error = task.error;
+      if (status == DownloadStatus.downloading) {
+        status = DownloadStatus.paused;
+        changed = true;
+      } else if (status == DownloadStatus.completed && !exists) {
+        status = DownloadStatus.failed;
+        error = '已下载文件不存在，请重新下载。';
+        changed = true;
+      }
+      final totalBytes = task.totalBytes;
+      final progress = status == DownloadStatus.completed && exists
+          ? 1.0
+          : totalBytes != null && totalBytes > 0
+          ? (receivedBytes / totalBytes).clamp(0, 1).toDouble()
+          : receivedBytes > 0
+          ? task.progress
+          : 0.0;
+      if (receivedBytes != task.receivedBytes || progress != task.progress) {
+        changed = true;
+      }
+      restored.add(
+        task.copyWith(
+          status: status,
+          progress: progress,
+          error: error,
+          receivedBytes: receivedBytes,
+        ),
+      );
+    }
+    downloadTasks = restored;
+    if (changed) {
+      await _saveDownloadTasks();
+    }
+  }
+
+  Future<void> _saveDownloadTasks() {
+    final snapshot = List<DownloadTask>.unmodifiable(
+      downloadTasks.where(
+        (task) =>
+            task.status != DownloadStatus.completed &&
+            task.status != DownloadStatus.canceled,
+      ),
+    );
+    final previousSave = _downloadTasksSaveQueue;
+    final operation = () async {
+      try {
+        await previousSave;
+      } catch (_) {
+        // A failed save must not prevent newer task state from persisting.
+      }
+      await storage.saveDownloadTasks(snapshot);
+    }();
+    _downloadTasksSaveQueue = operation;
+    return operation;
+  }
+
+  Future<void> _persistDownloadTasksBestEffort() async {
+    try {
+      await _saveDownloadTasks();
+    } catch (_) {
+      // The current transfer can continue; a later state change will retry.
+    }
+  }
+
   Future<void> _saveQueueState() {
     return storage.savePlayerQueue(
       queue,
@@ -2277,6 +2361,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         error: null,
       ),
     );
+    unawaited(_persistDownloadTasksBestEffort());
     notifyListeners();
 
     try {
@@ -2296,6 +2381,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
           taskId,
           (current) => current.copyWith(candidate: candidate),
         );
+        unawaited(_persistDownloadTasksBestEffort());
       }
       final lyrics = await lyricsFuture;
       final currentTask = _taskById(taskId);
@@ -2310,33 +2396,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       );
       _replaceTask(taskId, (_) => activeTask);
 
-      await _downloadDio.download(
-        activeTask.candidate.url,
-        activeTask.savePath,
-        cancelToken: token,
-        options: Options(headers: activeTask.candidate.headers),
-        onReceiveProgress: (received, total) {
-          final now = DateTime.now().millisecondsSinceEpoch;
-          final lastUpdate = _lastDownloadProgressUpdateMillis[taskId];
-          final isComplete = total > 0 && received >= total;
-          if (!isComplete &&
-              lastUpdate != null &&
-              now - lastUpdate <
-                  _downloadProgressUpdateInterval.inMilliseconds) {
-            return;
-          }
-          _lastDownloadProgressUpdateMillis[taskId] = now;
-          _replaceTask(
-            taskId,
-            (task) => task.copyWith(
-              progress: total > 0 ? received / total : task.progress,
-              receivedBytes: received,
-              totalBytes: total > 0 ? total : null,
-            ),
-          );
-          _downloadProgressListenable.value += 1;
-        },
-      );
+      await _downloadTaskFile(activeTask, token);
 
       var completedTask = _taskById(taskId);
       if (completedTask == null ||
@@ -2356,6 +2416,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         (task) => task.copyWith(status: DownloadStatus.completed, progress: 1),
       );
       await _addDownloadedTrack(completedTask);
+      await _saveDownloadTasks();
       globalMessage = '下载完成：${completedTask.track.title}';
     } on DioException catch (error) {
       if (CancelToken.isCancel(error)) {
@@ -2369,6 +2430,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         taskId,
         (task) => task.copyWith(status: DownloadStatus.failed, error: message),
       );
+      await _persistDownloadTasksBestEffort();
       globalMessage = '下载失败：${task.track.title}。$message';
     } catch (error) {
       final message = '$error';
@@ -2376,12 +2438,191 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         taskId,
         (task) => task.copyWith(status: DownloadStatus.failed, error: message),
       );
+      await _persistDownloadTasksBestEffort();
       globalMessage = '下载失败：${task.track.title}。$message';
     } finally {
       _cancelTokens.remove(taskId);
       _lastDownloadProgressUpdateMillis.remove(taskId);
-      notifyListeners();
+      if (!_isDisposed) {
+        notifyListeners();
+      }
     }
+  }
+
+  Future<void> _downloadTaskFile(
+    DownloadTask task,
+    CancelToken token, {
+    bool allowResume = true,
+  }) async {
+    final file = File(task.savePath);
+    await file.parent.create(recursive: true);
+    final existingBytes = allowResume && await file.exists()
+        ? await file.length()
+        : 0;
+    final headers = <String, dynamic>{...task.candidate.headers}
+      ..removeWhere(
+        (key, _) =>
+            key.toLowerCase() == HttpHeaders.rangeHeader ||
+            key.toLowerCase() == HttpHeaders.ifRangeHeader,
+      );
+    if (existingBytes > 0) {
+      headers[HttpHeaders.rangeHeader] = 'bytes=$existingBytes-';
+      final validator = task.resumeValidator?.trim();
+      if (validator != null && validator.isNotEmpty) {
+        headers[HttpHeaders.ifRangeHeader] = validator;
+      }
+    }
+
+    final response = await _downloadDio.getUri<ResponseBody>(
+      Uri.parse(task.candidate.url),
+      cancelToken: token,
+      options: Options(
+        headers: headers,
+        responseType: ResponseType.stream,
+        validateStatus: (status) =>
+            status != null &&
+            ((status >= 200 && status < 300) || status == 416),
+      ),
+    );
+    final body = response.data;
+    if (body == null) {
+      throw const FileSystemException('下载响应没有可写入的数据。');
+    }
+
+    final status = response.statusCode ?? 0;
+    final contentRange = response.headers.value(HttpHeaders.contentRangeHeader);
+    final rangeTotal = _contentRangeTotal(contentRange);
+    if (status == 416) {
+      await body.stream.drain();
+      if (existingBytes > 0 &&
+          rangeTotal != null &&
+          existingBytes >= rangeTotal) {
+        _updateDownloadProgress(task.id, rangeTotal, rangeTotal, force: true);
+        return;
+      }
+      if (allowResume) {
+        if (await file.exists()) {
+          await file.delete();
+        }
+        await _downloadTaskFile(task, token, allowResume: false);
+        return;
+      }
+      throw const FileSystemException('服务器拒绝了断点续传请求。');
+    }
+
+    if (status == 206 &&
+        existingBytes > 0 &&
+        _contentRangeStart(contentRange) != existingBytes) {
+      await body.stream.drain();
+      if (await file.exists()) {
+        await file.delete();
+      }
+      if (allowResume) {
+        await _downloadTaskFile(task, token, allowResume: false);
+        return;
+      }
+      throw const FileSystemException('服务器返回了无效的断点位置。');
+    }
+
+    final isPartialResponse = status == 206 && existingBytes > 0;
+    final baseBytes = isPartialResponse ? existingBytes : 0;
+    final responseLength = int.tryParse(
+      response.headers.value(HttpHeaders.contentLengthHeader) ?? '',
+    );
+    final totalBytes =
+        rangeTotal ??
+        (responseLength == null ? null : baseBytes + responseLength);
+    final validator =
+        response.headers.value(HttpHeaders.etagHeader) ??
+        response.headers.value(HttpHeaders.lastModifiedHeader) ??
+        '';
+    _replaceTask(
+      task.id,
+      (current) => current.copyWith(
+        receivedBytes: baseBytes,
+        totalBytes: totalBytes,
+        progress: totalBytes != null && totalBytes > 0
+            ? baseBytes / totalBytes
+            : current.progress,
+        resumeValidator: validator,
+      ),
+    );
+    unawaited(_persistDownloadTasksBestEffort());
+
+    final output = await file.open(
+      mode: isPartialResponse ? FileMode.append : FileMode.write,
+    );
+    var receivedBytes = baseBytes;
+    try {
+      await for (final chunk in body.stream) {
+        if (token.isCancelled) {
+          throw token.cancelError!;
+        }
+        await output.writeFrom(chunk);
+        receivedBytes += chunk.length;
+        _updateDownloadProgress(task.id, receivedBytes, totalBytes);
+      }
+      await output.flush();
+    } finally {
+      await output.close();
+    }
+    _updateDownloadProgress(
+      task.id,
+      receivedBytes,
+      totalBytes ?? receivedBytes,
+      force: true,
+    );
+  }
+
+  void _updateDownloadProgress(
+    String taskId,
+    int received,
+    int? total, {
+    bool force = false,
+  }) {
+    if (_isDisposed) {
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final lastUpdate = _lastDownloadProgressUpdateMillis[taskId];
+    final isComplete = total != null && total > 0 && received >= total;
+    if (!force &&
+        !isComplete &&
+        lastUpdate != null &&
+        now - lastUpdate < _downloadProgressUpdateInterval.inMilliseconds) {
+      return;
+    }
+    _lastDownloadProgressUpdateMillis[taskId] = now;
+    _replaceTask(
+      taskId,
+      (task) => task.copyWith(
+        progress: total != null && total > 0
+            ? (received / total).clamp(0, 1).toDouble()
+            : task.progress,
+        receivedBytes: received,
+        totalBytes: total != null && total > 0 ? total : null,
+      ),
+    );
+    _downloadProgressListenable.value += 1;
+  }
+
+  int? _contentRangeTotal(String? value) {
+    if (value == null) {
+      return null;
+    }
+    final match = RegExp(r'/(\d+)$').firstMatch(value.trim());
+    return match == null ? null : int.tryParse(match.group(1)!);
+  }
+
+  int? _contentRangeStart(String? value) {
+    if (value == null) {
+      return null;
+    }
+    final match = RegExp(
+      r'^bytes\s+(\d+)-',
+      caseSensitive: false,
+    ).firstMatch(value.trim());
+    return match == null ? null : int.tryParse(match.group(1)!);
   }
 
   MusicSource _sourceForName(String sourceName) {
@@ -2486,11 +2727,11 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Referer': referer,
-        'User-Agent': 'QingTing/1.3.1 (+personal-use)',
+        'User-Agent': 'QingTing/1.3.2 (+personal-use)',
       },
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'User-Agent': 'QingTing/1.3.1 (+personal-use)',
+        'User-Agent': 'QingTing/1.3.2 (+personal-use)',
       },
     ]) {
       try {
@@ -2946,6 +3187,10 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   @override
   void dispose() {
     _isDisposed = true;
+    for (final token in _cancelTokens.values) {
+      token.cancel('disposed');
+    }
+    unawaited(_persistDownloadTasksBestEffort());
     AndroidMediaControlsService.setHandler(null);
     AudioRouteService.setBluetoothRouteChangedHandler(null);
     unawaited(AndroidMediaControlsService.hide());

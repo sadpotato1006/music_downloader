@@ -26,7 +26,7 @@ Map<String, String> _networkImageHeadersFor(String url) {
     'Referer': host.contains('myfreemp3.ink')
         ? 'https://myfreemp3.ink/'
         : 'https://www.gequbao.com/',
-    'User-Agent': 'QingTing/1.3.1 (+personal-use)',
+    'User-Agent': 'QingTing/1.3.2 (+personal-use)',
   };
 }
 

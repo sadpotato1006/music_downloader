@@ -361,7 +361,7 @@ class MyFreeMp3Source
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
       'Origin': _originFor(_siteUri),
       'Referer': _siteUri.toString(),
-      'User-Agent': 'QingTing/1.3.1 (+personal-use)',
+      'User-Agent': 'QingTing/1.3.2 (+personal-use)',
       'X-Requested-With': 'XMLHttpRequest',
     };
   }
@@ -372,7 +372,7 @@ class MyFreeMp3Source
       'Referer': _downloadUri
           .resolve('/download/ui/$ownerId/$trackId')
           .toString(),
-      'User-Agent': 'QingTing/1.3.1 (+personal-use)',
+      'User-Agent': 'QingTing/1.3.2 (+personal-use)',
     };
   }
 

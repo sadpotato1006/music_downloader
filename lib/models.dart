@@ -150,6 +150,7 @@ class DownloadTask {
     this.error,
     this.receivedBytes = 0,
     this.totalBytes,
+    this.resumeValidator,
     this.lyrics,
     this.album = '',
   });
@@ -163,6 +164,7 @@ class DownloadTask {
   final String? error;
   final int receivedBytes;
   final int? totalBytes;
+  final String? resumeValidator;
   final String? lyrics;
   final String album;
 
@@ -174,6 +176,7 @@ class DownloadTask {
     String? error,
     int? receivedBytes,
     int? totalBytes,
+    String? resumeValidator,
     String? lyrics,
     String? album,
   }) {
@@ -187,8 +190,49 @@ class DownloadTask {
       error: error,
       receivedBytes: receivedBytes ?? this.receivedBytes,
       totalBytes: totalBytes ?? this.totalBytes,
+      resumeValidator: resumeValidator ?? this.resumeValidator,
       lyrics: lyrics ?? this.lyrics,
       album: album ?? this.album,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'track': track.toJson(),
+    'candidate': candidate.toJson(),
+    'status': status.name,
+    'progress': progress,
+    'savePath': savePath,
+    'error': error,
+    'receivedBytes': receivedBytes,
+    'totalBytes': totalBytes,
+    'resumeValidator': resumeValidator,
+    'lyrics': lyrics,
+    'album': album,
+  };
+
+  factory DownloadTask.fromJson(Map<String, dynamic> json) {
+    final statusName = json['status'] as String?;
+    final status = DownloadStatus.values.where(
+      (value) => value.name == statusName,
+    );
+    return DownloadTask(
+      id: json['id'] as String,
+      track: TrackSearchResult.fromJson(
+        Map<String, dynamic>.from(json['track'] as Map),
+      ),
+      candidate: AudioCandidate.fromJson(
+        Map<String, dynamic>.from(json['candidate'] as Map),
+      ),
+      status: status.isEmpty ? DownloadStatus.paused : status.first,
+      progress: (json['progress'] as num?)?.toDouble() ?? 0,
+      savePath: json['savePath'] as String,
+      error: json['error'] as String?,
+      receivedBytes: (json['receivedBytes'] as num?)?.toInt() ?? 0,
+      totalBytes: (json['totalBytes'] as num?)?.toInt(),
+      resumeValidator: json['resumeValidator'] as String?,
+      lyrics: json['lyrics'] as String?,
+      album: json['album'] as String? ?? '',
     );
   }
 }
