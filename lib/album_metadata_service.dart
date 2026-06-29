@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
+import 'app_log.dart';
+
 class AlbumMetadataService {
   AlbumMetadataService({
     Dio? dio,
@@ -31,7 +33,7 @@ class AlbumMetadataService {
   final Map<String, List<AlbumMetadataMatch>> _appleCandidateCache = {};
 
   static const _userAgent =
-      'QingTing/1.3.2 (https://github.com/sadpotato1006/music_downloader)';
+      'QingTing/1.3.3 (https://github.com/sadpotato1006/music_downloader)';
   static const highConfidenceScore = 72.0;
   static const _appleCacheLimit = 128;
   static const _accompaniment = '\u4f34\u594f';
@@ -79,8 +81,21 @@ class AlbumMetadataService {
     );
     if (appleCandidates.isNotEmpty &&
         appleCandidates.first.score >= highConfidenceScore) {
+      AppLog.instance.info(
+        'album',
+        'Apple iTunes 专辑匹配成功',
+        detail:
+            '$cleanedTitle → ${appleCandidates.first.album} '
+            '(${appleCandidates.first.score.toStringAsFixed(1)})',
+      );
       return appleCandidates.take(limit).toList();
     }
+
+    AppLog.instance.info(
+      'album',
+      'Apple 无可靠专辑结果，切换 MusicBrainz',
+      detail: cleanedTitle,
+    );
 
     final lyricHint = _lyricTitleArtistHint(lyrics);
     final queries = <_SearchHint>[
@@ -140,6 +155,17 @@ class AlbumMetadataService {
     }
 
     final candidates = candidatesByAlbum.values.toList()..sort();
+    if (candidates.isNotEmpty) {
+      AppLog.instance.info(
+        'album',
+        '${candidates.first.sourceLabel} 返回最佳专辑候选',
+        detail:
+            '$cleanedTitle → ${candidates.first.album} '
+            '(${candidates.first.score.toStringAsFixed(1)})',
+      );
+    } else {
+      AppLog.instance.warning('album', '未找到专辑候选', detail: cleanedTitle);
+    }
     return candidates.take(limit).toList();
   }
 
@@ -231,7 +257,8 @@ class AlbumMetadataService {
         if (data is String) {
           try {
             data = jsonDecode(data);
-          } on FormatException {
+          } on FormatException catch (error) {
+            AppLog.instance.warning('album', 'Apple 返回了无法解析的数据', detail: error);
             return null;
           }
         }
@@ -241,7 +268,21 @@ class AlbumMetadataService {
         if (data is Map) {
           return Map<String, dynamic>.from(data);
         }
-      } catch (_) {
+      } on DioException catch (error, stackTrace) {
+        AppLog.instance.error(
+          'album',
+          'Apple iTunes 请求失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        return null;
+      } catch (error, stackTrace) {
+        AppLog.instance.error(
+          'album',
+          'Apple iTunes 响应处理失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
         return null;
       }
       return null;
@@ -304,7 +345,21 @@ class AlbumMetadataService {
         if (data is Map) {
           return Map<String, dynamic>.from(data);
         }
-      } catch (_) {
+      } on DioException catch (error, stackTrace) {
+        AppLog.instance.error(
+          'album',
+          'MusicBrainz 请求失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        return null;
+      } catch (error, stackTrace) {
+        AppLog.instance.error(
+          'album',
+          'MusicBrainz 响应处理失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
         return null;
       }
       return null;

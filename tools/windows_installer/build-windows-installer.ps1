@@ -1,7 +1,7 @@
 param(
   [string]$ReleaseDir = "build\windows\x64\runner\Release",
   [string]$OutputDir = "dist",
-  [string]$Version = "1.3.2"
+  [string]$Version = "1.3.3"
 )
 
 $ErrorActionPreference = "Stop"

@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 
+import 'app_log.dart';
+
 class LyricsService {
   static const double _maximumDurationDeltaSeconds = 4;
 
@@ -15,7 +17,7 @@ class LyricsService {
               headers: const {
                 'Accept': 'application/json',
                 'User-Agent':
-                    'QingTing/1.3.2 (https://github.com/sadpotato1006/music_downloader)',
+                    'QingTing/1.3.3 (https://github.com/sadpotato1006/music_downloader)',
               },
             ),
           );
@@ -44,6 +46,7 @@ class LyricsService {
       final response = await _dio.getUri<dynamic>(uri);
       final raw = response.data;
       if (raw is! List) {
+        AppLog.instance.warning('lyrics', 'LRCLIB 返回了非列表响应');
         return null;
       }
       final candidates = raw
@@ -60,6 +63,7 @@ class LyricsService {
           )
           .toList();
       if (candidates.isEmpty) {
+        AppLog.instance.info('lyrics', '未找到可靠同步歌词', detail: trimmedTitle);
         return null;
       }
       candidates.sort((a, b) {
@@ -74,10 +78,25 @@ class LyricsService {
       });
       final best = candidates.first;
       final synced = best['syncedLyrics']?.toString().trim();
+      if (synced != null && synced.isNotEmpty) {
+        AppLog.instance.info('lyrics', '同步歌词匹配成功', detail: trimmedTitle);
+      }
       return synced == null || synced.isEmpty ? null : synced;
-    } on DioException {
+    } on DioException catch (error, stackTrace) {
+      AppLog.instance.error(
+        'lyrics',
+        'LRCLIB 请求失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
       return null;
-    } catch (_) {
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'lyrics',
+        '歌词响应处理失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
       return null;
     }
   }

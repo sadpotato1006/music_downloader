@@ -7,6 +7,13 @@ using System.Reflection;
 using System.Text;
 using System.Windows.Forms;
 
+[assembly: AssemblyTitle("QingTing Setup")]
+[assembly: AssemblyProduct("QingTing")]
+[assembly: AssemblyCompany("Pobb")]
+[assembly: AssemblyVersion("1.3.3.0")]
+[assembly: AssemblyFileVersion("1.3.3.0")]
+[assembly: AssemblyInformationalVersion("1.3.3")]
+
 namespace QingTingInstaller
 {
     internal static class Program
@@ -24,7 +31,7 @@ namespace QingTingInstaller
     {
         private const string AppId = "QingTing";
         private const string AppName = "\u9752\u542c";
-        private const string Version = "1.3.2";
+        private const string Version = "1.3.3";
         private const string Publisher = "Pobb";
         private const string InstallMarkerFileName = ".qingting-installation";
 

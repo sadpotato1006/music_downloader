@@ -6,7 +6,7 @@
 
 青听是一款使用 Flutter 开发的个人音乐工具，支持在 Android 和 Windows 上搜索、播放、下载及管理音乐。
 
-当前版本：`v1.3.2+18`
+当前版本：`v1.3.3+19`
 
 > 本项目仅解析公开可访问的网页内容，不处理登录、付费、验证码、DRM 或其他访问限制。
 
@@ -57,6 +57,13 @@
 | 桌面歌词 | 系统悬浮窗 | 置顶独立窗口 |
 | 下载目录设置 | 手动输入路径 | 文件夹选择器 |
 | 后台运行 | 系统媒体通知 | 关闭后最小化到托盘 |
+
+### 诊断与日志
+
+- 设置页可打开“诊断与日志”，查看网络来源失败、Apple/MusicBrainz 回退、断点续传、数据备份恢复和未捕获异常
+- 日志在内存中保留最近 500 条，并写入最大约 1 MB 的滚动日志文件
+- 可一键复制诊断信息；写入和复制前会移除 URL 查询参数及片段，避免携带临时签名
+- 可单独清空日志，不会删除歌曲、设置、歌单或下载任务
 
 ## 使用说明
 
@@ -116,7 +123,7 @@ flutter analyze
 flutter test
 ```
 
-主要测试覆盖歌曲来源解析、在线歌词匹配、ID3 歌词读写、Apple/MusicBrainz 专辑元数据匹配、原子存储恢复、断点续传和本地曲库搜索。
+主要测试覆盖歌曲来源解析、在线歌词匹配、ID3 歌词读写、Apple/MusicBrainz 专辑元数据匹配、原子存储恢复、断点续传、诊断日志脱敏和本地曲库搜索。
 
 ## Android 构建
 
@@ -160,15 +167,17 @@ flutter build windows --release
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File tools\windows_installer\build-windows-installer.ps1 `
-  -Version 1.3.2
+  -Version 1.3.3
 ```
 
-安装程序输出到 `dist\QingTingSetup-v1_3_2.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。升级采用临时目录验证和原子替换；含有个人文件且不属于青听的非空目录不会被清理。
+安装程序输出到 `dist\QingTingSetup-v1_3_3.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。升级采用临时目录验证和原子替换；含有个人文件且不属于青听的非空目录不会被清理。
 
 ## 项目结构
 
 ```text
-lib/                         Flutter 界面、业务逻辑和平台服务
+lib/                         Flutter 入口、模型和平台服务
+lib/ui/                      搜索下载、曲库、歌词设置、播放和诊断界面
+lib/controller/              搜索、下载、曲库、播放和设置控制器分部
 test/                        自动化测试
 android/                     Android 原生配置与媒体控制
 windows/                     Windows Runner、托盘和桌面歌词窗口

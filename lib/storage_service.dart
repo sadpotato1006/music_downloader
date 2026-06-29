@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'id3_lyrics_embedder.dart';
+import 'app_log.dart';
 import 'models.dart';
 
 class StorageService {
@@ -260,7 +261,12 @@ class StorageService {
     if (await file.exists()) {
       try {
         return decode(jsonDecode(await file.readAsString()));
-      } catch (_) {
+      } catch (error, stackTrace) {
+        AppLog.instance.warning(
+          'storage',
+          '$fileName 主文件读取失败，尝试备份',
+          detail: '$error\n$stackTrace',
+        );
         // Try the last known-good generation below.
       }
     }
@@ -273,8 +279,15 @@ class StorageService {
       final content = await backup.readAsString();
       final value = decode(jsonDecode(content));
       await _restorePrimaryFromBackup(file, content);
+      AppLog.instance.info('storage', '$fileName 已从备份恢复');
       return value;
-    } catch (_) {
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'storage',
+        '$fileName 主文件和备份均不可用',
+        error: error,
+        stackTrace: stackTrace,
+      );
       return null;
     }
   }
@@ -330,7 +343,13 @@ class StorageService {
           // The primary generation is valid; a later save can recreate backup.
         }
       }
-    } catch (_) {
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'storage',
+        '${p.basename(file.path)} 原子写入失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
       if (!await file.exists() && originalMoved && await backup.exists()) {
         await backup.rename(file.path);
       }

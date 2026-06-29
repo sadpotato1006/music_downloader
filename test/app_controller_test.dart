@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/album_metadata_service.dart';
 import 'package:qingting/app_controller.dart';
+import 'package:qingting/app_log.dart';
+import 'package:qingting/id3_lyrics_embedder.dart';
 import 'package:qingting/lyrics_service.dart';
 import 'package:qingting/main.dart' as app;
 import 'package:qingting/models.dart';
@@ -44,6 +46,82 @@ void main() {
 
     controller.dispose();
   });
+
+  test(
+    'removing the current shuffled item hydrates the next embedded lyrics',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-remove-current-lyrics-',
+      );
+      final firstFile = File(
+        '${directory.path}${Platform.pathSeparator}first.mp3',
+      );
+      final secondFile = File(
+        '${directory.path}${Platform.pathSeparator}second.mp3',
+      );
+      final player = _FakePlaybackService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: player,
+      );
+
+      try {
+        await firstFile.writeAsBytes(const [0xFF, 0xFB, 0x90, 0x64]);
+        await secondFile.writeAsBytes(const [0xFF, 0xFB, 0x90, 0x64]);
+        await Id3LyricsEmbedder.embedMetadata(
+          firstFile,
+          title: 'First',
+          artist: 'Artist',
+          lyrics: '[00:01.00]First lyric',
+        );
+        await Id3LyricsEmbedder.embedMetadata(
+          secondFile,
+          title: 'Second',
+          artist: 'Artist',
+          lyrics: '[00:01.00]Second lyric',
+        );
+        controller.downloadedTracks = [
+          DownloadedTrack(
+            id: 'first',
+            title: 'First',
+            artist: 'Artist',
+            path: firstFile.path,
+            format: 'mp3',
+            downloadedAt: DateTime(2026),
+            sourceUrl: '',
+            album: 'Album',
+          ),
+          DownloadedTrack(
+            id: 'second',
+            title: 'Second',
+            artist: 'Artist',
+            path: secondFile.path,
+            format: 'mp3',
+            downloadedAt: DateTime(2026),
+            sourceUrl: '',
+            album: 'Album',
+          ),
+        ];
+
+        await controller.startRandomLibraryPlayback();
+
+        expect(controller.queue, hasLength(2));
+        expect(controller.queue.first.lyrics, isNotEmpty);
+        expect(controller.queue.last.lyrics, isNull);
+
+        await controller.removeQueueAt(0);
+
+        expect(controller.currentQueueIndex, 0);
+        expect(controller.currentItem?.lyrics, isNotEmpty);
+        expect(player.openedItem?.lyrics, controller.currentItem?.lyrics);
+        expect(player.openCalls, 2);
+      } finally {
+        controller.dispose();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
 
   test('switches music source and repeats the current search', () async {
     final sourceA = _SearchMusicSource('source-a', '来源 A');
@@ -394,6 +472,18 @@ void main() {
     expect(source.lastKeyword, '晴天');
     controller.dispose();
   });
+
+  testWidgets('diagnostics page displays recorded log entries', (tester) async {
+    await AppLog.instance.clear();
+    AppLog.instance.warning('test', '诊断测试日志');
+
+    await tester.pumpWidget(const MaterialApp(home: app.DiagnosticsPage()));
+    await tester.pump();
+
+    expect(find.text('诊断与日志'), findsOneWidget);
+    expect(find.text('版本：1.3.3+19'), findsOneWidget);
+    expect(find.text('诊断测试日志'), findsOneWidget);
+  });
 }
 
 class _FakePlaybackService implements PlaybackService {
@@ -484,6 +574,9 @@ class _FakeStorageService extends StorageService {
 
   @override
   Future<void> saveDownloadTasks(List<DownloadTask> tasks) async {}
+
+  @override
+  Future<void> saveMyMusic(MyMusicData value) async {}
 }
 
 class _BootstrapStorageService extends _FakeStorageService {
