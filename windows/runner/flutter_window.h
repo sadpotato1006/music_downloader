@@ -34,6 +34,7 @@ class FlutterWindow : public Win32Window {
   void ShowTrayMenu();
   void UnlockDesktopLyricsFromTray();
   void ExitFromTray();
+  void CompleteExitFromTray();
 
   // The project to run.
   flutter::DartProject project_;
@@ -49,10 +50,17 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       audio_route_channel_;
 
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      file_operations_channel_;
+
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      app_lifecycle_channel_;
+
   BluetoothAudioMonitor* bluetooth_audio_monitor_ = nullptr;
 
   bool tray_icon_added_ = false;
   bool allow_window_close_ = false;
+  bool exit_pending_ = false;
   bool desktop_lyrics_locked_ = false;
 };
 

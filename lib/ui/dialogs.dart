@@ -232,7 +232,71 @@ enum _LibraryTrackAction {
   fetchAlbum,
   openFile,
   revealFile,
+  deleteFile,
   removeRecord,
+}
+
+Future<void> _confirmDeleteDownloadedTrack(
+  BuildContext context,
+  AppController controller,
+  DownloadedTrack track,
+) async {
+  final movesToRecycleBin = controller.movesDeletedFilesToRecycleBin;
+  final consequence = movesToRecycleBin
+      ? '电脑端会将歌曲文件本身移入回收站，并同时移除青听中的歌曲记录和播放队列项目；文件仍可从回收站恢复。'
+      : '手机端会直接永久删除歌曲文件本身，并同时移除青听中的歌曲记录和播放队列项目；删除后无法恢复。';
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('确认删除歌曲'),
+      content: Text('$consequence\n\n歌曲：${track.title}'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(movesToRecycleBin ? '移入回收站' : '删除歌曲'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed == true) {
+    await controller.deleteDownloadedTrack(track);
+  }
+}
+
+Future<void> _confirmRemoveDownloadedRecord(
+  BuildContext context,
+  AppController controller,
+  DownloadedTrack track,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('确认删除记录'),
+      content: Text(
+        '此操作只会从青听中删除歌曲记录，不会删除歌曲文件本身；文件仍会保留在原位置。\n\n'
+        '歌曲：${track.title}',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('删除记录'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed == true) {
+    await controller.removeDownloadedRecord(track);
+  }
 }
 
 class _LibraryMoreActions extends StatelessWidget {
@@ -243,12 +307,22 @@ class _LibraryMoreActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDeleting = controller.isDeletingDownloadedTrack(track);
     return SizedBox.square(
       dimension: 38,
       child: PopupMenuButton<_LibraryTrackAction>(
-        tooltip: '更多',
+        enabled: !isDeleting,
+        tooltip: isDeleting ? '正在删除歌曲' : '更多',
         padding: EdgeInsets.zero,
-        icon: const Icon(Icons.more_horiz),
+        icon: isDeleting
+            ? const SizedBox.square(
+                dimension: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.2,
+                  color: _accentStrong,
+                ),
+              )
+            : const Icon(Icons.more_horiz),
         iconColor: _ink,
         color: Colors.white,
         elevation: 8,
@@ -276,8 +350,15 @@ class _LibraryMoreActions extends StatelessWidget {
             case _LibraryTrackAction.revealFile:
               controller.revealDownloadedFile(track);
               return;
+            case _LibraryTrackAction.deleteFile:
+              unawaited(
+                _confirmDeleteDownloadedTrack(context, controller, track),
+              );
+              return;
             case _LibraryTrackAction.removeRecord:
-              controller.removeDownloadedRecord(track);
+              unawaited(
+                _confirmRemoveDownloadedRecord(context, controller, track),
+              );
               return;
           }
         },
@@ -315,9 +396,17 @@ class _LibraryMoreActions extends StatelessWidget {
               child: _MoreActionLabel(icon: Icons.folder_open, label: '打开位置'),
             ),
             const PopupMenuItem(
+              value: _LibraryTrackAction.deleteFile,
+              child: _MoreActionLabel(
+                icon: Icons.delete_forever_outlined,
+                label: '删除歌曲',
+                destructive: true,
+              ),
+            ),
+            const PopupMenuItem(
               value: _LibraryTrackAction.removeRecord,
               child: _MoreActionLabel(
-                icon: Icons.delete_outline,
+                icon: Icons.playlist_remove,
                 label: '删除记录',
                 destructive: true,
               ),

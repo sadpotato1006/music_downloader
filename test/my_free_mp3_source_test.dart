@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -77,9 +78,55 @@ void main() {
       expect(adapter.startCalls, 1);
     },
   );
+
+  test('coalesces concurrent preparation and expires cached URLs', () async {
+    var now = DateTime(2026, 7, 4, 12);
+    final startGate = Completer<void>();
+    final adapter = _FakeMyFreeMp3Adapter(startGate: startGate);
+    final dio = Dio(
+      BaseOptions(
+        responseType: ResponseType.plain,
+        validateStatus: (_) => true,
+      ),
+    )..httpClientAdapter = adapter;
+    final source = MyFreeMp3Source(
+      dio: dio,
+      siteUri: siteUri,
+      preparedCandidateTtl: const Duration(minutes: 2),
+      now: () => now,
+    );
+    final result = (await source.search('晴天')).single;
+    final detail = await source.loadDetail(result);
+
+    final first = source.resolveCandidates(detail);
+    final second = source.resolveCandidates(detail);
+    for (
+      var attempt = 0;
+      attempt < 20 && adapter.startCalls == 0;
+      attempt += 1
+    ) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(adapter.startCalls, 1);
+
+    startGate.complete();
+    final concurrentResults = await Future.wait([first, second]);
+    expect(concurrentResults[0].single.url, concurrentResults[1].single.url);
+    expect(adapter.startCalls, 1);
+
+    await source.resolveCandidates(detail);
+    expect(adapter.startCalls, 1);
+
+    now = now.add(const Duration(minutes: 3));
+    await source.resolveCandidates(detail);
+    expect(adapter.startCalls, 2);
+  });
 }
 
 class _FakeMyFreeMp3Adapter implements HttpClientAdapter {
+  _FakeMyFreeMp3Adapter({this.startGate});
+
+  final Completer<void>? startGate;
   Map<String, dynamic>? searchHeaders;
   String? searchPath;
   int startCalls = 0;
@@ -124,6 +171,7 @@ class _FakeMyFreeMp3Adapter implements HttpClientAdapter {
     }
     if (options.uri.path == '/download/job/start/64874624/456240367') {
       startCalls += 1;
+      await startGate?.future;
       return ResponseBody.fromString(
         '{\u0022job_id\u0022:\u0022test-job\u0022,'
         '\u0022status\u0022:\u0022queued\u0022}',

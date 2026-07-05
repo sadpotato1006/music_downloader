@@ -11,6 +11,7 @@ import 'android_media_controls_service.dart';
 import 'album_metadata_service.dart';
 import 'app_log.dart';
 import 'audio_route_service.dart';
+import 'file_deletion_service.dart';
 import 'id3_lyrics_embedder.dart';
 import 'library_search.dart';
 import 'lyrics_service.dart';
@@ -25,6 +26,8 @@ part 'controller/playback_controller.dart';
 part 'controller/download_controller.dart';
 part 'controller/settings_controller.dart';
 
+enum AppBootstrapStatus { loading, ready, error }
+
 class AppController extends ChangeNotifier {
   AppController({
     required this.source,
@@ -34,12 +37,23 @@ class AppController extends ChangeNotifier {
     Dio? downloadDio,
     AlbumMetadataService? albumMetadata,
     LyricsService? lyricsService,
+    FileDeletionService? fileDeletionService,
   }) : sources = List<MusicSource>.unmodifiable(sources ?? [source]),
        storage = storage ?? StorageService(),
        player = player ?? PlayerService(),
        albumMetadata = albumMetadata ?? AlbumMetadataService(),
        lyricsService = lyricsService ?? LyricsService(),
-       _downloadDio = downloadDio ?? Dio() {
+       fileDeletionService =
+           fileDeletionService ?? PlatformFileDeletionService(),
+       _downloadDio =
+           downloadDio ??
+           Dio(
+             BaseOptions(
+               connectTimeout: const Duration(seconds: 15),
+               sendTimeout: const Duration(seconds: 15),
+               receiveTimeout: const Duration(seconds: 30),
+             ),
+           ) {
     this.player.onChanged = _handlePlayerChanged;
     this.player.positionListenable.addListener(_handlePlayerPositionChanged);
     this.player.onCompleted = _handlePlaybackCompleted;
@@ -55,25 +69,33 @@ class AppController extends ChangeNotifier {
   final PlaybackService player;
   final AlbumMetadataService albumMetadata;
   final LyricsService lyricsService;
+  final FileDeletionService fileDeletionService;
   final Dio _downloadDio;
   final Random _shuffleRandom = Random();
   final Map<String, CancelToken> _cancelTokens = {};
+  final Set<String> _runningDownloadIds = {};
+  final Set<String> _pendingDownloadCleanupIds = {};
   final Set<String> _preparingDownloadKeys = {};
+  final Set<String> _deletingTrackKeys = {};
   static const _sourceRequestGap = Duration(seconds: 2);
   static const _cooldown520 = Duration(minutes: 3);
   static const _cooldown403 = Duration(minutes: 10);
   static const _cooldown429 = Duration(minutes: 5);
 
   AppSettings? settings = const AppSettings(downloadDirectory: '');
-  bool isReady = false;
+  AppBootstrapStatus bootstrapStatus = AppBootstrapStatus.loading;
+  String? bootstrapError;
   int selectedIndex = 0;
   DateTime? sourceCooldownUntil;
   String? sourceCooldownReason;
   Future<void> _sourceRequestQueue = Future<void>.value();
   DateTime? _lastSourceRequestAt;
   Timer? _settingsSaveDebounce;
+  bool _settingsSavePending = false;
+  Future<void>? _bootstrapOperation;
   String? _lastMediaControlsSignature;
   bool _isDisposed = false;
+  int _sourceSearchGeneration = 0;
   Future<void> _downloadedTracksSaveQueue = Future<void>.value();
   Future<void> _myMusicSaveQueue = Future<void>.value();
   Future<void> _downloadTasksSaveQueue = Future<void>.value();
@@ -121,7 +143,13 @@ class AppController extends ChangeNotifier {
   ValueListenable<int> get downloadProgressListenable =>
       _downloadProgressListenable;
 
-  void _notify() => notifyListeners();
+  bool get isReady => bootstrapStatus == AppBootstrapStatus.ready;
+
+  void _notify() {
+    if (!_isDisposed) {
+      notifyListeners();
+    }
+  }
 
   PlayerItem? get currentItem {
     if (currentQueueIndex < 0 || currentQueueIndex >= queue.length) {
@@ -242,39 +270,129 @@ class AppController extends ChangeNotifier {
     return List<DownloadedTrack>.unmodifiable(result);
   }
 
-  Future<void> bootstrap() async {
-    settings = await storage.loadSettings();
-    myMusic = await storage.loadMyMusic();
-    await player.setVolume(settings!.volume.clamp(0, 100).toDouble());
-    downloadedTracks = await storage.loadDownloadedTracks();
-    downloadTasks = await storage.loadDownloadTasks();
-    await _restoreDownloadTasks();
-    final savedQueue = await storage.loadPlayerQueue();
-    queue = savedQueue.items;
-    currentQueueIndex = savedQueue.normalizedCurrentIndex;
-    shuffleEnabled = savedQueue.shuffleEnabled;
-    selectedIndex = settings!.defaultStartupPageIndex == 2 ? 2 : 0;
-    final startupItem = settings!.autoPlayOnStartup ? currentItem : null;
-    isReady = true;
-    AppLog.instance.info(
-      'bootstrap',
-      '应用数据加载完成',
-      detail:
-          'tracks=${downloadedTracks.length}, queue=${queue.length}, '
-          'downloads=${downloadTasks.length}',
-    );
-    notifyListeners();
-    unawaited(_syncAndroidMediaControls(force: true));
-    unawaited(_hydrateDownloadedTracksInBackground());
-    _scheduleDownloads();
-    if (startupItem != null) {
-      unawaited(player.open(startupItem));
+  Future<void> bootstrap() {
+    if (_isDisposed || isReady) {
+      return Future<void>.value();
     }
+    final activeOperation = _bootstrapOperation;
+    if (activeOperation != null) {
+      return activeOperation;
+    }
+
+    late final Future<void> operation;
+    operation = _runBootstrap().whenComplete(() {
+      if (identical(_bootstrapOperation, operation)) {
+        _bootstrapOperation = null;
+      }
+    });
+    _bootstrapOperation = operation;
+    return operation;
+  }
+
+  Future<void> _runBootstrap() async {
+    bootstrapStatus = AppBootstrapStatus.loading;
+    bootstrapError = null;
+    _notify();
+    try {
+      settings = await storage.loadSettings();
+      if (_isDisposed) {
+        return;
+      }
+      myMusic = await storage.loadMyMusic();
+      if (_isDisposed) {
+        return;
+      }
+      await player.setVolume(settings!.volume.clamp(0, 100).toDouble());
+      if (_isDisposed) {
+        return;
+      }
+      downloadedTracks = await storage.loadDownloadedTracks();
+      if (_isDisposed) {
+        return;
+      }
+      downloadTasks = await storage.loadDownloadTasks();
+      if (_isDisposed) {
+        return;
+      }
+      await _restoreDownloadTasks();
+      if (_isDisposed) {
+        return;
+      }
+      final savedQueue = await storage.loadPlayerQueue();
+      if (_isDisposed) {
+        return;
+      }
+      queue = savedQueue.items;
+      currentQueueIndex = savedQueue.normalizedCurrentIndex;
+      shuffleEnabled = savedQueue.shuffleEnabled;
+      selectedIndex = settings!.defaultStartupPageIndex == 2 ? 2 : 0;
+      final startupItem = settings!.autoPlayOnStartup ? currentItem : null;
+      bootstrapStatus = AppBootstrapStatus.ready;
+      AppLog.instance.info(
+        'bootstrap',
+        '应用数据加载完成',
+        detail:
+            'tracks=${downloadedTracks.length}, queue=${queue.length}, '
+            'downloads=${downloadTasks.length}',
+      );
+      _notify();
+      unawaited(_syncAndroidMediaControls(force: true));
+      unawaited(_hydrateDownloadedTracksInBackground());
+      _scheduleDownloads();
+      if (startupItem != null) {
+        unawaited(player.open(startupItem));
+      }
+    } catch (error, stackTrace) {
+      if (_isDisposed) {
+        return;
+      }
+      bootstrapStatus = AppBootstrapStatus.error;
+      bootstrapError = '应用数据加载失败，请检查存储权限后重试。';
+      AppLog.instance.error(
+        'bootstrap',
+        '应用初始化失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      _notify();
+    }
+  }
+
+  Future<void> flushPendingWrites() async {
+    try {
+      await _flushPendingSettings();
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'storage',
+        '退出前保存设置失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+
+    final pendingWrites = <Future<void>>[
+      _downloadedTracksSaveQueue,
+      _myMusicSaveQueue,
+      _downloadTasksSaveQueue,
+    ];
+    for (final write in pendingWrites) {
+      try {
+        await write;
+      } catch (error, stackTrace) {
+        AppLog.instance.error(
+          'storage',
+          '等待待处理数据写入失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    await AppLog.instance.flush();
   }
 
   void _handlePlayerChanged() {
     unawaited(_syncAndroidMediaControls());
-    notifyListeners();
+    _notify();
   }
 
   void _handlePlayerPositionChanged() {
@@ -321,7 +439,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _syncAndroidMediaControls({bool force = false}) async {
-    if (!AndroidMediaControlsService.isSupported) {
+    if (_isDisposed || !AndroidMediaControlsService.isSupported) {
       return;
     }
     final item = currentItem;
@@ -370,11 +488,12 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    unawaited(_persistDownloadTasksBestEffort());
+    unawaited(flushPendingWrites());
     _isDisposed = true;
     for (final token in _cancelTokens.values) {
       token.cancel('disposed');
     }
-    unawaited(_persistDownloadTasksBestEffort());
     AndroidMediaControlsService.setHandler(null);
     AudioRouteService.setBluetoothRouteChangedHandler(null);
     unawaited(AndroidMediaControlsService.hide());

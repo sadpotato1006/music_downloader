@@ -123,14 +123,19 @@ extension AppControllerDownloadActions on AppController {
 
   void cancelDownload(String taskId) {
     final task = _taskById(taskId);
+    if (task == null ||
+        task.status == DownloadStatus.completed ||
+        task.status == DownloadStatus.canceled) {
+      return;
+    }
     _replaceTask(
       taskId,
       (task) => task.copyWith(status: DownloadStatus.canceled),
     );
     _cancelTokens[taskId]?.cancel('canceled');
-    if (task != null) {
-      AppLog.instance.info('download', '下载已取消', detail: task.track.title);
-      unawaited(_deletePartialFile(task.savePath));
+    AppLog.instance.info('download', '下载已取消', detail: task.track.title);
+    if (!_runningDownloadIds.contains(taskId)) {
+      _scheduleCanceledDownloadCleanup(task);
     }
     unawaited(_persistDownloadTasksBestEffort());
     _notify();
@@ -139,14 +144,18 @@ extension AppControllerDownloadActions on AppController {
 
   void retryDownload(String taskId) {
     final current = _taskById(taskId);
+    if (current == null ||
+        current.status == DownloadStatus.queued ||
+        current.status == DownloadStatus.downloading ||
+        current.status == DownloadStatus.completed) {
+      return;
+    }
     _replaceTask(
       taskId,
       (task) => task.copyWith(status: DownloadStatus.queued, error: null),
     );
     unawaited(_persistDownloadTasksBestEffort());
-    if (current != null) {
-      AppLog.instance.info('download', '下载重新进入队列', detail: current.track.title);
-    }
+    AppLog.instance.info('download', '下载重新进入队列', detail: current.track.title);
     _notify();
     _scheduleDownloads();
   }
@@ -384,11 +393,16 @@ extension AppControllerDownloadActions on AppController {
   }
 
   void _scheduleDownloads() {
+    if (_isDisposed) {
+      return;
+    }
     final limit = settings?.concurrentDownloads ?? 1;
     while (_activeDownloads < limit) {
       DownloadTask? next;
       for (final task in downloadTasks) {
-        if (task.status == DownloadStatus.queued) {
+        if (task.status == DownloadStatus.queued &&
+            !_runningDownloadIds.contains(task.id) &&
+            !_pendingDownloadCleanupIds.contains(task.id)) {
           next = task;
           break;
         }
@@ -396,14 +410,16 @@ extension AppControllerDownloadActions on AppController {
       if (next == null) {
         break;
       }
+      final taskId = next.id;
       _replaceTask(
-        next.id,
+        taskId,
         (task) => task.copyWith(status: DownloadStatus.downloading),
       );
+      _runningDownloadIds.add(taskId);
       _activeDownloads += 1;
       unawaited(
-        _runDownload(next.id).whenComplete(() {
-          if (_activeDownloads > 0) {
+        _runDownload(taskId).whenComplete(() {
+          if (_runningDownloadIds.remove(taskId) && _activeDownloads > 0) {
             _activeDownloads -= 1;
           }
           _scheduleDownloads();
@@ -414,7 +430,7 @@ extension AppControllerDownloadActions on AppController {
 
   Future<void> _runDownload(String taskId) async {
     final task = _taskById(taskId);
-    if (task == null || task.status == DownloadStatus.canceled) {
+    if (task == null || task.status != DownloadStatus.downloading) {
       return;
     }
 
@@ -452,32 +468,33 @@ extension AppControllerDownloadActions on AppController {
       }
       final lyrics = await lyricsFuture;
       final currentTask = _taskById(taskId);
-      if (currentTask == null ||
-          currentTask.status == DownloadStatus.canceled ||
-          currentTask.status == DownloadStatus.paused) {
+      if (_downloadShouldStop(currentTask, token)) {
         return;
       }
-      activeTask = currentTask.copyWith(
+      final resumableTask = currentTask!;
+      activeTask = resumableTask.copyWith(
         candidate: activeTask.candidate,
-        lyrics: lyrics ?? currentTask.lyrics,
+        lyrics: lyrics ?? resumableTask.lyrics,
       );
       _replaceTask(taskId, (_) => activeTask);
 
       await _downloadTaskFile(activeTask, token);
 
       var completedTask = _taskById(taskId);
-      if (completedTask == null ||
-          completedTask.status == DownloadStatus.canceled) {
+      if (_downloadShouldStop(completedTask, token)) {
         return;
       }
-      completedTask = await _matchAlbumForDownloadTask(completedTask);
+      completedTask = await _matchAlbumForDownloadTask(completedTask!);
       final latestTask = _taskById(taskId);
-      if (latestTask == null || latestTask.status == DownloadStatus.canceled) {
+      if (_downloadShouldStop(latestTask, token)) {
         return;
       }
-      completedTask = latestTask.copyWith(album: completedTask.album);
+      completedTask = latestTask!.copyWith(album: completedTask.album);
       _replaceTask(taskId, (_) => completedTask!);
-      await _embedMetadataIfPossible(completedTask);
+      await _embedMetadataIfPossible(completedTask, token);
+      if (_downloadShouldStop(_taskById(taskId), token)) {
+        return;
+      }
       _replaceTask(
         taskId,
         (task) => task.copyWith(status: DownloadStatus.completed, progress: 1),
@@ -513,6 +530,10 @@ extension AppControllerDownloadActions on AppController {
       );
       globalMessage = '下载失败：${task.track.title}。$message';
     } catch (error, stackTrace) {
+      if (_downloadShouldStop(_taskById(taskId), token)) {
+        AppLog.instance.info('download', '下载处理已中止', detail: task.track.title);
+        return;
+      }
       final message = '$error';
       _replaceTask(
         taskId,
@@ -527,7 +548,12 @@ extension AppControllerDownloadActions on AppController {
       );
       globalMessage = '下载失败：${task.track.title}。$message';
     } finally {
-      _cancelTokens.remove(taskId);
+      if (identical(_cancelTokens[taskId], token)) {
+        _cancelTokens.remove(taskId);
+      }
+      if (_taskById(taskId)?.status == DownloadStatus.canceled) {
+        await _cleanupCanceledDownloadFile(task);
+      }
       _lastDownloadProgressUpdateMillis.remove(taskId);
       if (!_isDisposed) {
         _notify();
@@ -582,7 +608,7 @@ extension AppControllerDownloadActions on AppController {
       await body.stream.drain();
       if (existingBytes > 0 &&
           rangeTotal != null &&
-          existingBytes >= rangeTotal) {
+          existingBytes == rangeTotal) {
         AppLog.instance.info(
           'download',
           '服务器确认本地断点文件已完整',
@@ -679,6 +705,17 @@ extension AppControllerDownloadActions on AppController {
       await output.flush();
     } finally {
       await output.close();
+    }
+    if (totalBytes != null && receivedBytes != totalBytes) {
+      if (receivedBytes > totalBytes && await file.exists()) {
+        await file.delete();
+      }
+      throw FileSystemException(
+        receivedBytes < totalBytes
+            ? '下载响应提前结束：应接收 $totalBytes 字节，实际收到 $receivedBytes 字节。'
+            : '下载响应超过声明长度：应接收 $totalBytes 字节，实际收到 $receivedBytes 字节。',
+        task.savePath,
+      );
     }
     _updateDownloadProgress(
       task.id,
@@ -804,7 +841,14 @@ extension AppControllerDownloadActions on AppController {
     }
   }
 
-  Future<void> _embedMetadataIfPossible(DownloadTask task) async {
+  bool _downloadShouldStop(DownloadTask? task, CancelToken token) {
+    return token.isCancelled || task?.status != DownloadStatus.downloading;
+  }
+
+  Future<void> _embedMetadataIfPossible(
+    DownloadTask task,
+    CancelToken token,
+  ) async {
     final lyrics = task.lyrics?.trim();
     if (!task.candidate.isMp3) {
       return;
@@ -813,7 +857,11 @@ extension AppControllerDownloadActions on AppController {
     final cover = await _downloadCoverImage(
       task.track.coverUrl,
       referer: task.track.detailUrl,
+      cancelToken: token,
     );
+    if (_downloadShouldStop(_taskById(task.id), token)) {
+      return;
+    }
 
     try {
       await Id3LyricsEmbedder.embedMetadata(
@@ -832,6 +880,7 @@ extension AppControllerDownloadActions on AppController {
   Future<Id3CoverImage?> _downloadCoverImage(
     String? coverUrl, {
     required String referer,
+    CancelToken? cancelToken,
   }) async {
     if (coverUrl == null || coverUrl.trim().isEmpty) {
       return null;
@@ -842,16 +891,17 @@ extension AppControllerDownloadActions on AppController {
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Referer': referer,
-        'User-Agent': 'QingTing/1.3.3 (+personal-use)',
+        'User-Agent': 'QingTing/1.3.6 (+personal-use)',
       },
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'User-Agent': 'QingTing/1.3.3 (+personal-use)',
+        'User-Agent': 'QingTing/1.3.6 (+personal-use)',
       },
     ]) {
       try {
         response = await _downloadDio.get<List<int>>(
           coverUrl,
+          cancelToken: cancelToken,
           options: Options(
             responseType: ResponseType.bytes,
             receiveTimeout: const Duration(seconds: 12),
@@ -859,6 +909,11 @@ extension AppControllerDownloadActions on AppController {
           ),
         );
         break;
+      } on DioException catch (error) {
+        if (CancelToken.isCancel(error)) {
+          rethrow;
+        }
+        response = null;
       } catch (_) {
         response = null;
       }
@@ -1040,6 +1095,34 @@ extension AppControllerDownloadActions on AppController {
     }
   }
 
+  void _scheduleCanceledDownloadCleanup(DownloadTask task) {
+    if (!_pendingDownloadCleanupIds.add(task.id)) {
+      return;
+    }
+    unawaited(
+      _cleanupCanceledDownloadFile(task).whenComplete(() {
+        _pendingDownloadCleanupIds.remove(task.id);
+        if (!_isDisposed) {
+          _scheduleDownloads();
+          _notify();
+        }
+      }),
+    );
+  }
+
+  Future<void> _cleanupCanceledDownloadFile(DownloadTask task) async {
+    try {
+      await _deletePartialFile(task.savePath);
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'download',
+        '清理已取消的下载文件失败：${task.track.title}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
   int _compareText(String left, String right) {
     return left.toLowerCase().compareTo(right.toLowerCase());
   }
@@ -1064,12 +1147,29 @@ extension AppControllerDownloadActions on AppController {
     if (settings == null) {
       return;
     }
+    _settingsSavePending = true;
     _settingsSaveDebounce?.cancel();
     _settingsSaveDebounce = Timer(const Duration(milliseconds: 350), () {
-      final latest = settings;
-      if (latest != null) {
-        unawaited(storage.saveSettings(latest));
-      }
+      unawaited(_flushPendingSettings());
     });
+  }
+
+  Future<void> _flushPendingSettings() async {
+    _settingsSaveDebounce?.cancel();
+    _settingsSaveDebounce = null;
+    if (!_settingsSavePending) {
+      return;
+    }
+    final latest = settings;
+    if (latest == null) {
+      return;
+    }
+    _settingsSavePending = false;
+    try {
+      await storage.saveSettings(latest);
+    } catch (_) {
+      _settingsSavePending = true;
+      rethrow;
+    }
   }
 }

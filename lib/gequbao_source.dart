@@ -197,7 +197,7 @@ class GequbaoSource implements MusicSource {
       'Referer': referer ?? 'https://www.gequbao.com/',
       'Upgrade-Insecure-Requests': '1',
       'User-Agent':
-          'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 QingTing/1.3.3',
+          'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 QingTing/1.3.6',
     };
   }
 
@@ -856,12 +856,27 @@ class GequbaoParser {
   }
 
   static String formatFromUrl(String url) {
-    final path = Uri.tryParse(url)?.path ?? url;
-    final match = RegExp(
-      r'\.([a-z0-9]+)$',
+    final uri = Uri.tryParse(url);
+    final values = <String>[
+      uri?.path ?? url,
+      if (uri != null)
+        for (final entries in uri.queryParametersAll.values) ...entries,
+    ];
+    final audioExtension = RegExp(
+      r'\.(mp3|flac|wav|m4a|aac)(?:$|[?#&])',
       caseSensitive: false,
-    ).firstMatch(path);
-    return (match?.group(1) ?? 'mp3').toLowerCase();
+    );
+    for (final value in values) {
+      final match = audioExtension.allMatches(value).lastOrNull;
+      if (match != null) {
+        return match.group(1)!.toLowerCase();
+      }
+    }
+
+    // Songs returned by common-play-url may use a dynamic endpoint such as
+    // download.s even though the response body and download name are MP3.
+    // Unknown endpoint suffixes are therefore not audio formats.
+    return 'mp3';
   }
 
   static String _decodeJsSingleQuotedBody(String raw) {

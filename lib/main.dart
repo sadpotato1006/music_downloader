@@ -25,7 +25,8 @@ part 'ui/dialogs.dart';
 part 'ui/diagnostics.dart';
 
 const _accent = Color(0xFF8FD9A8);
-const _appVersion = '1.3.3+19';
+const _appVersion = '1.3.6+22';
+const _appLifecycleChannel = MethodChannel('qingting/app_lifecycle');
 const _accentStrong = Color(0xFF4AA66A);
 const _ink = Color(0xFF1F2A24);
 const _muted = Color(0xFF6B756F);
@@ -37,7 +38,7 @@ Map<String, String> _networkImageHeadersFor(String url) {
     'Referer': host.contains('myfreemp3.ink')
         ? 'https://myfreemp3.ink/'
         : 'https://www.gequbao.com/',
-    'User-Agent': 'QingTing/1.3.3 (+personal-use)',
+    'User-Agent': 'QingTing/1.3.6 (+personal-use)',
   };
 }
 
@@ -104,7 +105,7 @@ class QingTingApp extends StatefulWidget {
   State<QingTingApp> createState() => _QingTingAppState();
 }
 
-class _QingTingAppState extends State<QingTingApp> {
+class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
   late final gequbaoSource = GequbaoSource();
   late final myFreeMp3Source = MyFreeMp3Source();
   late final AppController controller = AppController(
@@ -115,20 +116,42 @@ class _QingTingAppState extends State<QingTingApp> {
   @override
   void initState() {
     super.initState();
-    unawaited(
-      controller.bootstrap().catchError((Object error, StackTrace stackTrace) {
-        AppLog.instance.error(
-          'bootstrap',
-          '应用初始化失败',
-          error: error,
-          stackTrace: stackTrace,
-        );
-      }),
-    );
+    WidgetsBinding.instance.addObserver(this);
+    if (Platform.isWindows) {
+      _appLifecycleChannel.setMethodCallHandler(_handleLifecycleMethod);
+    }
+    unawaited(controller.bootstrap());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        break;
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        unawaited(controller.flushPendingWrites());
+        break;
+    }
+  }
+
+  Future<Object?> _handleLifecycleMethod(MethodCall call) async {
+    if (call.method != 'prepareToExit') {
+      throw MissingPluginException('Unknown lifecycle method: ${call.method}');
+    }
+    await controller.flushPendingWrites();
+    return true;
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (Platform.isWindows) {
+      _appLifecycleChannel.setMethodCallHandler(null);
+    }
+    unawaited(controller.flushPendingWrites());
     controller.dispose();
     super.dispose();
   }
@@ -172,7 +195,75 @@ class _QingTingAppState extends State<QingTingApp> {
         ),
         home: AnimatedBuilder(
           animation: controller,
-          builder: (context, _) => HomeShell(controller: controller),
+          builder: (context, _) {
+            return switch (controller.bootstrapStatus) {
+              AppBootstrapStatus.loading => const _StartupStatusPage(),
+              AppBootstrapStatus.error => _StartupStatusPage(
+                error: controller.bootstrapError,
+                onRetry: () => unawaited(controller.bootstrap()),
+              ),
+              AppBootstrapStatus.ready => HomeShell(controller: controller),
+            };
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _StartupStatusPage extends StatelessWidget {
+  const _StartupStatusPage({this.error, this.onRetry});
+
+  final String? error;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = error != null;
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (failed)
+                    const Icon(
+                      Icons.error_outline,
+                      size: 48,
+                      color: Colors.redAccent,
+                    )
+                  else
+                    const CircularProgressIndicator(),
+                  const SizedBox(height: 20),
+                  Text(
+                    failed ? '青听启动失败' : '正在加载音乐数据',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    error ?? '正在恢复设置、曲库、播放队列和下载任务…',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: _muted),
+                  ),
+                  if (failed) ...[
+                    const SizedBox(height: 20),
+                    FilledButton.icon(
+                      onPressed: onRetry,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('重试'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );

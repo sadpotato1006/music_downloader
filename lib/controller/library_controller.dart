@@ -158,15 +158,187 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<void> removeDownloadedRecord(DownloadedTrack track) async {
+    await _removeDownloadedRecord(track);
+    globalMessage = '已删除歌曲记录，歌曲文件仍保留在原位置。';
+    _notify();
+  }
+
+  bool get movesDeletedFilesToRecycleBin =>
+      fileDeletionService.movesFilesToRecycleBin;
+
+  bool isDeletingDownloadedTrack(DownloadedTrack track) =>
+      _deletingTrackKeys.contains(_trackPathKey(track.path));
+
+  Future<bool> deleteDownloadedTrack(DownloadedTrack track) async {
+    final trackPathKey = _trackPathKey(track.path);
+    if (!_deletingTrackKeys.add(trackPathKey)) {
+      globalMessage = '正在删除“${track.title}”，请稍候。';
+      _notify();
+      return false;
+    }
+    _notify();
+    try {
+      return await _deleteDownloadedTrack(track, trackPathKey);
+    } finally {
+      _deletingTrackKeys.remove(trackPathKey);
+      _notify();
+    }
+  }
+
+  Future<bool> _deleteDownloadedTrack(
+    DownloadedTrack track,
+    String trackPathKey,
+  ) async {
+    final activeItem = currentItem;
+    final deletingCurrentItem =
+        activeItem?.localPath != null &&
+        _trackPathKey(activeItem!.localPath!) == trackPathKey;
+    final currentWasPlaying = deletingCurrentItem && player.isPlaying;
+    var fileExisted = false;
+    try {
+      if (deletingCurrentItem) {
+        await player.stop();
+      }
+      fileExisted = await fileDeletionService.deleteFile(track.path);
+    } catch (error) {
+      if (currentWasPlaying) {
+        try {
+          await _playCurrentItem();
+        } catch (_) {
+          // Keep the original file-operation error visible to the user.
+        }
+      }
+      final operation = movesDeletedFilesToRecycleBin ? '移入回收站' : '删除';
+      globalMessage = '歌曲文件$operation失败：$error';
+      _notify();
+      return false;
+    }
+
+    final queueUpdate = _removeDeletedTrackFromQueue(track.path);
+    _removeDownloadedRecordInMemory(track);
+    final persistenceFailures = await _persistDeletedTrackState(
+      saveQueue: queueUpdate.changed,
+    );
+    var playbackFailed = false;
+    if (queueUpdate.removedCurrent && currentWasPlaying && queue.isNotEmpty) {
+      try {
+        playbackFailed = !await _openCurrentItemForPlayback();
+      } catch (error, stackTrace) {
+        playbackFailed = true;
+        AppLog.instance.error(
+          'library',
+          '删除歌曲后接续播放失败：${track.title}',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    unawaited(_syncAndroidMediaControls(force: true));
+
+    final fileResult = !fileExisted
+        ? '歌曲文件已不存在'
+        : movesDeletedFilesToRecycleBin
+        ? '已将歌曲文件移入回收站'
+        : '已删除歌曲文件';
+    if (persistenceFailures.isEmpty) {
+      globalMessage = '$fileResult，并移除歌曲记录和播放队列项目。';
+    } else {
+      globalMessage =
+          '$fileResult；当前界面已移除歌曲记录和播放队列项目，但${persistenceFailures.join('、')}保存失败。';
+    }
+    if (playbackFailed) {
+      globalMessage = '${globalMessage!} 自动接续播放下一首失败，请手动选择歌曲。';
+    }
+    _notify();
+    return true;
+  }
+
+  ({bool changed, bool removedCurrent}) _removeDeletedTrackFromQueue(
+    String trackPath,
+  ) {
+    final pathKey = _trackPathKey(trackPath);
+    final originalCurrentIndex = currentQueueIndex;
+    final matchingIndexes = <int>[];
+    for (var index = 0; index < queue.length; index += 1) {
+      final localPath = queue[index].localPath;
+      if (localPath != null && _trackPathKey(localPath) == pathKey) {
+        matchingIndexes.add(index);
+      }
+    }
+    if (matchingIndexes.isEmpty) {
+      return (changed: false, removedCurrent: false);
+    }
+
+    final removingCurrent = matchingIndexes.contains(originalCurrentIndex);
+    final removedBeforeCurrent = matchingIndexes
+        .where((index) => index < originalCurrentIndex)
+        .length;
+    final matchingSet = matchingIndexes.toSet();
+    queue = [
+      for (var index = 0; index < queue.length; index += 1)
+        if (!matchingSet.contains(index)) queue[index],
+    ];
+
+    if (queue.isEmpty) {
+      currentQueueIndex = -1;
+    } else if (removingCurrent) {
+      currentQueueIndex = (originalCurrentIndex - removedBeforeCurrent)
+          .clamp(0, queue.length - 1)
+          .toInt();
+    } else if (originalCurrentIndex >= 0) {
+      currentQueueIndex = originalCurrentIndex - removedBeforeCurrent;
+    }
+
+    return (changed: true, removedCurrent: removingCurrent);
+  }
+
+  Future<void> _removeDownloadedRecord(DownloadedTrack track) async {
+    _removeDownloadedRecordInMemory(track);
+    await Future.wait<void>([_saveMyMusic(), _saveDownloadedTracks()]);
+  }
+
+  void _removeDownloadedRecordInMemory(DownloadedTrack track) {
     downloadedTracks = downloadedTracks
         .where((item) => item.id != track.id || item.path != track.path)
         .toList();
     final key = _libraryLyricsCacheKey(track);
     _libraryLyricsSearchCache.remove(key);
     _loadingLibraryLyricsKeys.remove(key);
-    await _removeTrackFromMyMusic(track.path);
-    await _saveDownloadedTracks();
-    _notify();
+    _removeTrackFromMyMusicInMemory(track.path);
+  }
+
+  Future<List<String>> _persistDeletedTrackState({
+    required bool saveQueue,
+  }) async {
+    final failures = <String>[];
+
+    Future<void> persist(String label, Future<void> Function() save) async {
+      Object? lastError;
+      StackTrace? lastStackTrace;
+      for (var attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await save();
+          return;
+        } catch (error, stackTrace) {
+          lastError = error;
+          lastStackTrace = stackTrace;
+        }
+      }
+      failures.add(label);
+      AppLog.instance.error(
+        'library',
+        '删除歌曲后保存$label失败',
+        error: lastError,
+        stackTrace: lastStackTrace,
+      );
+    }
+
+    if (saveQueue) {
+      await persist('播放队列', _saveQueueState);
+    }
+    await persist('我的音乐', _saveMyMusic);
+    await persist('本地曲库', _saveDownloadedTracks);
+    return failures;
   }
 
   Future<int> scanCurrentDownloadDirectory() async {
@@ -665,7 +837,7 @@ extension AppControllerLibraryActions on AppController {
     _notify();
   }
 
-  Future<void> _removeTrackFromMyMusic(String trackPath) async {
+  void _removeTrackFromMyMusicInMemory(String trackPath) {
     final key = _trackPathKey(trackPath);
     myMusic = myMusic.copyWith(
       favoriteTrackPaths: myMusic.favoriteTrackPaths
@@ -683,7 +855,6 @@ extension AppControllerLibraryActions on AppController {
           .where((playback) => _trackPathKey(playback.trackPath) != key)
           .toList(),
     );
-    await _saveMyMusic();
   }
 
   Future<void> _saveMyMusic() {

@@ -128,6 +128,21 @@ void main() {
     expect(detail.candidates.first.format, 'mp3');
   });
 
+  test('treats a dynamic common-play endpoint as mp3', () {
+    expect(
+      GequbaoParser.formatFromUrl(
+        'https://cdn.example.test/common/download.s?token=temporary',
+      ),
+      'mp3',
+    );
+    expect(
+      GequbaoParser.formatFromUrl(
+        'https://cdn.example.test/common/download.s?file=track.flac',
+      ),
+      'flac',
+    );
+  });
+
   test('extracts album metadata from detail page', () {
     const html = r'''
       <html>

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -7,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/album_metadata_service.dart';
 import 'package:qingting/app_controller.dart';
 import 'package:qingting/app_log.dart';
+import 'package:qingting/file_deletion_service.dart';
 import 'package:qingting/id3_lyrics_embedder.dart';
 import 'package:qingting/lyrics_service.dart';
 import 'package:qingting/main.dart' as app;
@@ -144,6 +146,45 @@ void main() {
     controller.dispose();
   });
 
+  test('only the latest overlapping search can update results', () async {
+    final source = _ControlledSearchMusicSource();
+    final controller = AppController(
+      source: source,
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+
+    final olderSearch = controller.search('旧关键词');
+    await source.waitForCalls(1);
+    final newerSearch = controller.search('新关键词');
+    source.complete(0, keyword: '旧关键词');
+    await source.waitForCalls(2);
+    source.complete(1, keyword: '新关键词');
+    await Future.wait([olderSearch, newerSearch]);
+
+    expect(controller.searchQuery, '新关键词');
+    expect(controller.searchResults.single.title, '新关键词');
+    expect(controller.searchError, isNull);
+    expect(controller.isSearching, isFalse);
+    controller.dispose();
+  });
+
+  test('disposing during search ignores the late response', () async {
+    final source = _ControlledSearchMusicSource();
+    final controller = AppController(
+      source: source,
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+
+    final search = controller.search('稍后返回');
+    await source.waitForCalls(1);
+    controller.dispose();
+    source.complete(0, keyword: '稍后返回');
+
+    await search;
+  });
+
   test('prevents adding the same track to the download queue twice', () async {
     final source = _PlayableMusicSource();
     final controller = AppController(
@@ -196,7 +237,58 @@ void main() {
 
     await controller.bootstrap();
 
+    expect(controller.bootstrapStatus, AppBootstrapStatus.ready);
     expect(controller.shuffleEnabled, isFalse);
+    controller.dispose();
+  });
+
+  test('bootstrap exposes failure state and can retry', () async {
+    final storage = _RetryBootstrapStorageService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: storage,
+      player: _FakePlaybackService(),
+    );
+
+    await controller.bootstrap();
+
+    expect(controller.bootstrapStatus, AppBootstrapStatus.error);
+    expect(controller.bootstrapError, isNotEmpty);
+    expect(controller.isReady, isFalse);
+
+    await controller.bootstrap();
+
+    expect(storage.loadSettingsCalls, 2);
+    expect(controller.bootstrapStatus, AppBootstrapStatus.ready);
+    expect(controller.bootstrapError, isNull);
+    expect(controller.isReady, isTrue);
+    controller.dispose();
+  });
+
+  test('flushPendingWrites saves the latest debounced settings once', () async {
+    final storage = _RecordingSettingsStorageService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: storage,
+      player: _FakePlaybackService(),
+    );
+    controller.settings = const AppSettings(downloadDirectory: 'music');
+
+    await controller.setVolume(37);
+    controller.setDesktopLyricsSettings(
+      const DesktopLyricsSettings(enabled: true, fontSize: 28),
+    );
+
+    expect(storage.saveSettingsCalls, 0);
+    await controller.flushPendingWrites();
+
+    expect(storage.saveSettingsCalls, 1);
+    expect(storage.lastSettings?.volume, 37);
+    expect(storage.lastSettings?.desktopLyrics.enabled, isTrue);
+    expect(storage.lastSettings?.desktopLyrics.fontSize, 28);
+
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    expect(storage.saveSettingsCalls, 1);
     controller.dispose();
   });
 
@@ -352,6 +444,219 @@ void main() {
   });
 
   test(
+    'oversized local range file is discarded and downloaded again',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-range-oversized-',
+      );
+      final savePath =
+          '${directory.path}${Platform.pathSeparator}oversized.m4a';
+      await File(savePath).writeAsBytes(const [1, 2, 3, 4, 5, 6, 7, 8]);
+      final source = _AlbumDownloadMusicSource();
+      final adapter = _Range416ThenFullDownloadAdapter();
+      final controller = AppController(
+        source: source,
+        storage: _DownloadStorageService(savePath),
+        player: _FakePlaybackService(),
+        downloadDio: Dio()..httpClientAdapter = adapter,
+        albumMetadata: _RecordingAlbumMetadataService(),
+      );
+      controller.downloadTasks = [
+        DownloadTask(
+          id: 'range-oversized-task',
+          track: source.result,
+          candidate: const AudioCandidate(
+            url: 'https://example.test/test.m4a',
+            format: 'm4a',
+          ),
+          status: DownloadStatus.paused,
+          progress: 1,
+          savePath: savePath,
+          receivedBytes: 8,
+          totalBytes: 6,
+        ),
+      ];
+
+      try {
+        controller.retryDownload('range-oversized-task');
+        for (var attempt = 0; attempt < 100; attempt += 1) {
+          final status = controller.downloadTasks.single.status;
+          if (status == DownloadStatus.completed ||
+              status == DownloadStatus.failed) {
+            break;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+
+        final task = controller.downloadTasks.single;
+        expect(task.status, DownloadStatus.completed, reason: task.error);
+        expect(adapter.calls, 2);
+        expect(adapter.firstRangeHeader, 'bytes=8-');
+        expect(await File(savePath).readAsBytes(), const [9, 8, 7, 6, 5, 4]);
+      } finally {
+        controller.dispose();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test('short download response is rejected as incomplete', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-short-download-',
+    );
+    final savePath = '${directory.path}${Platform.pathSeparator}short.m4a';
+    final source = _AlbumDownloadMusicSource();
+    final controller = AppController(
+      source: source,
+      storage: _DownloadStorageService(savePath),
+      player: _FakePlaybackService(),
+      downloadDio: Dio()..httpClientAdapter = _ShortAudioDownloadAdapter(),
+      albumMetadata: _RecordingAlbumMetadataService(),
+    );
+
+    try {
+      final start = await controller.startDownload(
+        source.result,
+        allowNonMp3: true,
+      );
+      expect(start.didStart, isTrue);
+      for (var attempt = 0; attempt < 100; attempt += 1) {
+        final status = controller.downloadTasks.single.status;
+        if (status == DownloadStatus.completed ||
+            status == DownloadStatus.failed) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      final task = controller.downloadTasks.single;
+      expect(task.status, DownloadStatus.failed);
+      expect(task.error, contains('下载响应提前结束'));
+      expect(controller.downloadedTracks, isEmpty);
+      expect(await File(savePath).readAsBytes(), const [1, 2, 3]);
+    } finally {
+      controller.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('pause and immediate retry never runs the same task twice', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-single-download-worker-',
+    );
+    final savePath =
+        '${directory.path}${Platform.pathSeparator}single-worker.m4a';
+    final source = _ControlledDeferredDownloadSource();
+    final adapter = _CountingAudioDownloadAdapter();
+    final controller = AppController(
+      source: source,
+      storage: _DownloadStorageService(savePath),
+      player: _FakePlaybackService(),
+      downloadDio: Dio()..httpClientAdapter = adapter,
+      albumMetadata: _RecordingAlbumMetadataService(),
+    );
+    controller.settings = const AppSettings(
+      downloadDirectory: '',
+      concurrentDownloads: 2,
+    );
+    controller.downloadTasks = [
+      DownloadTask(
+        id: 'single-worker-task',
+        track: source.result,
+        candidate: const AudioCandidate(
+          url: 'deferred-download://prepare',
+          format: 'm4a',
+        ),
+        status: DownloadStatus.paused,
+        progress: 0,
+        savePath: savePath,
+        lyrics: '[00:01.00]测试歌词',
+      ),
+    ];
+
+    try {
+      controller.retryDownload('single-worker-task');
+      await source.firstPreparationStarted.future;
+
+      controller.pauseDownload('single-worker-task');
+      controller.retryDownload('single-worker-task');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(source.prepareCalls, 1);
+      expect(source.maxConcurrentPreparations, 1);
+      expect(adapter.calls, 0);
+
+      source.finishFirstPreparation();
+      for (var attempt = 0; attempt < 100; attempt += 1) {
+        final status = controller.downloadTasks.single.status;
+        if (status == DownloadStatus.completed ||
+            status == DownloadStatus.failed) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      final task = controller.downloadTasks.single;
+      expect(task.status, DownloadStatus.completed, reason: task.error);
+      expect(source.maxConcurrentPreparations, 1);
+      expect(adapter.calls, 1);
+    } finally {
+      controller.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('cancel during cover processing never becomes completed', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-cancel-post-processing-',
+    );
+    final savePath =
+        '${directory.path}${Platform.pathSeparator}cancel-cover.mp3';
+    final source = _CoverDownloadMusicSource();
+    final adapter = _ControlledCoverDownloadAdapter();
+    final controller = AppController(
+      source: source,
+      storage: _DownloadStorageService(savePath),
+      player: _FakePlaybackService(),
+      downloadDio: Dio()..httpClientAdapter = adapter,
+      albumMetadata: _RecordingAlbumMetadataService(),
+    );
+
+    try {
+      final start = await controller.startDownload(source.result);
+      expect(start.didStart, isTrue);
+      await adapter.coverRequestStarted.future;
+      expect(
+        controller.downloadTasks.single.status,
+        DownloadStatus.downloading,
+      );
+
+      controller.cancelDownload(controller.downloadTasks.single.id);
+      expect(controller.downloadTasks.single.status, DownloadStatus.canceled);
+      adapter.finishCoverRequest();
+
+      for (var attempt = 0; attempt < 100; attempt += 1) {
+        if (!await File(savePath).exists()) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      expect(controller.downloadTasks.single.status, DownloadStatus.canceled);
+      expect(controller.downloadedTracks, isEmpty);
+      expect(await File(savePath).exists(), isFalse);
+    } finally {
+      if (!adapter.coverRequestFinished.isCompleted) {
+        adapter.finishCoverRequest();
+      }
+      controller.dispose();
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+    }
+  });
+
+  test(
     'download replaces a source album with the default Apple match',
     () async {
       final directory = await Directory.systemTemp.createTemp(
@@ -473,6 +778,224 @@ void main() {
     controller.dispose();
   });
 
+  testWidgets('deleting a library record keeps the song file', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final directory = Directory.systemTemp.createTempSync(
+      'qingting-remove-record-',
+    );
+    final file = File('${directory.path}${Platform.pathSeparator}song.mp3');
+    file.writeAsBytesSync(const [1, 2, 3]);
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+    final track = DownloadedTrack(
+      id: 'remove-record-song',
+      title: '保留文件的歌',
+      artist: '测试歌手',
+      path: file.path,
+      format: 'mp3',
+      downloadedAt: DateTime(2026, 6, 30),
+      sourceUrl: '',
+    );
+    controller.downloadedTracks = [track];
+    addTearDown(() {
+      controller.dispose();
+      if (directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: app.LibraryPage(controller: controller)),
+      ),
+    );
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('删除歌曲'), findsOneWidget);
+    expect(find.text('删除记录'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('删除记录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除记录'));
+    await tester.pumpAndSettle();
+    expect(find.text('确认删除记录'), findsOneWidget);
+    expect(find.textContaining('不会删除歌曲文件本身'), findsOneWidget);
+    expect(file.existsSync(), isTrue);
+    expect(controller.downloadedTracks, [track]);
+
+    await tester.tap(find.widgetWithText(TextButton, '删除记录'));
+    await tester.pumpAndSettle();
+    expect(file.existsSync(), isTrue);
+    expect(controller.downloadedTracks, isEmpty);
+    expect(controller.globalMessage, contains('歌曲文件仍保留'));
+  });
+
+  testWidgets('deleting a song warns before touching its file', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final directory = Directory.systemTemp.createTempSync(
+      'qingting-delete-song-',
+    );
+    final file = File('${directory.path}${Platform.pathSeparator}song.mp3');
+    file.writeAsBytesSync(const [1, 2, 3]);
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+      fileDeletionService: _FakeFileDeletionService(
+        movesFilesToRecycleBin: true,
+      ),
+    );
+    final track = DownloadedTrack(
+      id: 'delete-song',
+      title: '真正删除的歌',
+      artist: '测试歌手',
+      path: file.path,
+      format: 'mp3',
+      downloadedAt: DateTime(2026, 6, 30),
+      sourceUrl: '',
+    );
+    controller.downloadedTracks = [track];
+    addTearDown(() {
+      controller.dispose();
+      if (directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: app.LibraryPage(controller: controller)),
+      ),
+    );
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('删除歌曲'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除歌曲'));
+    await tester.pumpAndSettle();
+    expect(find.text('确认删除歌曲'), findsOneWidget);
+    expect(find.textContaining('电脑端会将歌曲文件本身移入回收站'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, '移入回收站'), findsOneWidget);
+    expect(file.existsSync(), isTrue);
+    expect(controller.downloadedTracks, [track]);
+
+    await tester.tap(find.widgetWithText(TextButton, '取消'));
+    await tester.pumpAndSettle();
+    expect(file.existsSync(), isTrue);
+    expect(controller.downloadedTracks, [track]);
+  });
+
+  testWidgets('mobile deletion warning says the file is permanent', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+      fileDeletionService: _FakeFileDeletionService(
+        movesFilesToRecycleBin: false,
+      ),
+    );
+    final track = DownloadedTrack(
+      id: 'mobile-delete-song',
+      title: '手机端删除的歌',
+      artist: '测试歌手',
+      path: '/storage/emulated/0/Music/song.mp3',
+      format: 'mp3',
+      downloadedAt: DateTime(2026, 7, 2),
+      sourceUrl: '',
+    );
+    controller.downloadedTracks = [track];
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: app.LibraryPage(controller: controller)),
+      ),
+    );
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('删除歌曲'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除歌曲'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('确认删除歌曲'), findsOneWidget);
+    expect(find.textContaining('手机端会直接永久删除'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, '删除歌曲'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, '取消'));
+    await tester.pumpAndSettle();
+    expect(controller.downloadedTracks, [track]);
+  });
+
+  testWidgets('deletion disables the track menu and shows progress', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fileDeletion = _ControlledFileDeletionService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+      fileDeletionService: fileDeletion,
+    );
+    final track = DownloadedTrack(
+      id: 'deletion-progress-song',
+      title: '正在删除的歌',
+      artist: '测试歌手',
+      path: 'C:\\Music\\deletion-progress.mp3',
+      format: 'mp3',
+      downloadedAt: DateTime(2026, 7, 2),
+      sourceUrl: '',
+    );
+    controller.downloadedTracks = [track];
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AnimatedBuilder(
+          animation: controller,
+          builder: (context, _) =>
+              Scaffold(body: app.LibraryPage(controller: controller)),
+        ),
+      ),
+    );
+
+    final deletion = controller.deleteDownloadedTrack(track);
+    await tester.pump();
+
+    expect(fileDeletion.hasStarted, isTrue);
+    expect(controller.isDeletingDownloadedTrack(track), isTrue);
+    expect(find.byTooltip('正在删除歌曲'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is PopupMenuButton && !widget.enabled,
+      ),
+      findsOneWidget,
+    );
+
+    final duplicateResult = await controller.deleteDownloadedTrack(track);
+    expect(duplicateResult, isFalse);
+    expect(fileDeletion.calls, 1);
+
+    fileDeletion.finish();
+    await tester.pumpAndSettle();
+
+    expect(await deletion, isTrue);
+    expect(controller.isDeletingDownloadedTrack(track), isFalse);
+    expect(controller.downloadedTracks, isEmpty);
+  });
+
   testWidgets('diagnostics page displays recorded log entries', (tester) async {
     await AppLog.instance.clear();
     AppLog.instance.warning('test', '诊断测试日志');
@@ -481,7 +1004,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('诊断与日志'), findsOneWidget);
-    expect(find.text('版本：1.3.3+19'), findsOneWidget);
+    expect(find.text('版本：1.3.6+22'), findsOneWidget);
     expect(find.text('诊断测试日志'), findsOneWidget);
   });
 }
@@ -565,6 +1088,11 @@ class _FakePlaybackService implements PlaybackService {
 }
 
 class _FakeStorageService extends StorageService {
+  List<DownloadedTrack> savedDownloadedTracks = const [];
+
+  @override
+  Future<void> saveSettings(AppSettings settings) async {}
+
   @override
   Future<void> savePlayerQueue(
     List<PlayerItem> items,
@@ -577,6 +1105,43 @@ class _FakeStorageService extends StorageService {
 
   @override
   Future<void> saveMyMusic(MyMusicData value) async {}
+
+  @override
+  Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
+    savedDownloadedTracks = List<DownloadedTrack>.from(tracks);
+  }
+}
+
+class _FakeFileDeletionService implements FileDeletionService {
+  const _FakeFileDeletionService({required this.movesFilesToRecycleBin});
+
+  @override
+  final bool movesFilesToRecycleBin;
+
+  @override
+  Future<bool> deleteFile(String path) {
+    throw StateError('The confirmation tests must not delete a real file.');
+  }
+}
+
+class _ControlledFileDeletionService implements FileDeletionService {
+  @override
+  bool get movesFilesToRecycleBin => false;
+
+  Completer<void>? _release;
+  bool hasStarted = false;
+  int calls = 0;
+
+  @override
+  Future<bool> deleteFile(String path) async {
+    calls += 1;
+    hasStarted = true;
+    _release = Completer<void>();
+    await _release!.future;
+    return true;
+  }
+
+  void finish() => _release!.complete();
 }
 
 class _BootstrapStorageService extends _FakeStorageService {
@@ -609,6 +1174,30 @@ class _BootstrapStorageService extends _FakeStorageService {
   @override
   Future<void> saveDownloadTasks(List<DownloadTask> tasks) async {
     savedTasks = List<DownloadTask>.from(tasks);
+  }
+}
+
+class _RetryBootstrapStorageService extends _BootstrapStorageService {
+  int loadSettingsCalls = 0;
+
+  @override
+  Future<AppSettings> loadSettings() async {
+    loadSettingsCalls += 1;
+    if (loadSettingsCalls == 1) {
+      throw const FileSystemException('temporary bootstrap failure');
+    }
+    return super.loadSettings();
+  }
+}
+
+class _RecordingSettingsStorageService extends _FakeStorageService {
+  int saveSettingsCalls = 0;
+  AppSettings? lastSettings;
+
+  @override
+  Future<void> saveSettings(AppSettings settings) async {
+    saveSettingsCalls += 1;
+    lastSettings = settings;
   }
 }
 
@@ -717,6 +1306,230 @@ class _RangeAudioDownloadAdapter implements HttpClientAdapter {
   void close({bool force = false}) {}
 }
 
+class _Range416ThenFullDownloadAdapter implements HttpClientAdapter {
+  int calls = 0;
+  String? firstRangeHeader;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    calls += 1;
+    if (calls == 1) {
+      firstRangeHeader = options.headers[HttpHeaders.rangeHeader]?.toString();
+      return ResponseBody.fromBytes(
+        Uint8List(0),
+        416,
+        headers: {
+          HttpHeaders.contentRangeHeader: ['bytes */6'],
+        },
+      );
+    }
+    return ResponseBody.fromBytes(
+      Uint8List.fromList(const [9, 8, 7, 6, 5, 4]),
+      200,
+      headers: {
+        Headers.contentLengthHeader: ['6'],
+        Headers.contentTypeHeader: ['audio/mp4'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _ShortAudioDownloadAdapter implements HttpClientAdapter {
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    return ResponseBody.fromBytes(
+      Uint8List.fromList(const [1, 2, 3]),
+      200,
+      headers: {
+        Headers.contentLengthHeader: ['6'],
+        Headers.contentTypeHeader: ['audio/mp4'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _CountingAudioDownloadAdapter implements HttpClientAdapter {
+  int calls = 0;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    calls += 1;
+    return ResponseBody.fromBytes(
+      Uint8List.fromList(const [0, 0, 0, 20, 102, 116, 121, 112]),
+      200,
+      headers: {
+        Headers.contentLengthHeader: ['8'],
+        Headers.contentTypeHeader: ['audio/mp4'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _ControlledCoverDownloadAdapter implements HttpClientAdapter {
+  final Completer<void> coverRequestStarted = Completer<void>();
+  final Completer<void> coverRequestFinished = Completer<void>();
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    if (options.uri.path.endsWith('/cover.jpg')) {
+      if (!coverRequestStarted.isCompleted) {
+        coverRequestStarted.complete();
+      }
+      await coverRequestFinished.future;
+      return ResponseBody.fromBytes(
+        Uint8List.fromList(const [0xFF, 0xD8, 0xFF, 0xD9]),
+        200,
+        headers: {
+          Headers.contentLengthHeader: ['4'],
+          Headers.contentTypeHeader: ['image/jpeg'],
+        },
+      );
+    }
+    return ResponseBody.fromBytes(
+      Uint8List.fromList(const [0xFF, 0xFB, 0x90, 0x64]),
+      200,
+      headers: {
+        Headers.contentLengthHeader: ['4'],
+        Headers.contentTypeHeader: ['audio/mpeg'],
+      },
+    );
+  }
+
+  void finishCoverRequest() {
+    if (!coverRequestFinished.isCompleted) {
+      coverRequestFinished.complete();
+    }
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _ControlledDeferredDownloadSource
+    implements MusicSource, DeferredDownloadMusicSource {
+  final Completer<void> firstPreparationStarted = Completer<void>();
+  final Completer<void> _firstPreparationRelease = Completer<void>();
+  int prepareCalls = 0;
+  int _activePreparations = 0;
+  int maxConcurrentPreparations = 0;
+
+  TrackSearchResult get result => const TrackSearchResult(
+    id: 'single-worker-track',
+    title: 'Single Worker',
+    artist: 'Test Artist',
+    source: 'controlled-deferred-source',
+    detailUrl: 'https://example.test/detail',
+    duration: '3:20',
+  );
+
+  @override
+  String get name => 'controlled-deferred-source';
+
+  @override
+  Future<AudioCandidate> prepareDownloadCandidate(
+    AudioCandidate candidate,
+  ) async {
+    prepareCalls += 1;
+    _activePreparations += 1;
+    if (_activePreparations > maxConcurrentPreparations) {
+      maxConcurrentPreparations = _activePreparations;
+    }
+    try {
+      if (prepareCalls == 1) {
+        firstPreparationStarted.complete();
+        await _firstPreparationRelease.future;
+      }
+      return const AudioCandidate(
+        url: 'https://example.test/single-worker.m4a',
+        format: 'm4a',
+      );
+    } finally {
+      _activePreparations -= 1;
+    }
+  }
+
+  void finishFirstPreparation() => _firstPreparationRelease.complete();
+
+  @override
+  Future<List<TrackSearchResult>> search(String keyword, {int page = 1}) async {
+    return [result];
+  }
+
+  @override
+  Future<TrackDetail> loadDetail(TrackSearchResult result) async {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<AudioCandidate>> resolveCandidates(TrackDetail detail) async {
+    throw UnimplementedError();
+  }
+}
+
+class _CoverDownloadMusicSource implements MusicSource {
+  TrackSearchResult get result => const TrackSearchResult(
+    id: 'cover-download',
+    title: 'Cover Download',
+    artist: 'Test Artist',
+    source: 'cover-download-source',
+    detailUrl: 'https://example.test/detail',
+    duration: '3:20',
+    coverUrl: 'https://example.test/cover.jpg',
+  );
+
+  @override
+  String get name => 'cover-download-source';
+
+  @override
+  Future<List<TrackSearchResult>> search(String keyword, {int page = 1}) async {
+    return [result];
+  }
+
+  @override
+  Future<TrackDetail> loadDetail(TrackSearchResult result) async {
+    return TrackDetail(
+      title: result.title,
+      artist: result.artist,
+      sourceUrl: result.detailUrl,
+      candidates: const [],
+      rawMetadata: const {},
+      coverUrl: result.coverUrl,
+    );
+  }
+
+  @override
+  Future<List<AudioCandidate>> resolveCandidates(TrackDetail detail) async {
+    return const [
+      AudioCandidate(url: 'https://example.test/song.mp3', format: 'mp3'),
+    ];
+  }
+}
+
 class _AlbumDownloadMusicSource implements MusicSource {
   TrackSearchResult get result => const TrackSearchResult(
     id: 'album-download',
@@ -800,6 +1613,51 @@ class _SearchMusicSource implements MusicSource {
         detailUrl: 'https://example.test/$sourceId.mp3',
       ),
     ];
+  }
+
+  @override
+  Future<TrackDetail> loadDetail(TrackSearchResult result) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<AudioCandidate>> resolveCandidates(TrackDetail detail) {
+    throw UnimplementedError();
+  }
+}
+
+class _ControlledSearchMusicSource implements MusicSource {
+  final List<Completer<List<TrackSearchResult>>> _pending = [];
+
+  int get calls => _pending.length;
+
+  @override
+  String get name => 'controlled-search';
+
+  @override
+  Future<List<TrackSearchResult>> search(String keyword, {int page = 1}) {
+    final completer = Completer<List<TrackSearchResult>>();
+    _pending.add(completer);
+    return completer.future;
+  }
+
+  Future<void> waitForCalls(int expected) async {
+    for (var attempt = 0; attempt < 300 && calls < expected; attempt += 1) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(calls, expected);
+  }
+
+  void complete(int index, {required String keyword}) {
+    _pending[index].complete([
+      TrackSearchResult(
+        id: 'controlled-$keyword',
+        title: keyword,
+        artist: '测试歌手',
+        source: name,
+        detailUrl: 'https://example.test/$keyword',
+      ),
+    ]);
   }
 
   @override

@@ -1,5 +1,6 @@
 #include "flutter_window.h"
 
+#include <flutter/method_result_functions.h>
 #include <flutter/standard_method_codec.h>
 #include <shellapi.h>
 
@@ -19,6 +20,8 @@ namespace {
 
 constexpr const char kDesktopLyricsChannel[] = "qingting/desktop_lyrics";
 constexpr const char kAudioRouteChannel[] = "qingting/audio_route";
+constexpr const char kFileOperationsChannel[] = "qingting/file_operations";
+constexpr const char kAppLifecycleChannel[] = "qingting/app_lifecycle";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTrayOpenCommand = 40001;
@@ -107,6 +110,22 @@ std::wstring StringValue(const flutter::EncodableMap& map, const char* key) {
     return Utf8ToWide(*string_value);
   }
   return L"";
+}
+
+int MoveToRecycleBin(const std::wstring& path, bool* aborted) {
+  std::wstring double_null_terminated_path(path);
+  double_null_terminated_path.push_back(L'\0');
+
+  SHFILEOPSTRUCTW operation{};
+  operation.wFunc = FO_DELETE;
+  operation.pFrom = double_null_terminated_path.c_str();
+  operation.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI |
+                     FOF_SILENT;
+  const int result = SHFileOperationW(&operation);
+  if (aborted) {
+    *aborted = operation.fAnyOperationsAborted != FALSE;
+  }
+  return result;
 }
 
 }  // namespace
@@ -219,6 +238,49 @@ bool FlutterWindow::OnCreate() {
         }
         result->NotImplemented();
       });
+  file_operations_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kFileOperationsChannel,
+          &flutter::StandardMethodCodec::GetInstance());
+  file_operations_channel_->SetMethodCallHandler(
+      [](const auto& call, auto result) {
+        if (call.method_name() != "moveToRecycleBin") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* arguments = call.arguments();
+        const auto* map =
+            arguments ? std::get_if<flutter::EncodableMap>(arguments) : nullptr;
+        if (!map) {
+          result->Error("bad_args", "Expected a file path map.");
+          return;
+        }
+        const std::wstring path = StringValue(*map, "path");
+        if (path.empty()) {
+          result->Error("bad_args", "The file path must not be empty.");
+          return;
+        }
+
+        bool aborted = false;
+        const int operation_result = MoveToRecycleBin(path, &aborted);
+        if (operation_result != 0) {
+          result->Error(
+              "recycle_failed",
+              "Windows failed to move the file to the recycle bin. Code: " +
+                  std::to_string(operation_result));
+          return;
+        }
+        if (aborted) {
+          result->Error("recycle_aborted",
+                        "Moving the file to the recycle bin was aborted.");
+          return;
+        }
+        result->Success(flutter::EncodableValue(true));
+      });
+  app_lifecycle_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kAppLifecycleChannel,
+          &flutter::StandardMethodCodec::GetInstance());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -248,6 +310,8 @@ void FlutterWindow::OnDestroy() {
   }
   desktop_lyrics_channel_ = nullptr;
   desktop_lyrics_window_ = nullptr;
+  file_operations_channel_ = nullptr;
+  app_lifecycle_channel_ = nullptr;
 
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -387,6 +451,25 @@ void FlutterWindow::UnlockDesktopLyricsFromTray() {
 }
 
 void FlutterWindow::ExitFromTray() {
+  if (exit_pending_) {
+    return;
+  }
+  exit_pending_ = true;
+  if (!app_lifecycle_channel_) {
+    CompleteExitFromTray();
+    return;
+  }
+  app_lifecycle_channel_->InvokeMethod(
+      "prepareToExit", nullptr,
+      std::make_unique<
+          flutter::MethodResultFunctions<flutter::EncodableValue>>(
+          [this](const flutter::EncodableValue*) { CompleteExitFromTray(); },
+          [this](const std::string&, const std::string&,
+                 const flutter::EncodableValue*) { CompleteExitFromTray(); },
+          [this]() { CompleteExitFromTray(); }));
+}
+
+void FlutterWindow::CompleteExitFromTray() {
   allow_window_close_ = true;
   window_state::SaveWindowSize(GetHandle());
   RemoveTrayIcon();

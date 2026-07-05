@@ -10,32 +10,43 @@ import 'music_source.dart';
 
 class MyFreeMp3Source
     implements MusicSource, DownloadMusicSource, DeferredDownloadMusicSource {
-  MyFreeMp3Source({Dio? dio, Uri? siteUri, Uri? apiUri, Uri? downloadUri})
-    : _siteUri = siteUri ?? Uri.parse('https://myfreemp3.ink/'),
-      _apiUri = apiUri ?? Uri.parse('https://api.myfreemp3.ink/'),
-      _downloadUri = downloadUri ?? Uri.parse('https://api.myfreemp3.ink/'),
-      _dio =
-          dio ??
-          Dio(
-            BaseOptions(
-              connectTimeout: const Duration(seconds: 15),
-              receiveTimeout: const Duration(seconds: 25),
-              responseType: ResponseType.plain,
-              validateStatus: (status) => status != null,
-            ),
-          );
+  MyFreeMp3Source({
+    Dio? dio,
+    Uri? siteUri,
+    Uri? apiUri,
+    Uri? downloadUri,
+    this.preparedCandidateTtl = const Duration(minutes: 2),
+    DateTime Function()? now,
+  }) : _now = now ?? DateTime.now,
+       _siteUri = siteUri ?? Uri.parse('https://myfreemp3.ink/'),
+       _apiUri = apiUri ?? Uri.parse('https://api.myfreemp3.ink/'),
+       _downloadUri = downloadUri ?? Uri.parse('https://api.myfreemp3.ink/'),
+       _dio =
+           dio ??
+           Dio(
+             BaseOptions(
+               connectTimeout: const Duration(seconds: 15),
+               receiveTimeout: const Duration(seconds: 25),
+               responseType: ResponseType.plain,
+               validateStatus: (status) => status != null,
+             ),
+           );
 
   final Dio _dio;
   final Uri _siteUri;
   final Uri _apiUri;
   final Uri _downloadUri;
+  final Duration preparedCandidateTtl;
+  final DateTime Function() _now;
+  static const int _maxPreparedCandidateCacheEntries = 32;
 
   String? _keyId;
   String? _signingKey;
   int _expiresAt = 0;
   int _clockOffsetSeconds = 0;
   Future<void>? _bootstrapFuture;
-  final Map<String, Future<AudioCandidate>> _preparedCandidates = {};
+  final Map<String, Future<AudioCandidate>> _preparingCandidates = {};
+  final Map<String, _PreparedCandidateCacheEntry> _preparedCandidates = {};
 
   @override
   String get name => 'MY FREE MP3';
@@ -119,20 +130,48 @@ class MyFreeMp3Source
     String trackId,
   ) async {
     final key = '$ownerId:$trackId';
-    final existing = _preparedCandidates[key];
-    if (existing != null) {
-      return existing;
+    _prunePreparedCandidates();
+    final cached = _preparedCandidates[key];
+    if (cached != null) {
+      return cached.candidate;
+    }
+    final pending = _preparingCandidates[key];
+    if (pending != null) {
+      return pending;
     }
     final future = _createPreparedCandidate(ownerId, trackId);
-    _preparedCandidates[key] = future;
+    _preparingCandidates[key] = future;
     try {
-      return await future;
-    } catch (_) {
-      if (identical(_preparedCandidates[key], future)) {
-        _preparedCandidates.remove(key);
+      final candidate = await future;
+      _cachePreparedCandidate(key, candidate);
+      return candidate;
+    } finally {
+      if (identical(_preparingCandidates[key], future)) {
+        _preparingCandidates.remove(key);
       }
-      rethrow;
     }
+  }
+
+  void _prunePreparedCandidates() {
+    final now = _now();
+    _preparedCandidates.removeWhere(
+      (_, entry) => !entry.expiresAt.isAfter(now),
+    );
+  }
+
+  void _cachePreparedCandidate(String key, AudioCandidate candidate) {
+    if (preparedCandidateTtl <= Duration.zero) {
+      return;
+    }
+    _prunePreparedCandidates();
+    _preparedCandidates.remove(key);
+    while (_preparedCandidates.length >= _maxPreparedCandidateCacheEntries) {
+      _preparedCandidates.remove(_preparedCandidates.keys.first);
+    }
+    _preparedCandidates[key] = _PreparedCandidateCacheEntry(
+      candidate: candidate,
+      expiresAt: _now().add(preparedCandidateTtl),
+    );
   }
 
   Future<AudioCandidate> _createPreparedCandidate(
@@ -361,7 +400,7 @@ class MyFreeMp3Source
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
       'Origin': _originFor(_siteUri),
       'Referer': _siteUri.toString(),
-      'User-Agent': 'QingTing/1.3.3 (+personal-use)',
+      'User-Agent': 'QingTing/1.3.6 (+personal-use)',
       'X-Requested-With': 'XMLHttpRequest',
     };
   }
@@ -372,7 +411,7 @@ class MyFreeMp3Source
       'Referer': _downloadUri
           .resolve('/download/ui/$ownerId/$trackId')
           .toString(),
-      'User-Agent': 'QingTing/1.3.3 (+personal-use)',
+      'User-Agent': 'QingTing/1.3.6 (+personal-use)',
     };
   }
 
@@ -442,6 +481,16 @@ class MyFreeMp3Source
       return path;
     }
   }
+}
+
+class _PreparedCandidateCacheEntry {
+  const _PreparedCandidateCacheEntry({
+    required this.candidate,
+    required this.expiresAt,
+  });
+
+  final AudioCandidate candidate;
+  final DateTime expiresAt;
 }
 
 class MyFreeMp3Parser {
