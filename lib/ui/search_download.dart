@@ -289,47 +289,39 @@ class DownloadsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<int>(
-      valueListenable: controller.downloadProgressListenable,
-      builder: (context, _, _) {
-        return _PageFrame(
-          child: controller.downloadTasks.isEmpty
-              ? Column(
-                  children: [
-                    _DirectoryScanButton(
-                      controller: controller,
-                      onPressed: _scanDownloadDirectory,
-                    ),
-                    const SizedBox(height: 12),
-                    const Expanded(
-                      child: _EmptyState(
-                        icon: Icons.downloading,
-                        text: '还没有下载任务',
-                      ),
-                    ),
-                  ],
-                )
-              : Column(
-                  children: [
-                    _DirectoryScanButton(
-                      controller: controller,
-                      onPressed: _scanDownloadDirectory,
-                    ),
-                    const SizedBox(height: 12),
-                    Expanded(
-                      child: ListView.separated(
-                        itemCount: controller.downloadTasks.length,
-                        separatorBuilder: (_, _) => const SizedBox(height: 10),
-                        itemBuilder: (context, index) {
-                          final task = controller.downloadTasks[index];
-                          return _TaskTile(controller: controller, task: task);
-                        },
-                      ),
-                    ),
-                  ],
+    return _PageFrame(
+      child: controller.downloadTasks.isEmpty
+          ? Column(
+              children: [
+                _DirectoryScanButton(
+                  controller: controller,
+                  onPressed: _scanDownloadDirectory,
                 ),
-        );
-      },
+                const SizedBox(height: 12),
+                const Expanded(
+                  child: _EmptyState(icon: Icons.downloading, text: '还没有下载任务'),
+                ),
+              ],
+            )
+          : Column(
+              children: [
+                _DirectoryScanButton(
+                  controller: controller,
+                  onPressed: _scanDownloadDirectory,
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: controller.downloadTasks.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 10),
+                    itemBuilder: (context, index) {
+                      final task = controller.downloadTasks[index];
+                      return _TaskTile(controller: controller, task: task);
+                    },
+                  ),
+                ),
+              ],
+            ),
     );
   }
 }

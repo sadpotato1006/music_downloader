@@ -188,6 +188,63 @@ class StorageService {
     return file.path;
   }
 
+  Future<bool> deleteCachedCover(String? path) async {
+    final value = path?.trim();
+    if (value == null || value.isEmpty) {
+      return false;
+    }
+    final directory = await _supportDirectory('covers');
+    final root = _normalizedPath(directory.path);
+    final candidate = _normalizedPath(value);
+    if (!p.isWithin(root, candidate)) {
+      return false;
+    }
+    final file = File(value);
+    if (!await file.exists()) {
+      return false;
+    }
+    await file.delete();
+    return true;
+  }
+
+  Future<int> cleanupCachedCovers(
+    Iterable<String?> retainedPaths, {
+    Duration minimumAge = const Duration(days: 1),
+  }) async {
+    final directory = await _supportDirectory('covers');
+    final retained = {
+      for (final path in retainedPaths)
+        if (path != null && path.trim().isNotEmpty) _normalizedPath(path),
+    };
+    final cutoff = DateTime.now().subtract(minimumAge);
+    var removed = 0;
+    await for (final entity in directory.list(followLinks: false)) {
+      if (entity is! File || retained.contains(_normalizedPath(entity.path))) {
+        continue;
+      }
+      try {
+        final stat = await entity.stat();
+        if (stat.modified.isAfter(cutoff)) {
+          continue;
+        }
+        await entity.delete();
+        removed += 1;
+      } catch (error, stackTrace) {
+        AppLog.instance.warning(
+          'storage',
+          '清理封面缓存失败',
+          detail: '${entity.path}\n$error\n$stackTrace',
+        );
+      }
+    }
+    return removed;
+  }
+
+  String _normalizedPath(String value) {
+    final normalized = p.normalize(p.absolute(value));
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
   Future<String> defaultDownloadDirectory() async {
     final downloads = await getDownloadsDirectory();
     final base = downloads ?? await getApplicationDocumentsDirectory();

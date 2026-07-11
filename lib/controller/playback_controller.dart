@@ -14,17 +14,17 @@ extension AppControllerPlaybackActions on AppController {
     if (shuffle) {
       ordered.shuffle(_shuffleRandom);
     }
-    final items = <PlayerItem>[];
-    for (final track in ordered) {
-      final item = await _playerItemFromDownloadedTrack(
+    final resolvedItems = await mapWithConcurrency(
+      ordered,
+      (track) => _playerItemFromDownloadedTrack(
         track,
         includeLyrics: false,
+        includeMetadata: false,
         showMissingMessage: false,
-      );
-      if (item != null) {
-        items.add(item);
-      }
-    }
+      ),
+      maxConcurrent: 8,
+    );
+    final items = resolvedItems.whereType<PlayerItem>().toList();
     if (items.isEmpty) {
       globalMessage = '没有可播放的歌曲，请检查本地文件是否存在';
       _notify();
@@ -48,22 +48,58 @@ extension AppControllerPlaybackActions on AppController {
       queue[index] = item;
     }
     currentQueueIndex = index;
-    await _saveQueueState();
     _notify();
     unawaited(_syncAndroidMediaControls(force: true));
     await player.open(item);
+    await _saveQueueStateAfterPlaybackStarts();
     await _recordRecentPlayback(item);
   }
 
-  Future<void> playNext() async {
+  Future<void> playNext() {
+    final activeOperation = _playNextOperation;
+    if (activeOperation != null) {
+      return activeOperation;
+    }
+
+    late final Future<void> operation;
+    operation = _playNextInternal().whenComplete(() {
+      if (identical(_playNextOperation, operation)) {
+        _playNextOperation = null;
+      }
+    });
+    _playNextOperation = operation;
+    return operation;
+  }
+
+  Future<void> _playNextInternal() async {
     if (queue.isEmpty) {
       return;
     }
     if (currentQueueIndex < queue.length - 1) {
       await playQueueAt(currentQueueIndex + 1);
-    } else if (repeatMode == RepeatMode.all) {
-      await playQueueAt(0);
+    } else {
+      await _startNextRandomRound();
     }
+  }
+
+  Future<void> _startNextRandomRound() async {
+    final previousItem = currentItem;
+    final randomized = List<PlayerItem>.from(queue)..shuffle(_shuffleRandom);
+    if (previousItem != null && randomized.length > 1) {
+      final previousIndex = randomized.indexWhere(
+        (item) => item.id == previousItem.id && item.uri == previousItem.uri,
+      );
+      if (previousIndex == 0) {
+        final swapIndex = 1 + _shuffleRandom.nextInt(randomized.length - 1);
+        final replacement = randomized[swapIndex];
+        randomized[swapIndex] = randomized[0];
+        randomized[0] = replacement;
+      }
+    }
+    queue = randomized;
+    currentQueueIndex = 0;
+    shuffleEnabled = true;
+    await playQueueAt(0);
   }
 
   Future<void> playPrevious() async {
@@ -173,17 +209,17 @@ extension AppControllerPlaybackActions on AppController {
 
     final shuffledTracks = List<DownloadedTrack>.from(downloadedTracks)
       ..shuffle(_shuffleRandom);
-    final items = <PlayerItem>[];
-    for (final track in shuffledTracks) {
-      final item = await _playerItemFromDownloadedTrack(
+    final resolvedItems = await mapWithConcurrency(
+      shuffledTracks,
+      (track) => _playerItemFromDownloadedTrack(
         track,
         includeLyrics: false,
+        includeMetadata: false,
         showMissingMessage: false,
-      );
-      if (item != null) {
-        items.add(item);
-      }
-    }
+      ),
+      maxConcurrent: 8,
+    );
+    final items = resolvedItems.whereType<PlayerItem>().toList();
 
     if (items.isEmpty) {
       globalMessage = '没有找到可播放的本地文件，请重新扫描下载目录。';
@@ -462,13 +498,52 @@ extension AppControllerPlaybackActions on AppController {
     );
   }
 
+  Future<void> _saveQueueStateAfterPlaybackStarts() async {
+    try {
+      await _saveQueueState();
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'playback',
+        '歌曲已播放，但播放队列保存失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      globalMessage = '歌曲已开始播放，但播放队列保存失败。';
+      _notify();
+    }
+  }
+
   void _handlePlaybackCompleted() {
-    unawaited(() async {
+    if (_playbackCompletionOperation != null) {
+      return;
+    }
+
+    late final Future<void> operation;
+    operation = _continueAfterPlaybackCompleted().whenComplete(() {
+      if (identical(_playbackCompletionOperation, operation)) {
+        _playbackCompletionOperation = null;
+      }
+    });
+    _playbackCompletionOperation = operation;
+    unawaited(operation);
+  }
+
+  Future<void> _continueAfterPlaybackCompleted() async {
+    try {
       if (repeatMode == RepeatMode.one && currentItem != null) {
         await playQueueAt(currentQueueIndex);
       } else {
         await playNext();
       }
-    }());
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'playback',
+        '自动接播下一首失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      globalMessage = '自动播放下一首失败：${_friendlyUnexpectedError(error)}';
+      _notify();
+    }
   }
 }

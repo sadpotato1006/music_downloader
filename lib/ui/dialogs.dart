@@ -549,86 +549,7 @@ String _formatLyricDelay(int milliseconds) {
   return '$sign${milliseconds}ms';
 }
 
-class _LyricLine {
-  const _LyricLine({required this.time, required this.text});
-
-  final Duration? time;
-  final String text;
-}
-
-const _lyricLinesCacheLimit = 24;
-final Map<String, List<_LyricLine>> _lyricLinesCache = {};
-
-List<_LyricLine> _parseLyricLines(String? rawLyrics) {
-  final raw = rawLyrics?.trim();
-  if (raw == null || raw.isEmpty) {
-    return const [];
-  }
-
-  final cached = _lyricLinesCache.remove(raw);
-  if (cached != null) {
-    _lyricLinesCache[raw] = cached;
-    return cached;
-  }
-
-  final timedLines = <_LyricLine>[];
-  final plainLines = <String>[];
-  final timestampPattern = RegExp(r'\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]');
-
-  for (final line in raw.split(RegExp(r'[\r\n]+'))) {
-    final matches = timestampPattern.allMatches(line).toList();
-    if (matches.isEmpty) {
-      final plain = line.trim();
-      if (plain.isNotEmpty) {
-        plainLines.add(plain);
-      }
-      continue;
-    }
-
-    final text = line.substring(matches.last.end).trim();
-    if (text.isEmpty) {
-      continue;
-    }
-    for (final match in matches) {
-      timedLines.add(_LyricLine(time: _parseLyricTimestamp(match), text: text));
-    }
-  }
-
-  final parsed = <_LyricLine>[];
-  if (timedLines.isNotEmpty) {
-    timedLines.sort((a, b) => a.time!.compareTo(b.time!));
-    parsed.addAll(timedLines);
-  } else {
-    parsed.addAll([
-      for (final line in plainLines) _LyricLine(time: null, text: line),
-    ]);
-  }
-
-  final result = List<_LyricLine>.unmodifiable(parsed);
-  _lyricLinesCache[raw] = result;
-  if (_lyricLinesCache.length > _lyricLinesCacheLimit) {
-    _lyricLinesCache.remove(_lyricLinesCache.keys.first);
-  }
-  return result;
-}
-
-Duration _parseLyricTimestamp(RegExpMatch match) {
-  final minutes = int.tryParse(match.group(1) ?? '') ?? 0;
-  final seconds = int.tryParse(match.group(2) ?? '') ?? 0;
-  final fraction = match.group(3) ?? '0';
-  final milliseconds = switch (fraction.length) {
-    1 => (int.tryParse(fraction) ?? 0) * 100,
-    2 => (int.tryParse(fraction) ?? 0) * 10,
-    _ => int.tryParse(fraction.padRight(3, '0').substring(0, 3)) ?? 0,
-  };
-  return Duration(
-    minutes: minutes,
-    seconds: seconds,
-    milliseconds: milliseconds,
-  );
-}
-
-int _currentLyricIndex(List<_LyricLine> lines, Duration position) {
+int _currentLyricIndex(List<LyricLine> lines, Duration position) {
   if (lines.isEmpty || lines.first.time == null) {
     return -1;
   }
@@ -648,7 +569,7 @@ int _currentLyricIndex(List<_LyricLine> lines, Duration position) {
   return current;
 }
 
-String? _currentLyricText(List<_LyricLine> lines, int currentIndex) {
+String? _currentLyricText(List<LyricLine> lines, int currentIndex) {
   if (currentIndex < 0 || currentIndex >= lines.length) {
     return null;
   }

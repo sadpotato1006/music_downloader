@@ -153,4 +153,46 @@ void main() {
       await directory.delete(recursive: true);
     }
   });
+
+  test('cover cache cleanup preserves referenced and recent files', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-cover-cache-',
+    );
+    final storage = StorageService(supportDirectory: directory);
+    final covers = Directory(
+      '${directory.path}${Platform.pathSeparator}covers',
+    );
+
+    try {
+      await covers.create(recursive: true);
+      final retained = File(
+        '${covers.path}${Platform.pathSeparator}retained.jpg',
+      );
+      final orphan = File('${covers.path}${Platform.pathSeparator}orphan.jpg');
+      final recent = File('${covers.path}${Platform.pathSeparator}recent.jpg');
+      await retained.writeAsBytes([1]);
+      await orphan.writeAsBytes([2]);
+      await recent.writeAsBytes([3]);
+      final old = DateTime.now().subtract(const Duration(days: 2));
+      await retained.setLastModified(old);
+      await orphan.setLastModified(old);
+
+      final removed = await storage.cleanupCachedCovers([retained.path]);
+
+      expect(removed, 1);
+      expect(await retained.exists(), isTrue);
+      expect(await orphan.exists(), isFalse);
+      expect(await recent.exists(), isTrue);
+      expect(await storage.deleteCachedCover(retained.path), isTrue);
+      expect(await retained.exists(), isFalse);
+      expect(
+        await storage.deleteCachedCover(
+          '${directory.path}${Platform.pathSeparator}outside.jpg',
+        ),
+        isFalse,
+      );
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
 }

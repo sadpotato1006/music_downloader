@@ -219,6 +219,7 @@ extension AppControllerLibraryActions on AppController {
     final persistenceFailures = await _persistDeletedTrackState(
       saveQueue: queueUpdate.changed,
     );
+    await _deleteUnusedCachedCover(track.coverFilePath);
     var playbackFailed = false;
     if (queueUpdate.removedCurrent && currentWasPlaying && queue.isNotEmpty) {
       try {
@@ -295,6 +296,7 @@ extension AppControllerLibraryActions on AppController {
   Future<void> _removeDownloadedRecord(DownloadedTrack track) async {
     _removeDownloadedRecordInMemory(track);
     await Future.wait<void>([_saveMyMusic(), _saveDownloadedTracks()]);
+    await _deleteUnusedCachedCover(track.coverFilePath);
   }
 
   void _removeDownloadedRecordInMemory(DownloadedTrack track) {
@@ -544,6 +546,9 @@ extension AppControllerLibraryActions on AppController {
     ];
     await _saveDownloadedTracks();
     await _saveQueueState();
+    if (track.coverFilePath != coverFilePath) {
+      await _deleteUnusedCachedCover(track.coverFilePath);
+    }
     globalMessage = null;
     unawaited(_syncAndroidMediaControls(force: true));
     _notify();
@@ -675,6 +680,7 @@ extension AppControllerLibraryActions on AppController {
   Future<PlayerItem?> _playerItemFromDownloadedTrack(
     DownloadedTrack track, {
     bool includeLyrics = true,
+    bool includeMetadata = true,
     bool showMissingMessage = true,
   }) async {
     final file = File(track.path);
@@ -687,7 +693,7 @@ extension AppControllerLibraryActions on AppController {
     }
 
     Id3Metadata metadata = const Id3Metadata();
-    if (includeLyrics || track.album.trim().isEmpty) {
+    if (includeMetadata && (includeLyrics || track.album.trim().isEmpty)) {
       try {
         metadata = await Id3LyricsEmbedder.extractMetadata(file);
       } catch (_) {
@@ -899,6 +905,13 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<void> _addDownloadedTrack(DownloadTask task) async {
+    DownloadedTrack? replacedTrack;
+    for (final track in downloadedTracks) {
+      if (track.path == task.savePath) {
+        replacedTrack = track;
+        break;
+      }
+    }
     final coverFilePath = await storage.cacheEmbeddedCover(
       File(task.savePath),
       cacheKey: '${task.track.id}-${DateTime.now().microsecondsSinceEpoch}',
@@ -921,6 +934,9 @@ extension AppControllerLibraryActions on AppController {
     ];
     _libraryLyricsSearchCache.remove(_libraryLyricsCacheKey(item));
     await _saveDownloadedTracks();
+    if (replacedTrack?.coverFilePath != coverFilePath) {
+      await _deleteUnusedCachedCover(replacedTrack?.coverFilePath);
+    }
     if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
       unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
     }
@@ -931,11 +947,14 @@ extension AppControllerLibraryActions on AppController {
     var pendingChanges = 0;
     var hasChanges = false;
 
-    for (final track in List<DownloadedTrack>.from(downloadedTracks)) {
+    await mapWithConcurrency(List<DownloadedTrack>.from(downloadedTracks), (
+      track,
+    ) async {
       if (_isDisposed) {
-        break;
+        return false;
       }
-      if (await _hydrateDownloadedTrack(track)) {
+      final changed = await _hydrateDownloadedTrack(track);
+      if (changed) {
         pendingChanges += 1;
         hasChanges = true;
       }
@@ -946,7 +965,8 @@ extension AppControllerLibraryActions on AppController {
         pendingChanges = 0;
       }
       await Future<void>.delayed(Duration.zero);
-    }
+      return changed;
+    }, maxConcurrent: 3);
 
     if (hasChanges) {
       try {
@@ -957,6 +977,56 @@ extension AppControllerLibraryActions on AppController {
     }
     if (pendingChanges > 0 && !_isDisposed) {
       _notify();
+    }
+    await _cleanupCoverCacheBestEffort();
+  }
+
+  Future<void> _cleanupCoverCacheBestEffort() async {
+    try {
+      final removed = await storage.cleanupCachedCovers([
+        for (final track in downloadedTracks) track.coverFilePath,
+        for (final item in queue) item.coverFilePath,
+      ]);
+      if (removed > 0) {
+        AppLog.instance.info('storage', '已清理 $removed 个未使用的封面缓存');
+      }
+    } catch (error, stackTrace) {
+      AppLog.instance.warning(
+        'storage',
+        '清理未使用封面缓存失败',
+        detail: '$error\n$stackTrace',
+      );
+    }
+  }
+
+  Future<void> _deleteUnusedCachedCover(String? coverPath) async {
+    final value = coverPath?.trim();
+    if (value == null || value.isEmpty) {
+      return;
+    }
+    final key = _trackPathKey(value);
+    final stillReferenced =
+        downloadedTracks.any(
+          (track) =>
+              track.coverFilePath != null &&
+              _trackPathKey(track.coverFilePath!) == key,
+        ) ||
+        queue.any(
+          (item) =>
+              item.coverFilePath != null &&
+              _trackPathKey(item.coverFilePath!) == key,
+        );
+    if (stillReferenced) {
+      return;
+    }
+    try {
+      await storage.deleteCachedCover(value);
+    } catch (error, stackTrace) {
+      AppLog.instance.warning(
+        'storage',
+        '删除旧封面缓存失败',
+        detail: '$value\n$error\n$stackTrace',
+      );
     }
   }
 

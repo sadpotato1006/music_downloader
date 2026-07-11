@@ -17,7 +17,7 @@ class LyricsService {
               headers: const {
                 'Accept': 'application/json',
                 'User-Agent':
-                    'QingTing/1.3.6 (https://github.com/sadpotato1006/music_downloader)',
+                    'QingTing/1.3.8 (https://github.com/sadpotato1006/music_downloader)',
               },
             ),
           );

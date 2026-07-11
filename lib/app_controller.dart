@@ -10,6 +10,7 @@ import 'android_storage_access.dart';
 import 'android_media_controls_service.dart';
 import 'album_metadata_service.dart';
 import 'app_log.dart';
+import 'async_utils.dart';
 import 'audio_route_service.dart';
 import 'file_deletion_service.dart';
 import 'id3_lyrics_embedder.dart';
@@ -99,6 +100,8 @@ class AppController extends ChangeNotifier {
   Future<void> _downloadedTracksSaveQueue = Future<void>.value();
   Future<void> _myMusicSaveQueue = Future<void>.value();
   Future<void> _downloadTasksSaveQueue = Future<void>.value();
+  Future<void>? _playNextOperation;
+  Future<void>? _playbackCompletionOperation;
 
   String searchQuery = '';
   bool isSearching = false;
@@ -457,9 +460,7 @@ class AppController extends ChangeNotifier {
     final canPlayPrevious =
         queue.length > 1 &&
         (currentQueueIndex > 0 || repeatMode == RepeatMode.all);
-    final canPlayNext =
-        queue.length > 1 &&
-        (currentQueueIndex < queue.length - 1 || repeatMode == RepeatMode.all);
+    final canPlayNext = queue.isNotEmpty;
     final signature = [
       item.id,
       item.title,

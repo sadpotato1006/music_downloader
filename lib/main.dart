@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/cupertino.dart' hide RepeatMode;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -13,6 +14,7 @@ import 'app_controller.dart';
 import 'app_log.dart';
 import 'desktop_lyrics_service.dart';
 import 'gequbao_source.dart';
+import 'lyric_parser.dart';
 import 'models.dart';
 import 'my_free_mp3_source.dart';
 
@@ -25,7 +27,7 @@ part 'ui/dialogs.dart';
 part 'ui/diagnostics.dart';
 
 const _accent = Color(0xFF8FD9A8);
-const _appVersion = '1.3.6+22';
+const _appVersion = '1.3.8+24';
 const _appLifecycleChannel = MethodChannel('qingting/app_lifecycle');
 const _accentStrong = Color(0xFF4AA66A);
 const _ink = Color(0xFF1F2A24);
@@ -38,7 +40,7 @@ Map<String, String> _networkImageHeadersFor(String url) {
     'Referer': host.contains('myfreemp3.ink')
         ? 'https://myfreemp3.ink/'
         : 'https://www.gequbao.com/',
-    'User-Agent': 'QingTing/1.3.6 (+personal-use)',
+    'User-Agent': 'QingTing/1.3.8 (+personal-use)',
   };
 }
 
@@ -195,14 +197,15 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
         ),
         home: AnimatedBuilder(
           animation: controller,
-          builder: (context, _) {
+          child: HomeShell(controller: controller),
+          builder: (context, child) {
             return switch (controller.bootstrapStatus) {
               AppBootstrapStatus.loading => const _StartupStatusPage(),
               AppBootstrapStatus.error => _StartupStatusPage(
                 error: controller.bootstrapError,
                 onRetry: () => unawaited(controller.bootstrap()),
               ),
-              AppBootstrapStatus.ready => HomeShell(controller: controller),
+              AppBootstrapStatus.ready => child!,
             };
           },
         ),
@@ -283,6 +286,7 @@ class _HomeShellState extends State<HomeShell> {
   late final PageController _pageController;
   Timer? _toastTimer;
   String? _toastMessage;
+  String? _scheduledToastMessage;
 
   AppController get controller => widget.controller;
 
@@ -290,7 +294,12 @@ class _HomeShellState extends State<HomeShell> {
   void initState() {
     super.initState();
     _pageController = PageController(initialPage: controller.selectedIndex);
-    controller.addListener(_syncPageWithSelectedIndex);
+    controller.addListener(_handleControllerChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _scheduleGlobalMessage();
+      }
+    });
   }
 
   @override
@@ -299,17 +308,22 @@ class _HomeShellState extends State<HomeShell> {
     if (oldWidget.controller == widget.controller) {
       return;
     }
-    oldWidget.controller.removeListener(_syncPageWithSelectedIndex);
-    controller.addListener(_syncPageWithSelectedIndex);
-    _syncPageWithSelectedIndex();
+    oldWidget.controller.removeListener(_handleControllerChanged);
+    controller.addListener(_handleControllerChanged);
+    _handleControllerChanged();
   }
 
   @override
   void dispose() {
     _toastTimer?.cancel();
-    controller.removeListener(_syncPageWithSelectedIndex);
+    controller.removeListener(_handleControllerChanged);
     _pageController.dispose();
     super.dispose();
+  }
+
+  void _handleControllerChanged() {
+    _syncPageWithSelectedIndex();
+    _scheduleGlobalMessage();
   }
 
   void _syncPageWithSelectedIndex() {
@@ -330,7 +344,6 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
-    _showGlobalMessage(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final isDesktop = constraints.maxWidth >= 820;
@@ -339,20 +352,51 @@ class _HomeShellState extends State<HomeShell> {
             Scaffold(
               body: Column(
                 children: [
-                  _TopNavigation(controller: controller, isDesktop: isDesktop),
+                  AnimatedBuilder(
+                    animation: controller,
+                    builder: (context, _) => _TopNavigation(
+                      controller: controller,
+                      isDesktop: isDesktop,
+                    ),
+                  ),
                   Expanded(
                     child: PageView(
                       controller: _pageController,
                       onPageChanged: controller.selectIndex,
                       children: [
-                        SearchPage(controller: controller),
-                        DownloadsPage(controller: controller),
-                        LibraryPage(controller: controller),
-                        SettingsPage(controller: controller),
+                        _ActiveControllerPage(
+                          controller: controller,
+                          index: 0,
+                          builder: (_) => SearchPage(controller: controller),
+                        ),
+                        _ActiveControllerPage(
+                          controller: controller,
+                          index: 1,
+                          additionalListenables: [
+                            controller.downloadProgressListenable,
+                          ],
+                          builder: (_) => DownloadsPage(controller: controller),
+                        ),
+                        _ActiveControllerPage(
+                          controller: controller,
+                          index: 2,
+                          builder: (_) => LibraryPage(controller: controller),
+                        ),
+                        _ActiveControllerPage(
+                          controller: controller,
+                          index: 3,
+                          builder: (_) => SettingsPage(controller: controller),
+                        ),
                       ],
                     ),
                   ),
-                  MiniPlayer(controller: controller, isDesktop: isDesktop),
+                  AnimatedBuilder(
+                    animation: controller,
+                    builder: (context, _) => MiniPlayer(
+                      controller: controller,
+                      isDesktop: isDesktop,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -374,15 +418,17 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  void _showGlobalMessage(BuildContext context) {
+  void _scheduleGlobalMessage() {
     final message = controller.globalMessage;
-    if (message == null) {
+    if (message == null || message == _scheduledToastMessage) {
       return;
     }
+    _scheduledToastMessage = message;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!context.mounted) {
+      if (!mounted) {
         return;
       }
+      _scheduledToastMessage = null;
       setState(() => _toastMessage = message);
       _toastTimer?.cancel();
       _toastTimer = Timer(const Duration(milliseconds: 2200), () {
@@ -390,9 +436,78 @@ class _HomeShellState extends State<HomeShell> {
           setState(() => _toastMessage = null);
         }
       });
-      controller.clearGlobalMessage();
+      if (controller.globalMessage == message) {
+        controller.clearGlobalMessage();
+      }
     });
   }
+}
+
+class _ActiveControllerPage extends StatefulWidget {
+  const _ActiveControllerPage({
+    required this.controller,
+    required this.index,
+    required this.builder,
+    this.additionalListenables = const [],
+  });
+
+  final AppController controller;
+  final int index;
+  final WidgetBuilder builder;
+  final List<Listenable> additionalListenables;
+
+  @override
+  State<_ActiveControllerPage> createState() => _ActiveControllerPageState();
+}
+
+class _ActiveControllerPageState extends State<_ActiveControllerPage> {
+  @override
+  void initState() {
+    super.initState();
+    _addListeners(widget);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ActiveControllerPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller ||
+        !listEquals(
+          oldWidget.additionalListenables,
+          widget.additionalListenables,
+        )) {
+      _removeListeners(oldWidget);
+      _addListeners(widget);
+    }
+  }
+
+  @override
+  void dispose() {
+    _removeListeners(widget);
+    super.dispose();
+  }
+
+  void _addListeners(_ActiveControllerPage value) {
+    value.controller.addListener(_handleChanged);
+    for (final listenable in value.additionalListenables) {
+      listenable.addListener(_handleChanged);
+    }
+  }
+
+  void _removeListeners(_ActiveControllerPage value) {
+    value.controller.removeListener(_handleChanged);
+    for (final listenable in value.additionalListenables) {
+      listenable.removeListener(_handleChanged);
+    }
+  }
+
+  void _handleChanged() {
+    if (mounted && widget.controller.selectedIndex == widget.index) {
+      setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context);
 }
 
 class _QingTingToast extends StatelessWidget {
@@ -629,7 +744,7 @@ class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
     if (item == null) {
       return null;
     }
-    final lines = _parseLyricLines(item.lyrics);
+    final lines = parseLyricLines(item.lyrics);
     if (lines.isEmpty) {
       return null;
     }

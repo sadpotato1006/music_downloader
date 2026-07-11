@@ -49,6 +49,133 @@ void main() {
     controller.dispose();
   });
 
+  test('finishing the queue starts a newly shuffled round', () async {
+    final player = _FakePlaybackService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: player,
+    );
+    const first = PlayerItem(
+      id: 'first',
+      title: 'First',
+      artist: 'Artist',
+      uri: 'https://example.test/first.mp3',
+    );
+    const second = PlayerItem(
+      id: 'second',
+      title: 'Second',
+      artist: 'Artist',
+      uri: 'https://example.test/second.mp3',
+    );
+    const third = PlayerItem(
+      id: 'third',
+      title: 'Third',
+      artist: 'Artist',
+      uri: 'https://example.test/third.mp3',
+    );
+    controller.queue = [first, second, third];
+    controller.currentQueueIndex = 2;
+    controller.shuffleEnabled = false;
+
+    await controller.playNext();
+
+    expect(controller.currentQueueIndex, 0);
+    expect(controller.shuffleEnabled, isTrue);
+    expect(controller.currentItem, isNot(third));
+    expect(controller.queue.map((item) => item.id).toSet(), {
+      'first',
+      'second',
+      'third',
+    });
+    expect(player.openedItem, controller.currentItem);
+    controller.dispose();
+  });
+
+  test('rapid next requests share one queue transition', () async {
+    final player = _FakePlaybackService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: player,
+    );
+    controller.queue = const [
+      PlayerItem(
+        id: 'first',
+        title: 'First',
+        artist: 'Artist',
+        uri: 'https://example.test/first.mp3',
+      ),
+      PlayerItem(
+        id: 'second',
+        title: 'Second',
+        artist: 'Artist',
+        uri: 'https://example.test/second.mp3',
+      ),
+      PlayerItem(
+        id: 'third',
+        title: 'Third',
+        artist: 'Artist',
+        uri: 'https://example.test/third.mp3',
+      ),
+    ];
+    controller.currentQueueIndex = 2;
+
+    await Future.wait([controller.playNext(), controller.playNext()]);
+
+    expect(controller.currentQueueIndex, 0);
+    expect(player.openCalls, 1);
+    expect(player.openedItem, controller.currentItem);
+    controller.dispose();
+  });
+
+  test('queue persistence failure does not prevent playback', () async {
+    final player = _FakePlaybackService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FailingQueueStorageService(),
+      player: player,
+    );
+    const item = PlayerItem(
+      id: 'play-despite-save-error',
+      title: 'Playable',
+      artist: 'Artist',
+      uri: 'https://example.test/playable.mp3',
+    );
+    controller.queue = [item];
+
+    await controller.playQueueAt(0);
+
+    expect(player.openedItem, item);
+    expect(controller.globalMessage, contains('播放队列保存失败'));
+    controller.dispose();
+  });
+
+  test('a single-item queue starts another round after completion', () async {
+    final player = _FakePlaybackService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: player,
+    );
+    const item = PlayerItem(
+      id: 'only',
+      title: 'Only',
+      artist: 'Artist',
+      uri: 'https://example.test/only.mp3',
+    );
+    controller.queue = [item];
+    controller.currentQueueIndex = 0;
+
+    player.onCompleted?.call();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.currentQueueIndex, 0);
+    expect(player.openCalls, 1);
+    expect(player.openedItem, item);
+    controller.dispose();
+  });
+
   test(
     'removing the current shuffled item hydrates the next embedded lyrics',
     () async {
@@ -778,6 +905,30 @@ void main() {
     controller.dispose();
   });
 
+  testWidgets('home shell refreshes the active page from controller changes', (
+    tester,
+  ) async {
+    final source = _SearchMusicSource('source-a', '来源 A');
+    final controller = AppController(
+      source: source,
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+    controller.settings = const AppSettings(downloadDirectory: '');
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(home: app.HomeShell(controller: controller)),
+    );
+    expect(find.text('输入关键词开始搜索'), findsOneWidget);
+
+    await controller.search('主动刷新');
+    await tester.pump();
+
+    expect(find.text('主动刷新'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 400));
+  });
+
   testWidgets('deleting a library record keeps the song file', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -1004,7 +1155,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('诊断与日志'), findsOneWidget);
-    expect(find.text('版本：1.3.6+22'), findsOneWidget);
+    expect(find.text('版本：1.3.8+24'), findsOneWidget);
     expect(find.text('诊断测试日志'), findsOneWidget);
   });
 }
@@ -1109,6 +1260,17 @@ class _FakeStorageService extends StorageService {
   @override
   Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
     savedDownloadedTracks = List<DownloadedTrack>.from(tracks);
+  }
+}
+
+class _FailingQueueStorageService extends _FakeStorageService {
+  @override
+  Future<void> savePlayerQueue(
+    List<PlayerItem> items,
+    int currentIndex, {
+    required bool shuffleEnabled,
+  }) {
+    throw const FileSystemException('queue storage unavailable');
   }
 }
 

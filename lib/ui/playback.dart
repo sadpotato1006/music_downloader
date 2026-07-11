@@ -16,7 +16,7 @@ class MiniPlayer extends StatelessWidget {
       valueListenable: controller.player.positionListenable,
       builder: (context, position, _) {
         final item = controller.currentItem;
-        final lyricLines = _parseLyricLines(item?.lyrics);
+        final lyricLines = parseLyricLines(item?.lyrics);
         final currentLyricIndex = _currentLyricIndex(lyricLines, position);
 
         return SafeArea(
@@ -61,7 +61,7 @@ class _DesktopMiniPlayerContent extends StatelessWidget {
 
   final AppController controller;
   final PlayerItem? item;
-  final List<_LyricLine> lyricLines;
+  final List<LyricLine> lyricLines;
   final int currentLyricIndex;
 
   @override
@@ -113,7 +113,7 @@ class _MobileMiniPlayerContent extends StatelessWidget {
 
   final AppController controller;
   final PlayerItem? item;
-  final List<_LyricLine> lyricLines;
+  final List<LyricLine> lyricLines;
   final int currentLyricIndex;
 
   @override
@@ -590,7 +590,7 @@ class _LyricsSheetState extends State<_LyricsSheet> {
         lastScrolledItemId = item?.id;
         lastScrolledIndex = -1;
       }
-      final lines = _parseLyricLines(item?.lyrics);
+      final lines = parseLyricLines(item?.lyrics);
       final currentIndex = _currentLyricIndex(
         lines,
         widget.controller.player.position,
@@ -643,7 +643,7 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   @override
   Widget build(BuildContext context) {
     final item = widget.controller.currentItem;
-    final lines = _parseLyricLines(item?.lyrics);
+    final lines = parseLyricLines(item?.lyrics);
     final currentIndex = _currentLyricIndex(
       lines,
       widget.controller.player.position,
@@ -743,7 +743,11 @@ class _LyricsSheetState extends State<_LyricsSheet> {
                                   GlobalKey.new,
                                 ),
                                 borderRadius: BorderRadius.circular(12),
-                                onTap: lines[index].time == null
+                                onTap:
+                                    !isLyricTimestampSeekable(
+                                      lines[index].time,
+                                      duration,
+                                    )
                                     ? null
                                     : () => widget.controller.seekTo(
                                         lines[index].time!,

@@ -33,7 +33,7 @@ class AlbumMetadataService {
   final Map<String, List<AlbumMetadataMatch>> _appleCandidateCache = {};
 
   static const _userAgent =
-      'QingTing/1.3.6 (https://github.com/sadpotato1006/music_downloader)';
+      'QingTing/1.3.8 (https://github.com/sadpotato1006/music_downloader)';
   static const highConfidenceScore = 72.0;
   static const _appleCacheLimit = 128;
   static const _accompaniment = '\u4f34\u594f';
