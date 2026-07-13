@@ -101,6 +101,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 _AlbumMatchButton(
                   controller: controller,
                   onPressed: _matchMissingAlbums,
+                  onReview: () => _reviewPendingAlbums(context),
                 ),
               ],
             ),
@@ -318,7 +319,37 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _matchMissingAlbums() async {
+    final count = controller.eligibleAlbumMatchCount;
+    if (count >= 20) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('开始批量匹配专辑？'),
+          content: Text(
+            '将处理 $count 首歌曲。元数据服务需要限速访问，可能持续数分钟；'
+            '过程中可以安全停止，低置信度结果会留待人工确认。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('开始匹配'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) {
+        return;
+      }
+    }
     await controller.matchMissingDownloadedAlbums();
+  }
+
+  Future<void> _reviewPendingAlbums(BuildContext context) async {
+    await _showPendingAlbumMatchesSheet(context, controller);
   }
 
   Future<void> _showLyricsSettings(BuildContext context) async {

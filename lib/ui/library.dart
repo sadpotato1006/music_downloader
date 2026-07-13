@@ -986,30 +986,100 @@ class _DirectoryScanButton extends StatelessWidget {
 }
 
 class _AlbumMatchButton extends StatelessWidget {
-  const _AlbumMatchButton({required this.controller, required this.onPressed});
+  const _AlbumMatchButton({
+    required this.controller,
+    required this.onPressed,
+    required this.onReview,
+  });
 
   final AppController controller;
   final VoidCallback onPressed;
+  final VoidCallback onReview;
 
   @override
   Widget build(BuildContext context) {
-    final hasMissingAlbums = controller.downloadedTracks.any(
-      (track) => track.album.trim().isEmpty,
-    );
     final isBusy = controller.isMatchingLocalAlbums;
-    return SizedBox(
-      width: double.infinity,
-      child: OutlinedButton.icon(
-        onPressed: isBusy || !hasMissingAlbums ? null : onPressed,
-        icon: isBusy
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Icons.album_outlined),
-        label: Text(isBusy ? '正在匹配专辑名称' : '匹配所有歌曲缺失专辑名称'),
-      ),
+    final eligibleCount = controller.eligibleAlbumMatchCount;
+    final pendingCount = controller.albumMatchPending;
+    if (isBusy) {
+      final total = controller.albumMatchTotal;
+      final progress = total <= 0
+          ? null
+          : (controller.albumMatchProcessed / total).clamp(0.0, 1.0).toDouble();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          LinearProgressIndicator(value: progress),
+          const SizedBox(height: 8),
+          Text(
+            total <= 0
+                ? '正在准备专辑匹配'
+                : '正在处理 ${controller.albumMatchProcessed} / $total',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          if (controller.matchingAlbumTrackTitle != null) ...[
+            const SizedBox(height: 3),
+            Text(
+              '当前：${controller.matchingAlbumTrackTitle}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: _muted, fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 3),
+          Text(
+            '已更新 ${controller.albumMatchUpdated} · '
+            '待确认 $pendingCount · '
+            '未找到 ${controller.albumMatchNotFound} · '
+            '失败 ${controller.albumMatchFailed}',
+            style: const TextStyle(color: _muted, fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: controller.isAlbumMatchCancellationRequested
+                ? null
+                : controller.cancelAlbumMatching,
+            icon: const Icon(Icons.stop_circle_outlined),
+            label: Text(
+              controller.isAlbumMatchCancellationRequested
+                  ? '正在停止，请等待当前请求结束'
+                  : '停止匹配',
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        OutlinedButton.icon(
+          onPressed: eligibleCount == 0 ? null : onPressed,
+          icon: const Icon(Icons.album_outlined),
+          label: Text(
+            eligibleCount == 0 ? '没有新的缺失专辑需要匹配' : '匹配 $eligibleCount 首歌曲的缺失专辑',
+          ),
+        ),
+        if (controller.albumMatchTotal > 0) ...[
+          const SizedBox(height: 6),
+          Text(
+            '上次处理 ${controller.albumMatchProcessed} / '
+            '${controller.albumMatchTotal}：已更新 '
+            '${controller.albumMatchUpdated}，待确认 $pendingCount，'
+            '未找到 ${controller.albumMatchNotFound}，'
+            '失败 ${controller.albumMatchFailed}',
+            style: const TextStyle(color: _muted, fontSize: 12),
+          ),
+        ],
+        if (pendingCount > 0) ...[
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: onReview,
+            icon: const Icon(Icons.fact_check_outlined),
+            label: Text('审阅 $pendingCount 个待确认结果'),
+          ),
+        ],
+      ],
     );
   }
 }

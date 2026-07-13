@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 
+import 'app_info.dart';
+
 import 'app_log.dart';
 
 class LyricsService {
@@ -16,8 +18,7 @@ class LyricsService {
               responseType: ResponseType.json,
               headers: const {
                 'Accept': 'application/json',
-                'User-Agent':
-                    'QingTing/1.3.8 (https://github.com/sadpotato1006/music_downloader)',
+                'User-Agent': appProjectUserAgent,
               },
             ),
           );

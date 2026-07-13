@@ -430,13 +430,16 @@ class _SettingPanel extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: _tileDecoration(),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 12),
-          child,
-        ],
+      child: Material(
+        type: MaterialType.transparency,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            child,
+          ],
+        ),
       ),
     );
   }

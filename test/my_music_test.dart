@@ -7,6 +7,7 @@ import 'package:qingting/file_deletion_service.dart';
 import 'package:qingting/models.dart';
 import 'package:qingting/music_source.dart';
 import 'package:qingting/player_service.dart';
+import 'package:qingting/pending_album_match.dart';
 import 'package:qingting/storage_service.dart';
 
 void main() {
@@ -348,6 +349,9 @@ class _FakeStorageService extends StorageService {
     downloadedTrackSaveCalls += 1;
     savedDownloadedTracks = List<DownloadedTrack>.from(tracks);
   }
+
+  @override
+  Future<void> savePendingAlbumMatches(List<PendingAlbumMatch> matches) async {}
 
   @override
   Future<void> savePlayerQueue(

@@ -1,6 +1,113 @@
 part of '../app_controller.dart';
 
 extension AppControllerLibraryActions on AppController {
+  bool _tryBeginMetadataRead(String path) {
+    final pathKey = _trackPathKey(path);
+    if (_deletingTrackKeys.contains(pathKey) ||
+        _metadataWriteKeys.contains(pathKey)) {
+      return false;
+    }
+    _metadataReadCounts[pathKey] = (_metadataReadCounts[pathKey] ?? 0) + 1;
+    return true;
+  }
+
+  Future<bool> _beginMetadataReadWhenAvailable(String path) async {
+    final pathKey = _trackPathKey(path);
+    while (!_isDisposed) {
+      if (_deletingTrackKeys.contains(pathKey)) {
+        return false;
+      }
+      if (_tryBeginMetadataRead(path)) {
+        return true;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    return false;
+  }
+
+  void _endMetadataRead(String path) {
+    final pathKey = _trackPathKey(path);
+    final count = _metadataReadCounts[pathKey] ?? 0;
+    if (count <= 1) {
+      _metadataReadCounts.remove(pathKey);
+    } else {
+      _metadataReadCounts[pathKey] = count - 1;
+    }
+  }
+
+  bool _metadataReadInProgress(String pathKey) =>
+      (_metadataReadCounts[pathKey] ?? 0) > 0;
+
+  bool _tryBeginMetadataWrite(String pathKey) {
+    if (_deletingTrackKeys.contains(pathKey) ||
+        _metadataReadInProgress(pathKey)) {
+      return false;
+    }
+    return _metadataWriteKeys.add(pathKey);
+  }
+
+  Future<void> _captureCurrentTrackDuration() {
+    final activeOperation = _durationCaptureOperation;
+    if (activeOperation != null) {
+      _durationCaptureRetryRequested = true;
+      return activeOperation;
+    }
+    late final Future<void> operation;
+    operation = _captureCurrentTrackDurationInternal().whenComplete(() {
+      if (identical(_durationCaptureOperation, operation)) {
+        _durationCaptureOperation = null;
+        if (_durationCaptureRetryRequested && !_isDisposed) {
+          _durationCaptureRetryRequested = false;
+          unawaited(_retryCaptureCurrentTrackDuration());
+        }
+      }
+    });
+    _durationCaptureOperation = operation;
+    return operation;
+  }
+
+  Future<void> _retryCaptureCurrentTrackDuration() async {
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    if (!_isDisposed) {
+      await _captureCurrentTrackDuration();
+    }
+  }
+
+  Future<void> _captureCurrentTrackDurationInternal() async {
+    final localPath = currentItem?.localPath;
+    final durationMs = player.duration.inMilliseconds;
+    if (localPath == null || durationMs < 1000) {
+      return;
+    }
+    final pathKey = _trackPathKey(localPath);
+    if (!_tryBeginMetadataWrite(pathKey)) {
+      _durationCaptureRetryRequested = true;
+      return;
+    }
+    try {
+      final track = _downloadedTrackByPath(localPath);
+      if (track == null ||
+          (track.durationMs != null &&
+              (track.durationMs! - durationMs).abs() < 1500)) {
+        return;
+      }
+      final updated = track.copyWith(durationMs: durationMs);
+      downloadedTracks = [
+        for (final item in downloadedTracks)
+          _trackPathKey(item.path) == pathKey ? updated : item,
+      ];
+      await _saveDownloadedTracks();
+    } catch (error, stackTrace) {
+      AppLog.instance.warning(
+        'library',
+        '保存歌曲时长失败：${currentItem?.title ?? localPath}',
+        detail: '$error\n$stackTrace',
+      );
+    } finally {
+      _metadataWriteKeys.remove(pathKey);
+    }
+  }
+
   Future<void> toggleFavorite(DownloadedTrack track) async {
     final key = _trackPathKey(track.path);
     final wasFavorite = isFavorite(track);
@@ -158,6 +265,13 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<void> removeDownloadedRecord(DownloadedTrack track) async {
+    final trackPathKey = _trackPathKey(track.path);
+    if (_metadataWriteKeys.contains(trackPathKey) ||
+        _metadataReadInProgress(trackPathKey)) {
+      globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候。';
+      _notify();
+      return;
+    }
     await _removeDownloadedRecord(track);
     globalMessage = '已删除歌曲记录，歌曲文件仍保留在原位置。';
     _notify();
@@ -171,6 +285,12 @@ extension AppControllerLibraryActions on AppController {
 
   Future<bool> deleteDownloadedTrack(DownloadedTrack track) async {
     final trackPathKey = _trackPathKey(track.path);
+    if (_metadataWriteKeys.contains(trackPathKey) ||
+        _metadataReadInProgress(trackPathKey)) {
+      globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候。';
+      _notify();
+      return false;
+    }
     if (!_deletingTrackKeys.add(trackPathKey)) {
       globalMessage = '正在删除“${track.title}”，请稍候。';
       _notify();
@@ -295,7 +415,11 @@ extension AppControllerLibraryActions on AppController {
 
   Future<void> _removeDownloadedRecord(DownloadedTrack track) async {
     _removeDownloadedRecordInMemory(track);
-    await Future.wait<void>([_saveMyMusic(), _saveDownloadedTracks()]);
+    await Future.wait<void>([
+      _saveMyMusic(),
+      _saveDownloadedTracks(),
+      _savePendingAlbumMatches(),
+    ]);
     await _deleteUnusedCachedCover(track.coverFilePath);
   }
 
@@ -306,6 +430,7 @@ extension AppControllerLibraryActions on AppController {
     final key = _libraryLyricsCacheKey(track);
     _libraryLyricsSearchCache.remove(key);
     _loadingLibraryLyricsKeys.remove(key);
+    _removePendingAlbumMatchForPath(track.path);
     _removeTrackFromMyMusicInMemory(track.path);
   }
 
@@ -340,6 +465,7 @@ extension AppControllerLibraryActions on AppController {
     }
     await persist('我的音乐', _saveMyMusic);
     await persist('本地曲库', _saveDownloadedTracks);
+    await persist('待确认专辑', _savePendingAlbumMatches);
     return failures;
   }
 
@@ -361,9 +487,9 @@ extension AppControllerLibraryActions on AppController {
       }
 
       final knownPaths = {
-        for (final track in downloadedTracks) p.normalize(track.path): track,
+        for (final track in downloadedTracks) _trackPathKey(track.path): track,
       };
-      final imported = <DownloadedTrack>[];
+      final newAudioFiles = <({File file, String format})>[];
 
       await for (final entity in directory.list(
         recursive: true,
@@ -378,49 +504,49 @@ extension AppControllerLibraryActions on AppController {
           continue;
         }
 
-        final normalizedPath = p.normalize(entity.path);
+        final normalizedPath = _trackPathKey(entity.path);
         if (knownPaths.containsKey(normalizedPath)) {
           continue;
         }
-
-        try {
-          final stat = await entity.stat();
-          final metadata = await _readLocalAudioMetadata(entity, format);
-          final fileName = _parseTrackNameFromFile(entity.path);
-          final title = _firstNonEmpty([
-            metadata.title,
-            fileName.title,
-            p.basenameWithoutExtension(entity.path),
-          ]);
-          final artist = _firstNonEmpty([metadata.artist, fileName.artist]);
-          final album = _firstNonEmpty([metadata.album]);
-          final coverFilePath = metadata.coverFilePath;
-
-          final item = DownloadedTrack(
-            id: _localTrackId(entity.path, stat),
-            title: title,
-            artist: artist,
-            path: entity.path,
-            format: format,
-            downloadedAt: stat.modified,
-            sourceUrl: entity.uri.toString(),
-            album: album,
-            coverFilePath: coverFilePath,
-          );
-          imported.add(item);
-          knownPaths[normalizedPath] = item;
-        } catch (_) {
-          // Ignore a single unreadable file and keep scanning the directory.
-        }
+        newAudioFiles.add((file: entity, format: format));
       }
 
+      final parsed = await mapWithConcurrency(newAudioFiles, (input) async {
+        try {
+          final entity = input.file;
+          final stat = await entity.stat();
+          final metadata = await _readLocalAudioMetadata(entity, input.format);
+          final fileName = _parseTrackNameFromFile(entity.path);
+          return DownloadedTrack(
+            id: _localTrackId(entity.path, stat),
+            title: _firstNonEmpty([
+              metadata.title,
+              fileName.title,
+              p.basenameWithoutExtension(entity.path),
+            ]),
+            artist: _firstNonEmpty([metadata.artist, fileName.artist]),
+            path: entity.path,
+            format: input.format,
+            downloadedAt: stat.modified,
+            sourceUrl: entity.uri.toString(),
+            album: _firstNonEmpty([metadata.album]),
+            coverFilePath: metadata.coverFilePath,
+          );
+        } catch (_) {
+          // Ignore a single unreadable file and keep scanning the directory.
+          return null;
+        }
+      }, maxConcurrent: 4);
+      final imported = parsed.whereType<DownloadedTrack>().toList();
+
       if (imported.isNotEmpty) {
+        final importedPaths = {
+          for (final item in imported) _trackPathKey(item.path),
+        };
         downloadedTracks = [
           ...imported,
           ...downloadedTracks.where(
-            (track) => !imported.any(
-              (item) => p.normalize(item.path) == p.normalize(track.path),
-            ),
+            (track) => !importedPaths.contains(_trackPathKey(track.path)),
           ),
         ];
         await _saveDownloadedTracks();
@@ -446,24 +572,59 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<String?> readDownloadedLyrics(DownloadedTrack track) async {
-    final file = File(track.path);
-    if (!await file.exists()) {
+    if (!await _beginMetadataReadWhenAvailable(track.path)) {
       return null;
     }
-    if (track.format.toLowerCase() == 'mp3') {
-      try {
-        final lyrics = await Id3LyricsEmbedder.extractLyrics(file);
-        if (lyrics != null && lyrics.trim().isNotEmpty) {
-          return lyrics;
-        }
-      } catch (_) {
-        // Fall through to sidecar lyrics.
+    try {
+      final file = File(track.path);
+      if (!await file.exists()) {
+        return null;
       }
+      if (track.format.toLowerCase() == 'mp3') {
+        try {
+          final lyrics = await Id3LyricsEmbedder.extractLyrics(file);
+          if (lyrics != null && lyrics.trim().isNotEmpty) {
+            return lyrics;
+          }
+        } catch (_) {
+          // Fall through to sidecar lyrics.
+        }
+      }
+      return _readSidecarLyrics(file);
+    } finally {
+      _endMetadataRead(track.path);
     }
-    return _readSidecarLyrics(file);
   }
 
   Future<bool> updateDownloadedTrack(
+    DownloadedTrack track, {
+    required String title,
+    required String artist,
+    required String album,
+    required String lyrics,
+    required String coverInput,
+  }) async {
+    final trackPathKey = _trackPathKey(track.path);
+    if (!_tryBeginMetadataWrite(trackPathKey)) {
+      globalMessage = '正在处理“${track.title}”，请稍候。';
+      _notify();
+      return false;
+    }
+    try {
+      return await _updateDownloadedTrackUnlocked(
+        track,
+        title: title,
+        artist: artist,
+        album: album,
+        lyrics: lyrics,
+        coverInput: coverInput,
+      );
+    } finally {
+      _metadataWriteKeys.remove(trackPathKey);
+    }
+  }
+
+  Future<bool> _updateDownloadedTrackUnlocked(
     DownloadedTrack track, {
     required String title,
     required String artist,
@@ -527,6 +688,11 @@ extension AppControllerLibraryActions on AppController {
       album: trimmedAlbum,
       coverFilePath: coverFilePath,
     );
+    if (trimmedAlbum.isNotEmpty ||
+        trimmedTitle != track.title ||
+        trimmedArtist != track.artist) {
+      _removePendingAlbumMatchForPath(track.path);
+    }
     downloadedTracks = [
       for (final item in downloadedTracks)
         item.id == track.id && item.path == track.path ? updated : item,
@@ -534,7 +700,8 @@ extension AppControllerLibraryActions on AppController {
     _libraryLyricsSearchCache[_libraryLyricsCacheKey(updated)] = trimmedLyrics;
     queue = [
       for (final item in queue)
-        item.localPath == track.path
+        item.localPath != null &&
+                _trackPathKey(item.localPath!) == _trackPathKey(track.path)
             ? item.copyWith(
                 title: trimmedTitle,
                 artist: trimmedArtist,
@@ -546,6 +713,7 @@ extension AppControllerLibraryActions on AppController {
     ];
     await _saveDownloadedTracks();
     await _saveQueueState();
+    await _savePendingAlbumMatches();
     if (track.coverFilePath != coverFilePath) {
       await _deleteUnusedCachedCover(track.coverFilePath);
     }
@@ -565,36 +733,193 @@ extension AppControllerLibraryActions on AppController {
     }
 
     isMatchingLocalAlbums = true;
-    matchingAlbumTrackId = track.id;
+    matchingAlbumTrackPath = track.path;
+    matchingAlbumTrackTitle = track.artist.trim().isEmpty
+        ? track.title
+        : '${track.artist} - ${track.title}';
+    albumMatchProcessed = 0;
+    albumMatchTotal = 1;
+    albumMatchUpdated = 0;
+    albumMatchNotFound = 0;
+    albumMatchFailed = 0;
+    _albumMatchCancelRequested = false;
     globalMessage = null;
     _notify();
 
     try {
-      final current = downloadedTracks.firstWhere(
-        (item) => item.id == track.id && item.path == track.path,
-        orElse: () => track,
-      );
-      final lyrics = current.format.toLowerCase() == 'mp3'
-          ? await readDownloadedLyrics(current)
-          : null;
+      final current = _downloadedTrackByPath(track.path);
+      if (current == null) {
+        globalMessage = '歌曲记录已不存在，无法获取专辑候选。';
+        return const [];
+      }
       final candidates = await albumMetadata.findAlbumCandidates(
         title: current.title,
         artist: current.artist,
-        lyrics: lyrics,
+        lyricsLoader: () => readDownloadedLyrics(current),
+        isCancelled: () => _albumMatchCancelRequested,
+        duration: current.durationMs == null
+            ? null
+            : Duration(milliseconds: current.durationMs!),
         limit: 5,
       );
+      if (_albumMatchCancelRequested) {
+        return const [];
+      }
+      final latest = _downloadedTrackByPath(current.path);
+      if (latest == null ||
+          latest.title != current.title ||
+          latest.artist != current.artist ||
+          latest.album != current.album) {
+        globalMessage = '歌曲信息已经变化，请重新获取专辑候选。';
+        return const [];
+      }
       if (candidates.isEmpty) {
+        albumMatchNotFound = 1;
         globalMessage = '没有找到可用的专辑候选。';
       }
       return candidates;
     } catch (error) {
+      albumMatchFailed = 1;
       globalMessage = '获取专辑名称失败：${_friendlyUnexpectedError(error)}';
       return const [];
     } finally {
+      albumMatchProcessed = 1;
       isMatchingLocalAlbums = false;
-      matchingAlbumTrackId = null;
+      matchingAlbumTrackPath = null;
+      matchingAlbumTrackTitle = null;
       _notify();
     }
+  }
+
+  bool get isAlbumMatchCancellationRequested => _albumMatchCancelRequested;
+
+  bool isMatchingAlbumForTrack(DownloadedTrack track) =>
+      isMatchingLocalAlbums &&
+      matchingAlbumTrackPath != null &&
+      _trackPathKey(matchingAlbumTrackPath!) == _trackPathKey(track.path);
+
+  int get albumMatchPending => pendingAlbumMatches.length;
+
+  List<PendingAlbumMatch> _validRestoredPendingAlbumMatches(
+    List<PendingAlbumMatch> restored,
+  ) {
+    final tracksByPath = {
+      for (final track in downloadedTracks) _trackPathKey(track.path): track,
+    };
+    final seenPaths = <String>{};
+    final valid = <PendingAlbumMatch>[];
+    for (final pending in restored) {
+      final pathKey = _trackPathKey(pending.trackPath);
+      final track = tracksByPath[pathKey];
+      if (track != null &&
+          seenPaths.add(pathKey) &&
+          track.album.trim().isEmpty &&
+          track.title == pending.title &&
+          track.artist == pending.artist &&
+          pending.candidates.isNotEmpty) {
+        valid.add(pending);
+      }
+    }
+    return valid;
+  }
+
+  int get missingAlbumCount =>
+      downloadedTracks.where((track) => track.album.trim().isEmpty).length;
+
+  int get eligibleAlbumMatchCount {
+    final pendingPaths = {
+      for (final item in pendingAlbumMatches) _trackPathKey(item.trackPath),
+    };
+    return downloadedTracks
+        .where(
+          (track) =>
+              track.album.trim().isEmpty &&
+              !pendingPaths.contains(_trackPathKey(track.path)),
+        )
+        .length;
+  }
+
+  void cancelAlbumMatching() {
+    if (!isMatchingLocalAlbums || _albumMatchCancelRequested) {
+      return;
+    }
+    _albumMatchCancelRequested = true;
+    _notify();
+  }
+
+  void skipPendingAlbumMatch(PendingAlbumMatch pending) {
+    if (!_removePendingAlbumMatchForPath(pending.trackPath)) {
+      return;
+    }
+    unawaited(_savePendingAlbumMatchesBestEffort());
+    _notify();
+  }
+
+  bool _removePendingAlbumMatchForPath(String path) {
+    final pathKey = _trackPathKey(path);
+    final updated = [
+      for (final item in pendingAlbumMatches)
+        if (_trackPathKey(item.trackPath) != pathKey) item,
+    ];
+    if (updated.length == pendingAlbumMatches.length) {
+      return false;
+    }
+    pendingAlbumMatches = updated;
+    return true;
+  }
+
+  Future<bool> applyPendingAlbumMatch(
+    PendingAlbumMatch pending,
+    AlbumMetadataMatch candidate,
+  ) async {
+    if (!pendingAlbumMatches.contains(pending) ||
+        !pending.candidates.contains(candidate)) {
+      globalMessage = '选择的专辑候选已经失效，请重新审阅。';
+      _notify();
+      return false;
+    }
+    final current = _downloadedTrackByPath(pending.trackPath);
+    if (current == null) {
+      skipPendingAlbumMatch(pending);
+      globalMessage = '歌曲记录已不存在，已从待确认列表移除。';
+      _notify();
+      return false;
+    }
+    if (current.title != pending.title || current.artist != pending.artist) {
+      skipPendingAlbumMatch(pending);
+      globalMessage = '歌曲信息已经变化，请重新获取专辑候选。';
+      _notify();
+      return false;
+    }
+    if (current.album.trim().isNotEmpty) {
+      skipPendingAlbumMatch(pending);
+      globalMessage = '这首歌曲已经有专辑名称，已跳过旧候选。';
+      _notify();
+      return false;
+    }
+    if (current.format.toLowerCase() == 'mp3' &&
+        _isTrackLoadedInPlayer(current.path)) {
+      globalMessage = '请先切换到其他歌曲，再写入当前歌曲的专辑信息。';
+      _notify();
+      return false;
+    }
+    final success = await _applyAlbumToDownloadedTrack(
+      current,
+      candidate.album,
+      notify: false,
+      requireAlbumMissing: true,
+      expectedTitle: pending.title,
+      expectedArtist: pending.artist,
+    );
+    if (success) {
+      skipPendingAlbumMatch(pending);
+      globalMessage = '已设置专辑名称：${candidate.album}';
+      _notify();
+    } else {
+      globalMessage = '专辑名称写入失败，请检查文件是否可写后重试。';
+      _notify();
+    }
+    return success;
   }
 
   Future<bool> applyDownloadedAlbumName(
@@ -605,9 +930,15 @@ extension AppControllerLibraryActions on AppController {
       track,
       album.trim(),
       notify: false,
+      expectedTitle: track.title,
+      expectedArtist: track.artist,
+      expectedAlbum: track.album,
     );
     if (!success) {
       return false;
+    }
+    if (_removePendingAlbumMatchForPath(track.path)) {
+      await _savePendingAlbumMatches();
     }
     _notify();
     return true;
@@ -617,64 +948,199 @@ extension AppControllerLibraryActions on AppController {
     if (isMatchingLocalAlbums) {
       return 0;
     }
+    final completion = Completer<void>();
+    final completionFuture = completion.future;
+    _albumMatchCompletion = completionFuture;
 
+    final pendingPaths = {
+      for (final item in pendingAlbumMatches) _trackPathKey(item.trackPath),
+    };
+    final targets = downloadedTracks
+        .where(
+          (track) =>
+              track.album.trim().isEmpty &&
+              !pendingPaths.contains(_trackPathKey(track.path)),
+        )
+        .toList(growable: false);
     isMatchingLocalAlbums = true;
-    matchingAlbumTrackId = null;
+    matchingAlbumTrackPath = null;
+    matchingAlbumTrackTitle = null;
+    albumMatchProcessed = 0;
+    albumMatchTotal = targets.length;
+    albumMatchUpdated = 0;
+    albumMatchNotFound = 0;
+    albumMatchFailed = 0;
+    _albumMatchCancelRequested = false;
     globalMessage = null;
     _notify();
 
-    var updatedCount = 0;
+    var unsavedChanges = 0;
     try {
-      final targets = downloadedTracks
-          .where((track) => track.album.trim().isEmpty)
-          .toList(growable: false);
       for (final target in targets) {
-        final current = downloadedTracks.firstWhere(
-          (track) => track.id == target.id && track.path == target.path,
-          orElse: () => target,
-        );
-        if (current.album.trim().isNotEmpty) {
+        if (_albumMatchCancelRequested) {
+          break;
+        }
+        final current = _downloadedTrackByPath(target.path);
+        if (current == null || current.album.trim().isNotEmpty) {
+          albumMatchProcessed += 1;
           continue;
         }
 
-        matchingAlbumTrackId = current.id;
+        matchingAlbumTrackPath = current.path;
+        matchingAlbumTrackTitle = current.artist.trim().isEmpty
+            ? current.title
+            : '${current.artist} - ${current.title}';
         _notify();
 
-        final lyrics = current.format.toLowerCase() == 'mp3'
-            ? await readDownloadedLyrics(current)
-            : null;
-        final match = await albumMetadata.findBestAlbum(
-          title: current.title,
-          artist: current.artist,
-          lyrics: lyrics,
-        );
-        final album = match?.album.trim();
-        if (album == null || album.isEmpty) {
-          continue;
-        }
-
-        final didUpdate = await _applyAlbumToDownloadedTrack(
-          current,
-          album,
-          notify: false,
-        );
-        if (didUpdate) {
-          updatedCount += 1;
+        try {
+          final candidates = await albumMetadata.findAlbumCandidates(
+            title: current.title,
+            artist: current.artist,
+            lyricsLoader: () => readDownloadedLyrics(current),
+            isCancelled: () => _albumMatchCancelRequested,
+            duration: current.durationMs == null
+                ? null
+                : Duration(milliseconds: current.durationMs!),
+            limit: 5,
+          );
+          if (_albumMatchCancelRequested) {
+            break;
+          }
+          final latest = _downloadedTrackByPath(current.path);
+          if (latest == null ||
+              latest.album.trim().isNotEmpty ||
+              latest.title != current.title ||
+              latest.artist != current.artist) {
+            continue;
+          }
+          if (candidates.isEmpty) {
+            albumMatchNotFound += 1;
+          } else {
+            final automatic = AlbumMetadataService.selectAutomaticMatch(
+              candidates,
+              hasArtist: current.artist.trim().isNotEmpty,
+              hasDuration: current.durationMs != null,
+            );
+            if (automatic == null) {
+              _upsertPendingAlbumMatch(latest, candidates);
+              unsavedChanges += 1;
+            } else if (latest.format.toLowerCase() == 'mp3' &&
+                _isTrackLoadedInPlayer(latest.path)) {
+              _upsertPendingAlbumMatch(latest, candidates);
+              unsavedChanges += 1;
+            } else {
+              final didUpdate = await _applyAlbumToDownloadedTrack(
+                latest,
+                automatic.album,
+                notify: false,
+                persist: false,
+                requireAlbumMissing: true,
+                expectedTitle: latest.title,
+                expectedArtist: latest.artist,
+              );
+              if (didUpdate) {
+                albumMatchUpdated += 1;
+                unsavedChanges += 1;
+              } else {
+                albumMatchFailed += 1;
+              }
+            }
+            if (unsavedChanges >= 8) {
+              await _saveAlbumMatchCheckpoint();
+              unsavedChanges = 0;
+            }
+          }
+        } on AlbumMetadataNetworkException catch (error, stackTrace) {
+          albumMatchFailed += 1;
+          _albumMatchCancelRequested = true;
+          AppLog.instance.warning(
+            'album',
+            '专辑元数据服务不可用，已停止批量匹配',
+            detail: '$error\n$stackTrace',
+          );
+        } catch (error, stackTrace) {
+          albumMatchFailed += 1;
+          AppLog.instance.warning(
+            'album',
+            '匹配本地歌曲专辑失败：${current.title}',
+            detail: '$error\n$stackTrace',
+          );
+        } finally {
+          albumMatchProcessed += 1;
+          _notify();
         }
       }
 
-      globalMessage = updatedCount == 0
-          ? '专辑匹配完成，没有发现可更新的专辑名称。'
-          : '专辑匹配完成，已更新 $updatedCount 首歌曲。';
-      return updatedCount;
+      if (unsavedChanges > 0) {
+        await _saveAlbumMatchCheckpoint();
+      }
+      final stopped = _albumMatchCancelRequested ? '已停止。' : '已完成。';
+      globalMessage =
+          '专辑匹配$stopped 已更新 $albumMatchUpdated 首，'
+          '待确认 $albumMatchPending 首，未找到 $albumMatchNotFound 首，'
+          '失败 $albumMatchFailed 首。';
+      return albumMatchUpdated;
     } catch (error) {
       globalMessage = '专辑匹配失败：${_friendlyUnexpectedError(error)}';
-      return updatedCount;
+      return albumMatchUpdated;
     } finally {
       isMatchingLocalAlbums = false;
-      matchingAlbumTrackId = null;
+      matchingAlbumTrackPath = null;
+      matchingAlbumTrackTitle = null;
+      if (!completion.isCompleted) {
+        completion.complete();
+      }
+      if (identical(_albumMatchCompletion, completionFuture)) {
+        _albumMatchCompletion = null;
+      }
       _notify();
     }
+  }
+
+  void _upsertPendingAlbumMatch(
+    DownloadedTrack track,
+    List<AlbumMetadataMatch> candidates,
+  ) {
+    final pathKey = _trackPathKey(track.path);
+    final pending = PendingAlbumMatch(
+      trackId: track.id,
+      trackPath: track.path,
+      title: track.title,
+      artist: track.artist,
+      candidates: List<AlbumMetadataMatch>.unmodifiable(candidates),
+    );
+    pendingAlbumMatches = [
+      for (final item in pendingAlbumMatches)
+        if (_trackPathKey(item.trackPath) != pathKey) item,
+      pending,
+    ];
+  }
+
+  DownloadedTrack? _downloadedTrackByPath(String path) {
+    final pathKey = _trackPathKey(path);
+    for (final track in downloadedTracks) {
+      if (_trackPathKey(track.path) == pathKey) {
+        return track;
+      }
+    }
+    return null;
+  }
+
+  bool _isTrackLoadedInPlayer(String path) {
+    final item = currentItem;
+    final localPath = item?.localPath;
+    return item != null &&
+        localPath != null &&
+        _trackPathKey(localPath) == _trackPathKey(path) &&
+        (player.isPlaying || player.isOpened(item));
+  }
+
+  Future<void> _saveAlbumMatchCheckpoint() async {
+    await Future.wait<void>([
+      _saveDownloadedTracks(),
+      _saveQueueState(),
+      _savePendingAlbumMatches(),
+    ]);
   }
 
   Future<PlayerItem?> _playerItemFromDownloadedTrack(
@@ -682,50 +1148,67 @@ extension AppControllerLibraryActions on AppController {
     bool includeLyrics = true,
     bool includeMetadata = true,
     bool showMissingMessage = true,
+    bool metadataReadHeld = false,
   }) async {
-    final file = File(track.path);
-    if (!await file.exists()) {
+    final acquiredRead = metadataReadHeld
+        ? true
+        : _tryBeginMetadataRead(track.path);
+    if (!acquiredRead) {
       if (showMissingMessage) {
-        globalMessage = '本地文件不存在：${track.path}';
+        globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候再播放。';
         _notify();
       }
       return null;
     }
+    try {
+      final file = File(track.path);
+      if (!await file.exists()) {
+        if (showMissingMessage) {
+          globalMessage = '本地文件不存在：${track.path}';
+          _notify();
+        }
+        return null;
+      }
 
-    Id3Metadata metadata = const Id3Metadata();
-    if (includeMetadata && (includeLyrics || track.album.trim().isEmpty)) {
-      try {
-        metadata = await Id3LyricsEmbedder.extractMetadata(file);
-      } catch (_) {
-        metadata = const Id3Metadata();
+      Id3Metadata metadata = const Id3Metadata();
+      if (includeMetadata && (includeLyrics || track.album.trim().isEmpty)) {
+        try {
+          metadata = await Id3LyricsEmbedder.extractMetadata(file);
+        } catch (_) {
+          metadata = const Id3Metadata();
+        }
+      }
+      var lyrics = includeLyrics ? metadata.lyrics : null;
+      if (includeLyrics && (lyrics == null || lyrics.trim().isEmpty)) {
+        lyrics = await _readSidecarLyrics(file);
+      }
+      var album = track.album;
+      final embeddedAlbum = metadata.album?.trim();
+      if (album.trim().isEmpty &&
+          embeddedAlbum != null &&
+          embeddedAlbum.isNotEmpty) {
+        album = embeddedAlbum;
+        await _updateDownloadedTrackMetadata(
+          track,
+          track.copyWith(album: embeddedAlbum),
+        );
+      }
+
+      return PlayerItem(
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        uri: file.uri.toString(),
+        localPath: track.path,
+        coverFilePath: track.coverFilePath,
+        lyrics: lyrics,
+        album: album,
+      );
+    } finally {
+      if (!metadataReadHeld) {
+        _endMetadataRead(track.path);
       }
     }
-    var lyrics = includeLyrics ? metadata.lyrics : null;
-    if (includeLyrics && (lyrics == null || lyrics.trim().isEmpty)) {
-      lyrics = await _readSidecarLyrics(file);
-    }
-    var album = track.album;
-    final embeddedAlbum = metadata.album?.trim();
-    if (album.trim().isEmpty &&
-        embeddedAlbum != null &&
-        embeddedAlbum.isNotEmpty) {
-      album = embeddedAlbum;
-      await _updateDownloadedTrackMetadata(
-        track,
-        track.copyWith(album: embeddedAlbum),
-      );
-    }
-
-    return PlayerItem(
-      id: track.id,
-      title: track.title,
-      artist: track.artist,
-      uri: file.uri.toString(),
-      localPath: track.path,
-      coverFilePath: track.coverFilePath,
-      lyrics: lyrics,
-      album: album,
-    );
   }
 
   Future<String?> _readSidecarLyrics(File audioFile) async {
@@ -751,18 +1234,35 @@ extension AppControllerLibraryActions on AppController {
     DownloadedTrack original,
     DownloadedTrack updated,
   ) async {
+    final current = _downloadedTrackByPath(original.path);
+    final embeddedAlbum = updated.album.trim();
+    if (current == null ||
+        current.album.trim().isNotEmpty ||
+        embeddedAlbum.isEmpty ||
+        current.title != original.title ||
+        current.artist != original.artist) {
+      return;
+    }
+    final currentUpdated = current.copyWith(album: embeddedAlbum);
+    final removedPending = _removePendingAlbumMatchForPath(current.path);
     downloadedTracks = [
       for (final item in downloadedTracks)
-        item.id == original.id && item.path == original.path ? updated : item,
+        _trackPathKey(item.path) == _trackPathKey(current.path)
+            ? currentUpdated
+            : item,
     ];
     queue = [
       for (final item in queue)
-        item.localPath == original.path
-            ? item.copyWith(album: updated.album)
+        item.localPath != null &&
+                _trackPathKey(item.localPath!) == _trackPathKey(current.path)
+            ? item.copyWith(album: embeddedAlbum)
             : item,
     ];
     await _saveDownloadedTracks();
     await _saveQueueState();
+    if (removedPending) {
+      await _savePendingAlbumMatches();
+    }
     _notify();
   }
 
@@ -770,6 +1270,59 @@ extension AppControllerLibraryActions on AppController {
     DownloadedTrack track,
     String album, {
     bool notify = true,
+    bool persist = true,
+    bool requireAlbumMissing = false,
+    String? expectedTitle,
+    String? expectedArtist,
+    String? expectedAlbum,
+  }) async {
+    final trackPathKey = _trackPathKey(track.path);
+    if (!_tryBeginMetadataWrite(trackPathKey)) {
+      if (notify) {
+        globalMessage = '正在处理“${track.title}”，请稍候。';
+        _notify();
+      }
+      return false;
+    }
+    try {
+      DownloadedTrack? current;
+      for (final item in downloadedTracks) {
+        if (_trackPathKey(item.path) == trackPathKey) {
+          current = item;
+          break;
+        }
+      }
+      if (current == null ||
+          (requireAlbumMissing && current.album.trim().isNotEmpty) ||
+          (expectedTitle != null && current.title != expectedTitle) ||
+          (expectedArtist != null && current.artist != expectedArtist) ||
+          (expectedAlbum != null && current.album != expectedAlbum)) {
+        return false;
+      }
+      if (current.format.toLowerCase() == 'mp3' &&
+          _isTrackLoadedInPlayer(current.path)) {
+        if (notify) {
+          globalMessage = '请先切换到其他歌曲，再写入当前歌曲的专辑信息。';
+          _notify();
+        }
+        return false;
+      }
+      return await _applyAlbumToDownloadedTrackUnlocked(
+        current,
+        album,
+        notify: notify,
+        persist: persist,
+      );
+    } finally {
+      _metadataWriteKeys.remove(trackPathKey);
+    }
+  }
+
+  Future<bool> _applyAlbumToDownloadedTrackUnlocked(
+    DownloadedTrack track,
+    String album, {
+    required bool notify,
+    required bool persist,
   }) async {
     final trimmedAlbum = album.trim();
     final file = File(track.path);
@@ -809,12 +1362,15 @@ extension AppControllerLibraryActions on AppController {
     ];
     queue = [
       for (final item in queue)
-        item.localPath == track.path
+        item.localPath != null &&
+                _trackPathKey(item.localPath!) == _trackPathKey(track.path)
             ? item.copyWith(album: trimmedAlbum)
             : item,
     ];
-    await _saveDownloadedTracks();
-    await _saveQueueState();
+    if (persist) {
+      await _saveDownloadedTracks();
+      await _saveQueueState();
+    }
     if (notify) {
       _notify();
     }
@@ -904,6 +1460,33 @@ extension AppControllerLibraryActions on AppController {
     return operation;
   }
 
+  Future<void> _savePendingAlbumMatches() {
+    final snapshot = List<PendingAlbumMatch>.unmodifiable(pendingAlbumMatches);
+    final previousSave = _pendingAlbumMatchesSaveQueue;
+    final operation = () async {
+      try {
+        await previousSave;
+      } catch (_) {
+        // A failed save must not prevent the latest review queue from saving.
+      }
+      await storage.savePendingAlbumMatches(snapshot);
+    }();
+    _pendingAlbumMatchesSaveQueue = operation;
+    return operation;
+  }
+
+  Future<void> _savePendingAlbumMatchesBestEffort() async {
+    try {
+      await _savePendingAlbumMatches();
+    } catch (error, stackTrace) {
+      AppLog.instance.warning(
+        'storage',
+        '保存待确认专辑失败',
+        detail: '$error\n$stackTrace',
+      );
+    }
+  }
+
   Future<void> _addDownloadedTrack(DownloadTask task) async {
     DownloadedTrack? replacedTrack;
     for (final track in downloadedTracks) {
@@ -927,13 +1510,18 @@ extension AppControllerLibraryActions on AppController {
       album: task.album,
       coverUrl: task.track.coverUrl,
       coverFilePath: coverFilePath,
+      durationMs: _parseTrackDuration(task.track.duration)?.inMilliseconds,
     );
     downloadedTracks = [
       item,
       ...downloadedTracks.where((track) => track.path != item.path),
     ];
     _libraryLyricsSearchCache.remove(_libraryLyricsCacheKey(item));
-    await _saveDownloadedTracks();
+    final removedPending = _removePendingAlbumMatchForPath(item.path);
+    await Future.wait<void>([
+      _saveDownloadedTracks(),
+      if (removedPending) _savePendingAlbumMatches(),
+    ]);
     if (replacedTrack?.coverFilePath != coverFilePath) {
       await _deleteUnusedCachedCover(replacedTrack?.coverFilePath);
     }
@@ -970,7 +1558,10 @@ extension AppControllerLibraryActions on AppController {
 
     if (hasChanges) {
       try {
-        await _saveDownloadedTracks();
+        await Future.wait<void>([
+          _saveDownloadedTracks(),
+          _savePendingAlbumMatches(),
+        ]);
       } catch (_) {
         // Background hydration is best-effort and can retry next launch.
       }
@@ -1031,6 +1622,18 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<bool> _hydrateDownloadedTrack(DownloadedTrack snapshot) async {
+    final trackPathKey = _trackPathKey(snapshot.path);
+    if (!_tryBeginMetadataWrite(trackPathKey)) {
+      return false;
+    }
+    try {
+      return await _hydrateDownloadedTrackUnlocked(snapshot);
+    } finally {
+      _metadataWriteKeys.remove(trackPathKey);
+    }
+  }
+
+  Future<bool> _hydrateDownloadedTrackUnlocked(DownloadedTrack snapshot) async {
     final snapshotKey = _libraryLyricsCacheKey(snapshot);
     var current = _downloadedTrackByKey(snapshotKey);
     if (current == null || current.format.toLowerCase() != 'mp3') {
@@ -1084,6 +1687,10 @@ extension AppControllerLibraryActions on AppController {
       }
       if (!changed) {
         return false;
+      }
+
+      if (updated.album.trim().isNotEmpty) {
+        _removePendingAlbumMatchForPath(updated.path);
       }
 
       downloadedTracks = [
@@ -1178,6 +1785,11 @@ extension AppControllerLibraryActions on AppController {
       track.album,
       lyrics.hashCode,
     ].join('\u0001');
+    final maxCacheEntries = max(256, downloadedTracks.length * 2);
+    if (_librarySearchIndexCache.length >= maxCacheEntries &&
+        !_librarySearchIndexCache.containsKey(key)) {
+      _librarySearchIndexCache.clear();
+    }
     return _librarySearchIndexCache.putIfAbsent(
       key,
       () => LibrarySearchIndex.fromTrack(track, lyrics: lyrics),

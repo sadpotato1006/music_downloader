@@ -130,12 +130,18 @@ Future<void> _fetchAlbumForDownloadedTrack(
     return;
   }
 
-  final best = candidates.first;
-  AlbumMetadataMatch? selected;
-  if (best.score >= AlbumMetadataService.highConfidenceScore) {
-    selected = best;
-  } else {
-    selected = await _showAlbumCandidateDialog(context, candidates);
+  AlbumMetadataMatch? selected = AlbumMetadataService.selectAutomaticMatch(
+    candidates,
+    hasArtist: track.artist.trim().isNotEmpty,
+    hasDuration: track.durationMs != null,
+  );
+  if (selected == null) {
+    selected = await _showAlbumCandidateDialog(
+      context,
+      candidates,
+      trackTitle: track.title,
+      trackArtist: track.artist,
+    );
     if (!context.mounted || selected == null) {
       return;
     }
@@ -153,8 +159,10 @@ Future<void> _fetchAlbumForDownloadedTrack(
 
 Future<AlbumMetadataMatch?> _showAlbumCandidateDialog(
   BuildContext context,
-  List<AlbumMetadataMatch> candidates,
-) {
+  List<AlbumMetadataMatch> candidates, {
+  String? trackTitle,
+  String? trackArtist,
+}) {
   return showDialog<AlbumMetadataMatch>(
     context: context,
     builder: (context) {
@@ -170,6 +178,17 @@ Future<AlbumMetadataMatch?> _showAlbumCandidateDialog(
                 '没有找到高置信度结果，可以从下面的候选中手动选择一个。',
                 style: TextStyle(color: _muted, fontSize: 13),
               ),
+              if (trackTitle != null) ...[
+                const SizedBox(height: 5),
+                Text(
+                  trackArtist == null || trackArtist.trim().isEmpty
+                      ? trackTitle
+                      : '$trackArtist · $trackTitle',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ],
               const SizedBox(height: 12),
               ConstrainedBox(
                 constraints: BoxConstraints(
@@ -190,6 +209,8 @@ Future<AlbumMetadataMatch?> _showAlbumCandidateDialog(
                       candidate.recordingTitle.trim().isEmpty
                           ? null
                           : candidate.recordingTitle.trim(),
+                      if (!candidate.releasePreferred) '合辑或非首选发行',
+                      if (!candidate.durationVerified) '未校验时长',
                       if (date != null && date.isNotEmpty) date,
                       '置信度 ${candidate.score.round()}',
                     ].whereType<String>().join(' · ');
@@ -223,6 +244,228 @@ Future<AlbumMetadataMatch?> _showAlbumCandidateDialog(
       );
     },
   );
+}
+
+Future<void> _showPendingAlbumMatchesSheet(
+  BuildContext context,
+  AppController controller,
+) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    useSafeArea: true,
+    isScrollControlled: true,
+    backgroundColor: Colors.white,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+    ),
+    builder: (context) => _PendingAlbumMatchesSheet(controller: controller),
+  );
+}
+
+class _PendingAlbumMatchesSheet extends StatefulWidget {
+  const _PendingAlbumMatchesSheet({required this.controller});
+
+  final AppController controller;
+
+  @override
+  State<_PendingAlbumMatchesSheet> createState() =>
+      _PendingAlbumMatchesSheetState();
+}
+
+class _PendingAlbumMatchesSheetState extends State<_PendingAlbumMatchesSheet> {
+  String? _activePath;
+  AlbumMetadataMatch? _selected;
+  bool _isApplying = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_handleChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_handleChanged);
+    super.dispose();
+  }
+
+  void _handleChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _ensureSelection(PendingAlbumMatch pending) {
+    if (_activePath == pending.trackPath) {
+      return;
+    }
+    _activePath = pending.trackPath;
+    _selected = pending.candidates.isEmpty ? null : pending.candidates.first;
+  }
+
+  Future<void> _apply(PendingAlbumMatch pending) async {
+    final selected = _selected;
+    if (selected == null || _isApplying) {
+      return;
+    }
+    setState(() => _isApplying = true);
+    await widget.controller.applyPendingAlbumMatch(pending, selected);
+    if (mounted) {
+      setState(() {
+        _isApplying = false;
+        _activePath = null;
+        _selected = null;
+      });
+    }
+  }
+
+  void _skip(PendingAlbumMatch pending) {
+    widget.controller.skipPendingAlbumMatch(pending);
+    _activePath = null;
+    _selected = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pendingItems = widget.controller.pendingAlbumMatches;
+    if (pendingItems.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.task_alt, color: _accentStrong, size: 42),
+            const SizedBox(height: 10),
+            const Text(
+              '待确认结果已处理完毕',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 14),
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('完成'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final pending = pendingItems.first;
+    _ensureSelection(pending);
+    final height = MediaQuery.sizeOf(context).height * 0.82;
+    return SizedBox(
+      height: height,
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 38,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: _line,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  '待确认专辑 · 剩余 ${pendingItems.length} 首',
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  pending.artist.trim().isEmpty
+                      ? pending.title
+                      : '${pending.artist} · ${pending.title}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _muted),
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: pending.candidates.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final candidate = pending.candidates[index];
+                      final selected = identical(candidate, _selected);
+                      final date = candidate.releaseDate?.trim();
+                      final info = [
+                        candidate.sourceLabel,
+                        candidate.recordingArtist.trim().isEmpty
+                            ? '未知歌手'
+                            : candidate.recordingArtist.trim(),
+                        candidate.recordingTitle,
+                        if (!candidate.releasePreferred) '合辑或非首选发行',
+                        if (!candidate.durationVerified) '未校验时长',
+                        if (date != null && date.isNotEmpty) date,
+                        '置信度 ${candidate.score.round()}',
+                      ].where((value) => value.trim().isNotEmpty).join(' · ');
+                      return ListTile(
+                        selected: selected,
+                        selectedTileColor: _accent.withValues(alpha: 0.12),
+                        leading: Icon(
+                          selected
+                              ? Icons.radio_button_checked
+                              : Icons.radio_button_off,
+                          color: selected ? _accentStrong : _muted,
+                        ),
+                        title: Text(candidate.album),
+                        subtitle: Text(info),
+                        onTap: _isApplying
+                            ? null
+                            : () => setState(() => _selected = candidate),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: _isApplying
+                          ? null
+                          : () => Navigator.pop(context),
+                      child: const Text('稍后处理'),
+                    ),
+                    TextButton(
+                      onPressed: _isApplying ? null : () => _skip(pending),
+                      child: const Text('跳过此首'),
+                    ),
+                    const Spacer(),
+                    FilledButton.icon(
+                      onPressed: _isApplying || _selected == null
+                          ? null
+                          : () => _apply(pending),
+                      icon: _isApplying
+                          ? const SizedBox.square(
+                              dimension: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.check),
+                      label: const Text('确认并继续'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 enum _LibraryTrackAction {
@@ -308,13 +551,19 @@ class _LibraryMoreActions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDeleting = controller.isDeletingDownloadedTrack(track);
+    final isMatching = controller.isMatchingAlbumForTrack(track);
+    final isBusy = isDeleting || isMatching;
     return SizedBox.square(
       dimension: 38,
       child: PopupMenuButton<_LibraryTrackAction>(
-        enabled: !isDeleting,
-        tooltip: isDeleting ? '正在删除歌曲' : '更多',
+        enabled: !isBusy,
+        tooltip: isDeleting
+            ? '正在删除歌曲'
+            : isMatching
+            ? '正在匹配专辑'
+            : '更多',
         padding: EdgeInsets.zero,
-        icon: isDeleting
+        icon: isBusy
             ? const SizedBox.square(
                 dimension: 18,
                 child: CircularProgressIndicator(

@@ -249,6 +249,7 @@ class DownloadedTrack {
     this.album = '',
     this.coverUrl,
     this.coverFilePath,
+    this.durationMs,
   });
 
   final String id;
@@ -261,6 +262,7 @@ class DownloadedTrack {
   final String album;
   final String? coverUrl;
   final String? coverFilePath;
+  final int? durationMs;
 
   DownloadedTrack copyWith({
     String? id,
@@ -273,6 +275,7 @@ class DownloadedTrack {
     String? album,
     String? coverUrl,
     String? coverFilePath,
+    int? durationMs,
   }) {
     return DownloadedTrack(
       id: id ?? this.id,
@@ -285,6 +288,7 @@ class DownloadedTrack {
       album: album ?? this.album,
       coverUrl: coverUrl ?? this.coverUrl,
       coverFilePath: coverFilePath ?? this.coverFilePath,
+      durationMs: durationMs ?? this.durationMs,
     );
   }
 
@@ -311,6 +315,7 @@ class DownloadedTrack {
     'album': album,
     'coverUrl': coverUrl,
     'coverFilePath': coverFilePath,
+    'durationMs': durationMs,
   };
 
   factory DownloadedTrack.fromJson(Map<String, dynamic> json) {
@@ -327,6 +332,7 @@ class DownloadedTrack {
       album: json['album'] as String? ?? '',
       coverUrl: json['coverUrl'] as String?,
       coverFilePath: json['coverFilePath'] as String?,
+      durationMs: (json['durationMs'] as num?)?.toInt(),
     );
   }
 }

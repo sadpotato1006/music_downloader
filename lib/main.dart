@@ -10,6 +10,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'album_metadata_service.dart';
+import 'app_info.dart';
 import 'app_controller.dart';
 import 'app_log.dart';
 import 'desktop_lyrics_service.dart';
@@ -17,6 +18,7 @@ import 'gequbao_source.dart';
 import 'lyric_parser.dart';
 import 'models.dart';
 import 'my_free_mp3_source.dart';
+import 'pending_album_match.dart';
 
 part 'ui/search_download.dart';
 part 'ui/library.dart';
@@ -27,7 +29,6 @@ part 'ui/dialogs.dart';
 part 'ui/diagnostics.dart';
 
 const _accent = Color(0xFF8FD9A8);
-const _appVersion = '1.3.8+24';
 const _appLifecycleChannel = MethodChannel('qingting/app_lifecycle');
 const _accentStrong = Color(0xFF4AA66A);
 const _ink = Color(0xFF1F2A24);
@@ -40,7 +41,7 @@ Map<String, String> _networkImageHeadersFor(String url) {
     'Referer': host.contains('myfreemp3.ink')
         ? 'https://myfreemp3.ink/'
         : 'https://www.gequbao.com/',
-    'User-Agent': 'QingTing/1.3.8 (+personal-use)',
+    'User-Agent': appUserAgent,
   };
 }
 
@@ -94,7 +95,7 @@ Future<void> main() async {
     return true;
   };
   await AppLog.instance.initialize();
-  AppLog.instance.info('app', '青听启动', detail: 'version=$_appVersion');
+  AppLog.instance.info('app', '青听启动', detail: 'version=$appVersion');
   SystemChrome.setSystemUIOverlayStyle(_systemUiOverlayStyle);
   MediaKit.ensureInitialized();
   runApp(const QingTingApp());

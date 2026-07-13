@@ -261,11 +261,28 @@ extension AppControllerSearchActions on AppController {
   }
 
   Future<void> playDownloaded(DownloadedTrack track) async {
-    final item = await _playerItemFromDownloadedTrack(track);
-    if (item == null) {
+    if (!_tryBeginMetadataRead(track.path)) {
+      globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候再播放。';
+      _notify();
       return;
     }
-    await _enqueueAndPlay(item);
+    var startedPlayback = false;
+    try {
+      final item = await _playerItemFromDownloadedTrack(
+        track,
+        metadataReadHeld: true,
+      );
+      if (item == null) {
+        return;
+      }
+      await _enqueueAndPlay(item);
+      startedPlayback = true;
+    } finally {
+      _endMetadataRead(track.path);
+      if (startedPlayback) {
+        unawaited(_captureCurrentTrackDuration());
+      }
+    }
   }
 
   Future<void> queueDownloadedNext(DownloadedTrack track) async {
@@ -274,14 +291,30 @@ extension AppControllerSearchActions on AppController {
     _notify();
 
     try {
-      final item = await _playerItemFromDownloadedTrack(track);
-      if (item == null) {
+      if (!_tryBeginMetadataRead(track.path)) {
+        globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候再加入队列。';
         return;
       }
-      final started = await _enqueueNextOrPlayWhenIdle(item);
-      globalMessage = started
-          ? '已开始播放：${item.title}'
-          : '已加入下一首播放：${item.title}';
+      var startedPlayback = false;
+      try {
+        final item = await _playerItemFromDownloadedTrack(
+          track,
+          metadataReadHeld: true,
+        );
+        if (item == null) {
+          return;
+        }
+        final started = await _enqueueNextOrPlayWhenIdle(item);
+        startedPlayback = started;
+        globalMessage = started
+            ? '已开始播放：${item.title}'
+            : '已加入下一首播放：${item.title}';
+      } finally {
+        _endMetadataRead(track.path);
+        if (startedPlayback) {
+          unawaited(_captureCurrentTrackDuration());
+        }
+      }
     } catch (error) {
       globalMessage = '加入下一首播放失败：${_friendlyUnexpectedError(error)}';
     } finally {

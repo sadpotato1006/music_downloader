@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/album_metadata_service.dart';
 import 'package:qingting/app_controller.dart';
+import 'package:qingting/app_info.dart';
 import 'package:qingting/app_log.dart';
 import 'package:qingting/file_deletion_service.dart';
 import 'package:qingting/id3_lyrics_embedder.dart';
@@ -15,6 +16,7 @@ import 'package:qingting/main.dart' as app;
 import 'package:qingting/models.dart';
 import 'package:qingting/music_source.dart';
 import 'package:qingting/player_service.dart';
+import 'package:qingting/pending_album_match.dart';
 import 'package:qingting/storage_service.dart';
 
 void main() {
@@ -368,6 +370,65 @@ void main() {
     expect(controller.shuffleEnabled, isFalse);
     controller.dispose();
   });
+
+  test(
+    'bootstrap restores valid pending album reviews and removes stale ones',
+    () async {
+      final validTrack = DownloadedTrack(
+        id: 'valid',
+        title: 'Valid Song',
+        artist: 'Artist',
+        path: 'valid.mp3',
+        format: 'mp3',
+        downloadedAt: DateTime(2026, 7, 11),
+        sourceUrl: '',
+      );
+      final completedTrack = DownloadedTrack(
+        id: 'completed',
+        title: 'Completed Song',
+        artist: 'Artist',
+        path: 'completed.mp3',
+        format: 'mp3',
+        downloadedAt: DateTime(2026, 7, 11),
+        sourceUrl: '',
+        album: 'Existing Album',
+      );
+      PendingAlbumMatch pendingFor(DownloadedTrack track) => PendingAlbumMatch(
+        trackId: track.id,
+        trackPath: track.path,
+        title: track.title,
+        artist: track.artist,
+        candidates: const [
+          AlbumMetadataMatch(
+            album: 'Candidate Album',
+            recordingTitle: 'Valid Song',
+            recordingArtist: 'Artist',
+            score: 90,
+          ),
+        ],
+      );
+      final storage = _BootstrapStorageService(
+        tracks: [validTrack, completedTrack],
+        pendingAlbumMatches: [
+          pendingFor(validTrack),
+          pendingFor(completedTrack),
+        ],
+      );
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: _FakePlaybackService(),
+      );
+
+      await controller.bootstrap();
+      await controller.flushPendingWrites();
+
+      expect(controller.pendingAlbumMatches, hasLength(1));
+      expect(controller.pendingAlbumMatches.single.trackId, 'valid');
+      expect(storage.savedPendingAlbumMatches, hasLength(1));
+      controller.dispose();
+    },
+  );
 
   test('bootstrap exposes failure state and can retry', () async {
     final storage = _RetryBootstrapStorageService();
@@ -827,6 +888,7 @@ void main() {
         );
         expect(task.album, 'Apple Album');
         expect(controller.downloadedTracks.single.album, 'Apple Album');
+        expect(controller.downloadedTracks.single.durationMs, 200000);
       } finally {
         controller.dispose();
         await directory.delete(recursive: true);
@@ -927,6 +989,469 @@ void main() {
 
     expect(find.text('主动刷新'), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 400));
+  });
+
+  test(
+    'directory scan imports supported files once and ignores other files',
+    () async {
+      final directory = Directory.systemTemp.createTempSync('qingting-scan-');
+      final first = File(
+        '${directory.path}${Platform.pathSeparator}歌手甲 - 歌曲甲.m4a',
+      )..writeAsBytesSync(const [1, 2, 3]);
+      final nested = Directory(
+        '${directory.path}${Platform.pathSeparator}nested',
+      )..createSync();
+      final second = File(
+        '${nested.path}${Platform.pathSeparator}歌手乙 - 歌曲乙.flac',
+      )..writeAsBytesSync(const [4, 5, 6]);
+      File(
+        '${directory.path}${Platform.pathSeparator}说明.txt',
+      ).writeAsStringSync('ignore');
+      final storage = _FakeStorageService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: _FakePlaybackService(),
+      );
+      controller.settings = AppSettings(downloadDirectory: directory.path);
+      addTearDown(() {
+        controller.dispose();
+        if (directory.existsSync()) {
+          directory.deleteSync(recursive: true);
+        }
+      });
+
+      expect(await controller.scanCurrentDownloadDirectory(), 2);
+      expect(
+        controller.downloadedTracks.map((track) => track.path),
+        containsAll([first.path, second.path]),
+      );
+      expect(storage.savedDownloadedTracks, hasLength(2));
+
+      expect(await controller.scanCurrentDownloadDirectory(), 0);
+      expect(controller.downloadedTracks, hasLength(2));
+    },
+  );
+
+  test(
+    'album scan keeps ambiguous results for review and isolates failures',
+    () async {
+      final directory = Directory.systemTemp.createTempSync('qingting-albums-');
+      final tracks = <DownloadedTrack>[];
+      for (final title in ['自动匹配', '需要确认', '没有结果', '请求失败']) {
+        final file = File(
+          '${directory.path}${Platform.pathSeparator}$title.m4a',
+        )..writeAsBytesSync(const [1, 2, 3]);
+        tracks.add(
+          DownloadedTrack(
+            id: title,
+            title: title,
+            artist: '测试歌手',
+            path: file.path,
+            format: 'm4a',
+            downloadedAt: DateTime(2026, 7, 11),
+            sourceUrl: '',
+            durationMs: 200000,
+          ),
+        );
+      }
+      final storage = _FakeStorageService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: _FakePlaybackService(),
+        albumMetadata: _BatchAlbumMetadataService(),
+      );
+      controller.downloadedTracks = tracks;
+      addTearDown(() {
+        controller.dispose();
+        if (directory.existsSync()) {
+          directory.deleteSync(recursive: true);
+        }
+      });
+
+      expect(await controller.matchMissingDownloadedAlbums(), 1);
+      expect(controller.albumMatchProcessed, 4);
+      expect(controller.albumMatchUpdated, 1);
+      expect(controller.albumMatchNotFound, 1);
+      expect(controller.albumMatchFailed, 1);
+      expect(controller.pendingAlbumMatches, hasLength(1));
+      expect(
+        controller.downloadedTracks
+            .firstWhere((track) => track.id == '自动匹配')
+            .album,
+        '可靠专辑',
+      );
+      expect(
+        controller.downloadedTracks
+            .firstWhere((track) => track.id == '需要确认')
+            .album,
+        isEmpty,
+      );
+      expect(storage.savedDownloadedTracks, hasLength(4));
+      expect(storage.savedPendingAlbumMatches, hasLength(1));
+
+      final pending = controller.pendingAlbumMatches.single;
+      expect(
+        await controller.applyPendingAlbumMatch(
+          pending,
+          pending.candidates.single,
+        ),
+        isTrue,
+      );
+      expect(controller.pendingAlbumMatches, isEmpty);
+      await controller.flushPendingWrites();
+      expect(storage.savedPendingAlbumMatches, isEmpty);
+      expect(
+        controller.downloadedTracks
+            .firstWhere((track) => track.id == '需要确认')
+            .album,
+        '候选专辑',
+      );
+    },
+  );
+
+  test('album scan cancellation stops after the active request', () async {
+    final directory = Directory.systemTemp.createTempSync(
+      'qingting-album-cancel-',
+    );
+    final tracks = <DownloadedTrack>[];
+    for (var index = 0; index < 2; index += 1) {
+      final file = File(
+        '${directory.path}${Platform.pathSeparator}song-$index.m4a',
+      )..writeAsBytesSync(const [1]);
+      tracks.add(
+        DownloadedTrack(
+          id: 'song-$index',
+          title: 'Song $index',
+          artist: 'Artist',
+          path: file.path,
+          format: 'm4a',
+          downloadedAt: DateTime(2026, 7, 11),
+          sourceUrl: '',
+          durationMs: 180000,
+        ),
+      );
+    }
+    final metadata = _ControlledAlbumMetadataService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+      albumMetadata: metadata,
+    );
+    controller.downloadedTracks = tracks;
+    addTearDown(() {
+      controller.dispose();
+      if (directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
+    });
+
+    final matching = controller.matchMissingDownloadedAlbums();
+    await metadata.started.future;
+    controller.cancelAlbumMatching();
+    metadata.release.complete();
+    expect(await matching, 0);
+
+    expect(metadata.calls, 1);
+    expect(controller.albumMatchProcessed, 1);
+    expect(controller.albumMatchUpdated, 0);
+    expect(
+      controller.downloadedTracks.every((track) => track.album.isEmpty),
+      isTrue,
+    );
+    expect(controller.globalMessage, contains('已停止'));
+  });
+
+  test(
+    'flushPendingWrites stops album scan and saves the pending tail',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'qingting-album-flush-',
+      );
+      final tracks = <DownloadedTrack>[];
+      for (var index = 0; index < 2; index += 1) {
+        final file = File(
+          '${directory.path}${Platform.pathSeparator}flush-$index.m4a',
+        )..writeAsBytesSync(const [1]);
+        tracks.add(
+          DownloadedTrack(
+            id: 'flush-$index',
+            title: 'Flush $index',
+            artist: 'Artist',
+            path: file.path,
+            format: 'm4a',
+            downloadedAt: DateTime(2026, 7, 12),
+            sourceUrl: '',
+            durationMs: 180000,
+          ),
+        );
+      }
+      final storage = _FakeStorageService();
+      final metadata = _FlushAwareAlbumMetadataService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: _FakePlaybackService(),
+        albumMetadata: metadata,
+      )..downloadedTracks = tracks;
+      addTearDown(() {
+        controller.dispose();
+        if (directory.existsSync()) {
+          directory.deleteSync(recursive: true);
+        }
+      });
+
+      final matching = controller.matchMissingDownloadedAlbums();
+      await metadata.secondStarted.future;
+      await controller.flushPendingWrites();
+
+      expect(await matching, 0);
+      expect(controller.pendingAlbumMatches, hasLength(1));
+      expect(storage.savedPendingAlbumMatches, hasLength(1));
+      expect(controller.isMatchingLocalAlbums, isFalse);
+    },
+  );
+
+  test('album scan never recreates a record deleted during lookup', () async {
+    final directory = Directory.systemTemp.createTempSync(
+      'qingting-album-stale-',
+    );
+    final file = File('${directory.path}${Platform.pathSeparator}stale.m4a')
+      ..writeAsBytesSync(const [1]);
+    final track = DownloadedTrack(
+      id: 'stale',
+      title: 'Song',
+      artist: 'Artist',
+      path: file.path,
+      format: 'm4a',
+      downloadedAt: DateTime(2026, 7, 11),
+      sourceUrl: '',
+      durationMs: 180000,
+    );
+    final metadata = _ControlledAlbumMetadataService();
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+      albumMetadata: metadata,
+    );
+    controller.downloadedTracks = [track];
+    addTearDown(() {
+      controller.dispose();
+      if (directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
+    });
+
+    final matching = controller.matchMissingDownloadedAlbums();
+    await metadata.started.future;
+    await controller.removeDownloadedRecord(track);
+    metadata.release.complete();
+    expect(await matching, 0);
+
+    expect(controller.downloadedTracks, isEmpty);
+    expect(controller.albumMatchProcessed, 1);
+    expect(controller.albumMatchFailed, 0);
+    expect(controller.pendingAlbumMatches, isEmpty);
+    expect(file.existsSync(), isTrue);
+  });
+
+  test(
+    'single album lookup discards candidates after metadata changes',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'qingting-stale-single-album-',
+      );
+      final file = File('${directory.path}${Platform.pathSeparator}song.m4a')
+        ..writeAsBytesSync(const [1]);
+      final track = DownloadedTrack(
+        id: 'stale-single',
+        title: 'Song',
+        artist: 'Artist',
+        path: file.path,
+        format: 'm4a',
+        downloadedAt: DateTime(2026, 7, 12),
+        sourceUrl: '',
+        durationMs: 180000,
+      );
+      final metadata = _ControlledAlbumMetadataService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+        albumMetadata: metadata,
+      )..downloadedTracks = [track];
+      addTearDown(() {
+        controller.dispose();
+        if (directory.existsSync()) {
+          directory.deleteSync(recursive: true);
+        }
+      });
+
+      final lookup = controller.findDownloadedAlbumCandidates(track);
+      await metadata.started.future;
+      controller.downloadedTracks = [track.copyWith(album: 'Embedded Album')];
+      metadata.release.complete();
+
+      expect(await lookup, isEmpty);
+      expect(controller.downloadedTracks.single.album, 'Embedded Album');
+      expect(controller.globalMessage, contains('歌曲信息已经变化'));
+    },
+  );
+
+  test('playback waits while album metadata is being persisted', () async {
+    final directory = Directory.systemTemp.createTempSync(
+      'qingting-album-playback-lock-',
+    );
+    final file = File('${directory.path}${Platform.pathSeparator}song.m4a')
+      ..writeAsBytesSync(const [1]);
+    final sidecar = File('${directory.path}${Platform.pathSeparator}song.lrc')
+      ..writeAsStringSync('[00:01.00]Locked lyrics');
+    final track = DownloadedTrack(
+      id: 'locked-playback',
+      title: 'Song',
+      artist: 'Artist',
+      path: file.path,
+      format: 'm4a',
+      downloadedAt: DateTime(2026, 7, 12),
+      sourceUrl: '',
+    );
+    final storage = _BlockingDownloadedTracksStorage();
+    final player = _FakePlaybackService();
+    final controller =
+        AppController(
+            source: _FakeMusicSource(),
+            storage: storage,
+            player: player,
+          )
+          ..downloadedTracks = [track]
+          ..pendingAlbumMatches = [
+            PendingAlbumMatch(
+              trackId: track.id,
+              trackPath: track.path,
+              title: track.title,
+              artist: track.artist,
+              candidates: const [
+                AlbumMetadataMatch(
+                  album: 'Album',
+                  recordingTitle: 'Song',
+                  recordingArtist: 'Artist',
+                  score: 90,
+                ),
+              ],
+            ),
+          ];
+    storage.savedPendingAlbumMatches = List<PendingAlbumMatch>.from(
+      controller.pendingAlbumMatches,
+    );
+    addTearDown(() {
+      controller.dispose();
+      if (directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
+    });
+
+    final applying = controller.applyDownloadedAlbumName(track, 'Album');
+    await storage.started.future;
+    await controller.playDownloaded(track);
+
+    expect(player.openedItem, isNull);
+    var lyricsReadCompleted = false;
+    final lyricsRead = controller
+        .readDownloadedLyrics(track)
+        .whenComplete(() => lyricsReadCompleted = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(lyricsReadCompleted, isFalse);
+    expect(controller.globalMessage, contains('请稍候再播放'));
+    storage.release.complete();
+    expect(await applying, isTrue);
+    expect(controller.pendingAlbumMatches, isEmpty);
+    expect(storage.savedPendingAlbumMatches, isEmpty);
+    expect(await lyricsRead, await sidecar.readAsString());
+  });
+
+  test(
+    'playback captures a missing local duration for later album matching',
+    () async {
+      final player = _FakePlaybackService();
+      final storage = _FakeStorageService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: player,
+      );
+      final track = DownloadedTrack(
+        id: 'duration-track',
+        title: 'Duration Song',
+        artist: 'Artist',
+        path: 'C:\\Music\\duration-song.mp3',
+        format: 'mp3',
+        downloadedAt: DateTime(2026, 7, 11),
+        sourceUrl: '',
+      );
+      controller.downloadedTracks = [track];
+      controller.queue = const [
+        PlayerItem(
+          id: 'duration-track',
+          title: 'Duration Song',
+          artist: 'Artist',
+          uri: 'file:///C:/Music/duration-song.mp3',
+          localPath: 'C:\\Music\\duration-song.mp3',
+        ),
+      ];
+      controller.currentQueueIndex = 0;
+      player.duration = const Duration(minutes: 3, seconds: 21);
+      addTearDown(controller.dispose);
+
+      player.onChanged?.call();
+      for (var attempt = 0; attempt < 20; attempt += 1) {
+        if (controller.downloadedTracks.single.durationMs != null &&
+            storage.savedDownloadedTracks.isNotEmpty) {
+          break;
+        }
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(controller.downloadedTracks.single.durationMs, 201000);
+      expect(storage.savedDownloadedTracks.single.durationMs, 201000);
+    },
+  );
+
+  test('album matching can read sidecar lyrics for non-MP3 tracks', () async {
+    final directory = Directory.systemTemp.createTempSync(
+      'qingting-sidecar-lyrics-',
+    );
+    final audio = File('${directory.path}${Platform.pathSeparator}song.flac')
+      ..writeAsBytesSync(const [1]);
+    final lyrics = File('${directory.path}${Platform.pathSeparator}song.lrc')
+      ..writeAsStringSync('[ti:Song]\n[ar:Artist]');
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+    final track = DownloadedTrack(
+      id: 'sidecar',
+      title: 'Song',
+      artist: 'Artist',
+      path: audio.path,
+      format: 'flac',
+      downloadedAt: DateTime(2026, 7, 11),
+      sourceUrl: '',
+    );
+    addTearDown(() {
+      controller.dispose();
+      if (directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
+    });
+
+    expect(
+      await controller.readDownloadedLyrics(track),
+      await lyrics.readAsString(),
+    );
   });
 
   testWidgets('deleting a library record keeps the song file', (tester) async {
@@ -1155,8 +1680,82 @@ void main() {
     await tester.pump();
 
     expect(find.text('诊断与日志'), findsOneWidget);
-    expect(find.text('版本：1.3.8+24'), findsOneWidget);
+    expect(find.text('版本：$appVersion'), findsOneWidget);
     expect(find.text('诊断测试日志'), findsOneWidget);
+  });
+
+  testWidgets('settings reviews and applies pending album candidates', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final directory = Directory.systemTemp.createTempSync(
+      'qingting-album-review-',
+    );
+    final file = File('${directory.path}${Platform.pathSeparator}review.m4a')
+      ..writeAsBytesSync(const [1]);
+    final track = DownloadedTrack(
+      id: 'review',
+      title: '待确认歌曲',
+      artist: '测试歌手',
+      path: file.path,
+      format: 'm4a',
+      downloadedAt: DateTime(2026, 7, 11),
+      sourceUrl: '',
+    );
+    const candidate = AlbumMetadataMatch(
+      album: '人工确认专辑',
+      recordingTitle: '待确认歌曲',
+      recordingArtist: '测试歌手',
+      score: 82,
+    );
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+    controller.settings = AppSettings(downloadDirectory: directory.path);
+    controller.downloadedTracks = [track];
+    controller.pendingAlbumMatches = [
+      PendingAlbumMatch(
+        trackId: track.id,
+        trackPath: track.path,
+        title: track.title,
+        artist: track.artist,
+        candidates: const [candidate],
+      ),
+    ];
+    addTearDown(() {
+      controller.dispose();
+      if (directory.existsSync()) {
+        directory.deleteSync(recursive: true);
+      }
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: app.SettingsPage(controller: controller)),
+      ),
+    );
+    await tester.ensureVisible(find.text('审阅 1 个待确认结果'));
+    await tester.tap(find.text('审阅 1 个待确认结果'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('人工确认专辑'), findsOneWidget);
+    await tester.tap(find.text('确认并继续'));
+    await tester.runAsync(() async {
+      final deadline = DateTime.now().add(const Duration(seconds: 2));
+      while (controller.pendingAlbumMatches.isNotEmpty &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text('待确认结果已处理完毕'), findsOneWidget);
+    expect(controller.downloadedTracks.single.album, '人工确认专辑');
+    await tester.tap(find.text('完成'));
+    await tester.pumpAndSettle();
   });
 }
 
@@ -1240,6 +1839,11 @@ class _FakePlaybackService implements PlaybackService {
 
 class _FakeStorageService extends StorageService {
   List<DownloadedTrack> savedDownloadedTracks = const [];
+  List<PendingAlbumMatch> savedPendingAlbumMatches = const [];
+
+  @override
+  Future<List<PendingAlbumMatch>> loadPendingAlbumMatches() async =>
+      savedPendingAlbumMatches;
 
   @override
   Future<void> saveSettings(AppSettings settings) async {}
@@ -1261,6 +1865,11 @@ class _FakeStorageService extends StorageService {
   Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
     savedDownloadedTracks = List<DownloadedTrack>.from(tracks);
   }
+
+  @override
+  Future<void> savePendingAlbumMatches(List<PendingAlbumMatch> matches) async {
+    savedPendingAlbumMatches = List<PendingAlbumMatch>.from(matches);
+  }
 }
 
 class _FailingQueueStorageService extends _FakeStorageService {
@@ -1271,6 +1880,20 @@ class _FailingQueueStorageService extends _FakeStorageService {
     required bool shuffleEnabled,
   }) {
     throw const FileSystemException('queue storage unavailable');
+  }
+}
+
+class _BlockingDownloadedTracksStorage extends _FakeStorageService {
+  final Completer<void> started = Completer<void>();
+  final Completer<void> release = Completer<void>();
+
+  @override
+  Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
+    if (!started.isCompleted) {
+      started.complete();
+      await release.future;
+    }
+    await super.saveDownloadedTracks(tracks);
   }
 }
 
@@ -1310,10 +1933,14 @@ class _BootstrapStorageService extends _FakeStorageService {
   _BootstrapStorageService({
     this.queue = const SavedPlayerQueue(items: [], currentIndex: -1),
     this.tasks = const [],
+    this.pendingAlbumMatches = const [],
+    this.tracks = const [],
   });
 
   final SavedPlayerQueue queue;
   final List<DownloadTask> tasks;
+  final List<PendingAlbumMatch> pendingAlbumMatches;
+  final List<DownloadedTrack> tracks;
   List<DownloadTask> savedTasks = const [];
 
   @override
@@ -1325,13 +1952,17 @@ class _BootstrapStorageService extends _FakeStorageService {
   Future<MyMusicData> loadMyMusic() async => const MyMusicData();
 
   @override
-  Future<List<DownloadedTrack>> loadDownloadedTracks() async => const [];
+  Future<List<DownloadedTrack>> loadDownloadedTracks() async => tracks;
 
   @override
   Future<SavedPlayerQueue> loadPlayerQueue() async => queue;
 
   @override
   Future<List<DownloadTask>> loadDownloadTasks() async => tasks;
+
+  @override
+  Future<List<PendingAlbumMatch>> loadPendingAlbumMatches() async =>
+      pendingAlbumMatches;
 
   @override
   Future<void> saveDownloadTasks(List<DownloadTask> tasks) async {
@@ -1395,6 +2026,8 @@ class _RecordingAlbumMetadataService extends AlbumMetadataService {
     required String title,
     required String artist,
     String? lyrics,
+    Future<String?> Function()? lyricsLoader,
+    bool Function()? isCancelled,
     Duration? duration,
   }) async {
     calls += 1;
@@ -1407,6 +2040,122 @@ class _RecordingAlbumMetadataService extends AlbumMetadataService {
       recordingId: 'apple:track-1',
       releaseId: 'apple:album-1',
     );
+  }
+}
+
+class _BatchAlbumMetadataService extends AlbumMetadataService {
+  @override
+  Future<List<AlbumMetadataMatch>> findAlbumCandidates({
+    required String title,
+    required String artist,
+    String? lyrics,
+    Future<String?> Function()? lyricsLoader,
+    bool Function()? isCancelled,
+    Duration? duration,
+    int limit = 5,
+  }) async {
+    if (title == '请求失败') {
+      throw StateError('temporary album lookup failure');
+    }
+    if (title == '没有结果') {
+      return const [];
+    }
+    if (title == '需要确认') {
+      return const [
+        AlbumMetadataMatch(
+          album: '候选专辑',
+          recordingTitle: '需要确认',
+          recordingArtist: '测试歌手',
+          score: 82,
+          titleSimilarity: 1,
+          artistSimilarity: 1,
+          durationVerified: true,
+        ),
+      ];
+    }
+    return const [
+      AlbumMetadataMatch(
+        album: '可靠专辑',
+        recordingTitle: '自动匹配',
+        recordingArtist: '测试歌手',
+        score: 95,
+        titleSimilarity: 1,
+        artistSimilarity: 1,
+        durationVerified: true,
+      ),
+    ];
+  }
+}
+
+class _ControlledAlbumMetadataService extends AlbumMetadataService {
+  final Completer<void> started = Completer<void>();
+  final Completer<void> release = Completer<void>();
+  int calls = 0;
+
+  @override
+  Future<List<AlbumMetadataMatch>> findAlbumCandidates({
+    required String title,
+    required String artist,
+    String? lyrics,
+    Future<String?> Function()? lyricsLoader,
+    bool Function()? isCancelled,
+    Duration? duration,
+    int limit = 5,
+  }) async {
+    calls += 1;
+    if (!started.isCompleted) {
+      started.complete();
+    }
+    await release.future;
+    return const [
+      AlbumMetadataMatch(
+        album: 'Album',
+        recordingTitle: 'Song',
+        recordingArtist: 'Artist',
+        score: 95,
+        titleSimilarity: 1,
+        artistSimilarity: 1,
+        durationVerified: true,
+      ),
+    ];
+  }
+}
+
+class _FlushAwareAlbumMetadataService extends AlbumMetadataService {
+  final Completer<void> secondStarted = Completer<void>();
+  int calls = 0;
+
+  @override
+  Future<List<AlbumMetadataMatch>> findAlbumCandidates({
+    required String title,
+    required String artist,
+    String? lyrics,
+    Future<String?> Function()? lyricsLoader,
+    bool Function()? isCancelled,
+    Duration? duration,
+    int limit = 5,
+  }) async {
+    calls += 1;
+    if (calls == 1) {
+      return [
+        AlbumMetadataMatch(
+          album: 'Review Album',
+          recordingTitle: title,
+          recordingArtist: artist,
+          score: 82,
+          titleSimilarity: 1,
+          artistSimilarity: 1,
+          durationVerified: true,
+        ),
+      ];
+    }
+    if (!secondStarted.isCompleted) {
+      secondStarted.complete();
+    }
+    while (!(isCancelled?.call() ?? false)) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    return const [];
   }
 }
 

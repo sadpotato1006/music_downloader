@@ -10,9 +10,9 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("QingTing Setup")]
 [assembly: AssemblyProduct("QingTing")]
 [assembly: AssemblyCompany("Pobb")]
-[assembly: AssemblyVersion("1.3.8.0")]
-[assembly: AssemblyFileVersion("1.3.8.0")]
-[assembly: AssemblyInformationalVersion("1.3.8")]
+[assembly: AssemblyVersion("1.3.10.0")]
+[assembly: AssemblyFileVersion("1.3.10.0")]
+[assembly: AssemblyInformationalVersion("1.3.10")]
 
 namespace QingTingInstaller
 {
@@ -31,7 +31,7 @@ namespace QingTingInstaller
     {
         private const string AppId = "QingTing";
         private const string AppName = "\u9752\u542c";
-        private const string Version = "1.3.8";
+        private const string Version = "1.3.10";
         private const string Publisher = "Pobb";
         private const string InstallMarkerFileName = ".qingting-installation";
 

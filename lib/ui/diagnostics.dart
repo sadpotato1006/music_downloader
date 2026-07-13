@@ -68,7 +68,7 @@ class DiagnosticsPage extends StatelessWidget {
   Future<void> _copyDiagnostics(BuildContext context) async {
     await Clipboard.setData(
       ClipboardData(
-        text: AppLog.instance.diagnosticsText(appVersion: _appVersion),
+        text: AppLog.instance.diagnosticsText(appVersion: appVersion),
       ),
     );
     if (context.mounted) {
@@ -131,7 +131,7 @@ class _DiagnosticSummary extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-            Text('版本：$_appVersion'),
+            Text('版本：$appVersion'),
             const SizedBox(height: 5),
             Text('平台：${Platform.operatingSystem}'),
             const SizedBox(height: 5),

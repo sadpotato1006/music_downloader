@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'android_storage_access.dart';
 import 'android_media_controls_service.dart';
 import 'album_metadata_service.dart';
+import 'app_info.dart';
 import 'app_log.dart';
 import 'async_utils.dart';
 import 'audio_route_service.dart';
@@ -19,6 +20,7 @@ import 'lyrics_service.dart';
 import 'models.dart';
 import 'music_source.dart';
 import 'player_service.dart';
+import 'pending_album_match.dart';
 import 'storage_service.dart';
 
 part 'controller/search_controller.dart';
@@ -78,6 +80,8 @@ class AppController extends ChangeNotifier {
   final Set<String> _pendingDownloadCleanupIds = {};
   final Set<String> _preparingDownloadKeys = {};
   final Set<String> _deletingTrackKeys = {};
+  final Set<String> _metadataWriteKeys = {};
+  final Map<String, int> _metadataReadCounts = {};
   static const _sourceRequestGap = Duration(seconds: 2);
   static const _cooldown520 = Duration(minutes: 3);
   static const _cooldown403 = Duration(minutes: 10);
@@ -100,8 +104,12 @@ class AppController extends ChangeNotifier {
   Future<void> _downloadedTracksSaveQueue = Future<void>.value();
   Future<void> _myMusicSaveQueue = Future<void>.value();
   Future<void> _downloadTasksSaveQueue = Future<void>.value();
+  Future<void> _pendingAlbumMatchesSaveQueue = Future<void>.value();
   Future<void>? _playNextOperation;
   Future<void>? _playbackCompletionOperation;
+  Future<void>? _durationCaptureOperation;
+  bool _durationCaptureRetryRequested = false;
+  Future<void>? _albumMatchCompletion;
 
   String searchQuery = '';
   bool isSearching = false;
@@ -126,7 +134,15 @@ class AppController extends ChangeNotifier {
   bool lastDirectoryNeedsAllFilesAccess = false;
   bool isScanningDownloadDirectory = false;
   bool isMatchingLocalAlbums = false;
-  String? matchingAlbumTrackId;
+  String? matchingAlbumTrackPath;
+  String? matchingAlbumTrackTitle;
+  int albumMatchProcessed = 0;
+  int albumMatchTotal = 0;
+  int albumMatchUpdated = 0;
+  int albumMatchNotFound = 0;
+  int albumMatchFailed = 0;
+  bool _albumMatchCancelRequested = false;
+  List<PendingAlbumMatch> pendingAlbumMatches = const [];
   String libraryQuery = '';
   LibrarySortMode librarySortMode = LibrarySortMode.downloadedAtDesc;
   final Map<String, String> _libraryLyricsSearchCache = {};
@@ -301,27 +317,31 @@ class AppController extends ChangeNotifier {
       if (_isDisposed) {
         return;
       }
-      myMusic = await storage.loadMyMusic();
-      if (_isDisposed) {
-        return;
-      }
       await player.setVolume(settings!.volume.clamp(0, 100).toDouble());
       if (_isDisposed) {
         return;
       }
-      downloadedTracks = await storage.loadDownloadedTracks();
+      final restoredData = await Future.wait<Object>([
+        storage.loadMyMusic(),
+        storage.loadDownloadedTracks(),
+        storage.loadDownloadTasks(),
+        storage.loadPlayerQueue(),
+        storage.loadPendingAlbumMatches(),
+      ]);
       if (_isDisposed) {
         return;
       }
-      downloadTasks = await storage.loadDownloadTasks();
-      if (_isDisposed) {
-        return;
-      }
+      myMusic = restoredData[0] as MyMusicData;
+      downloadedTracks = restoredData[1] as List<DownloadedTrack>;
+      downloadTasks = restoredData[2] as List<DownloadTask>;
+      final savedQueue = restoredData[3] as SavedPlayerQueue;
+      final restoredPendingMatches = restoredData[4] as List<PendingAlbumMatch>;
+      pendingAlbumMatches = _validRestoredPendingAlbumMatches(
+        restoredPendingMatches,
+      );
+      final removedStalePendingMatches =
+          pendingAlbumMatches.length != restoredPendingMatches.length;
       await _restoreDownloadTasks();
-      if (_isDisposed) {
-        return;
-      }
-      final savedQueue = await storage.loadPlayerQueue();
       if (_isDisposed) {
         return;
       }
@@ -336,9 +356,13 @@ class AppController extends ChangeNotifier {
         '应用数据加载完成',
         detail:
             'tracks=${downloadedTracks.length}, queue=${queue.length}, '
-            'downloads=${downloadTasks.length}',
+            'downloads=${downloadTasks.length}, '
+            'pendingAlbums=${pendingAlbumMatches.length}',
       );
       _notify();
+      if (removedStalePendingMatches) {
+        unawaited(_savePendingAlbumMatchesBestEffort());
+      }
       unawaited(_syncAndroidMediaControls(force: true));
       unawaited(_hydrateDownloadedTracksInBackground());
       _scheduleDownloads();
@@ -362,6 +386,20 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> flushPendingWrites() async {
+    final albumMatchCompletion = _albumMatchCompletion;
+    if (albumMatchCompletion != null) {
+      _albumMatchCancelRequested = true;
+      try {
+        await albumMatchCompletion;
+      } catch (error, stackTrace) {
+        AppLog.instance.error(
+          'storage',
+          '退出前停止专辑匹配失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
     try {
       await _flushPendingSettings();
     } catch (error, stackTrace) {
@@ -377,6 +415,7 @@ class AppController extends ChangeNotifier {
       _downloadedTracksSaveQueue,
       _myMusicSaveQueue,
       _downloadTasksSaveQueue,
+      _pendingAlbumMatchesSaveQueue,
     ];
     for (final write in pendingWrites) {
       try {
@@ -394,6 +433,7 @@ class AppController extends ChangeNotifier {
   }
 
   void _handlePlayerChanged() {
+    unawaited(_captureCurrentTrackDuration());
     unawaited(_syncAndroidMediaControls());
     _notify();
   }
@@ -492,6 +532,7 @@ class AppController extends ChangeNotifier {
     unawaited(_persistDownloadTasksBestEffort());
     unawaited(flushPendingWrites());
     _isDisposed = true;
+    _albumMatchCancelRequested = true;
     for (final token in _cancelTokens.values) {
       token.cancel('disposed');
     }

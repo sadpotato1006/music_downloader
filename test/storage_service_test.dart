@@ -1,7 +1,9 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qingting/album_metadata_service.dart';
 import 'package:qingting/models.dart';
+import 'package:qingting/pending_album_match.dart';
 import 'package:qingting/storage_service.dart';
 
 void main() {
@@ -21,6 +23,7 @@ void main() {
         format: 'mp3',
         downloadedAt: DateTime.fromMillisecondsSinceEpoch(1700000000000),
         sourceUrl: 'https://example.test/first',
+        durationMs: 201000,
       );
       final secondTrack = DownloadedTrack(
         id: 'second',
@@ -94,6 +97,7 @@ void main() {
 
         expect(settings.downloadDirectory, 'first-directory');
         expect(tracks.single.id, 'first');
+        expect(tracks.single.durationMs, 201000);
         expect(myMusic.favoriteTrackPaths, ['first.mp3']);
         expect(queue.items.single.id, 'first');
         expect(queue.shuffleEnabled, isFalse);
@@ -149,6 +153,47 @@ void main() {
       expect(restored.resumeValidator, '"etag-1"');
       expect(restored.candidate.headers['Referer'], 'https://example.test/');
       expect(restored.album, 'Album');
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('pending album candidates persist all review evidence', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-pending-album-storage-',
+    );
+    final storage = StorageService(supportDirectory: directory);
+    final pending = PendingAlbumMatch(
+      trackId: 'track-1',
+      trackPath: 'song.mp3',
+      title: 'Song',
+      artist: 'Artist',
+      candidates: const [
+        AlbumMetadataMatch(
+          album: 'Album',
+          recordingTitle: 'Song',
+          recordingArtist: 'Artist',
+          score: 91.5,
+          recordingId: 'apple:1',
+          releaseId: 'apple:2',
+          releaseDate: '2020-01-01',
+          titleSimilarity: 0.98,
+          artistSimilarity: 0.97,
+          durationVerified: true,
+          hasCrossSourceAgreement: true,
+        ),
+      ],
+    );
+
+    try {
+      await storage.savePendingAlbumMatches([pending]);
+      final restored = (await storage.loadPendingAlbumMatches()).single;
+
+      expect(restored.trackPath, pending.trackPath);
+      expect(restored.candidates.single.album, 'Album');
+      expect(restored.candidates.single.score, 91.5);
+      expect(restored.candidates.single.durationVerified, isTrue);
+      expect(restored.candidates.single.hasCrossSourceAgreement, isTrue);
     } finally {
       await directory.delete(recursive: true);
     }

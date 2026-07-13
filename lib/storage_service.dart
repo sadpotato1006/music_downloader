@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'id3_lyrics_embedder.dart';
 import 'app_log.dart';
 import 'models.dart';
+import 'pending_album_match.dart';
 
 class StorageService {
   StorageService({Directory? supportDirectory})
@@ -17,6 +18,7 @@ class StorageService {
   static const _queueFileName = 'queue.json';
   static const _myMusicFileName = 'my_music.json';
   static const _downloadTasksFileName = 'download_tasks.json';
+  static const _pendingAlbumMatchesFileName = 'pending_album_matches.json';
 
   final Directory? _supportDirectoryOverride;
   final Map<String, Future<void>> _writeQueues = {};
@@ -139,6 +141,37 @@ class StorageService {
     await _saveJson(
       _downloadTasksFileName,
       tasks.map((task) => task.toJson()).toList(),
+    );
+  }
+
+  Future<List<PendingAlbumMatch>> loadPendingAlbumMatches() async {
+    final file = await _supportFile(_pendingAlbumMatchesFileName);
+    if (!await file.exists() && !await _backupFile(file).exists()) {
+      return const [];
+    }
+    return await _loadJsonWithBackup(
+          _pendingAlbumMatchesFileName,
+          (json) => (json as List<dynamic>)
+              .whereType<Map>()
+              .map(
+                (item) =>
+                    PendingAlbumMatch.fromJson(Map<String, dynamic>.from(item)),
+              )
+              .where(
+                (item) =>
+                    item.trackPath.trim().isNotEmpty &&
+                    item.title.trim().isNotEmpty &&
+                    item.candidates.isNotEmpty,
+              )
+              .toList(),
+        ) ??
+        const [];
+  }
+
+  Future<void> savePendingAlbumMatches(List<PendingAlbumMatch> matches) async {
+    await _saveJson(
+      _pendingAlbumMatchesFileName,
+      matches.map((match) => match.toJson()).toList(),
     );
   }
 

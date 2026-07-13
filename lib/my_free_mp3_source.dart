@@ -7,6 +7,7 @@ import 'package:html/parser.dart' as html_parser;
 
 import 'models.dart';
 import 'music_source.dart';
+import 'app_info.dart';
 
 class MyFreeMp3Source
     implements MusicSource, DownloadMusicSource, DeferredDownloadMusicSource {
@@ -400,7 +401,7 @@ class MyFreeMp3Source
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
       'Origin': _originFor(_siteUri),
       'Referer': _siteUri.toString(),
-      'User-Agent': 'QingTing/1.3.8 (+personal-use)',
+      'User-Agent': appUserAgent,
       'X-Requested-With': 'XMLHttpRequest',
     };
   }
@@ -411,7 +412,7 @@ class MyFreeMp3Source
       'Referer': _downloadUri
           .resolve('/download/ui/$ownerId/$trackId')
           .toString(),
-      'User-Agent': 'QingTing/1.3.8 (+personal-use)',
+      'User-Agent': appUserAgent,
     };
   }
 

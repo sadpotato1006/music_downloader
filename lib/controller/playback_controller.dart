@@ -40,19 +40,39 @@ extension AppControllerPlaybackActions on AppController {
     if (index < 0 || index >= queue.length) {
       return;
     }
-    final item = await _hydrateQueueItemForPlayback(queue[index]);
-    if (item.id != queue[index].id ||
-        item.lyrics != queue[index].lyrics ||
-        item.album != queue[index].album ||
-        item.coverFilePath != queue[index].coverFilePath) {
-      queue[index] = item;
+    final localPath = queue[index].localPath;
+    final acquiredRead = localPath == null || _tryBeginMetadataRead(localPath);
+    if (!acquiredRead) {
+      globalMessage = '正在更新“${queue[index].title}”的歌曲信息，请稍候再播放。';
+      _notify();
+      return;
     }
-    currentQueueIndex = index;
-    _notify();
-    unawaited(_syncAndroidMediaControls(force: true));
-    await player.open(item);
-    await _saveQueueStateAfterPlaybackStarts();
-    await _recordRecentPlayback(item);
+    var didOpen = false;
+    try {
+      final item = await _hydrateQueueItemForPlayback(queue[index]);
+      if (item.id != queue[index].id ||
+          item.lyrics != queue[index].lyrics ||
+          item.album != queue[index].album ||
+          item.coverFilePath != queue[index].coverFilePath) {
+        queue[index] = item;
+      }
+      currentQueueIndex = index;
+      _notify();
+      unawaited(_syncAndroidMediaControls(force: true));
+      await player.open(item);
+      didOpen = true;
+      await _saveQueueStateAfterPlaybackStarts();
+      await _recordRecentPlayback(item);
+    } finally {
+      if (localPath != null) {
+        _endMetadataRead(localPath);
+      }
+      if (didOpen &&
+          localPath != null &&
+          !_metadataReadInProgress(_trackPathKey(localPath))) {
+        unawaited(_captureCurrentTrackDuration());
+      }
+    }
   }
 
   Future<void> playNext() {

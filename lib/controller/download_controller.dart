@@ -891,11 +891,11 @@ extension AppControllerDownloadActions on AppController {
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Referer': referer,
-        'User-Agent': 'QingTing/1.3.8 (+personal-use)',
+        'User-Agent': appUserAgent,
       },
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'User-Agent': 'QingTing/1.3.8 (+personal-use)',
+        'User-Agent': appUserAgent,
       },
     ]) {
       try {

@@ -6,6 +6,7 @@ import 'package:html/parser.dart' as html_parser;
 
 import 'models.dart';
 import 'music_source.dart';
+import 'app_info.dart';
 
 class GequbaoSource implements MusicSource {
   GequbaoSource({Dio? dio, Uri? baseUri})
@@ -197,7 +198,9 @@ class GequbaoSource implements MusicSource {
       'Referer': referer ?? 'https://www.gequbao.com/',
       'Upgrade-Insecure-Requests': '1',
       'User-Agent':
-          'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 QingTing/1.3.8',
+          'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 '
+          '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 '
+          '$appUserAgent',
     };
   }
 
