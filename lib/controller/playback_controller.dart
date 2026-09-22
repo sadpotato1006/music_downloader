@@ -1,5 +1,7 @@
 part of '../app_controller.dart';
 
+const _seekEndGuard = Duration(milliseconds: 250);
+
 extension AppControllerPlaybackActions on AppController {
   Future<void> playDownloadedCollection(
     Iterable<DownloadedTrack> tracks, {
@@ -11,6 +13,8 @@ extension AppControllerPlaybackActions on AppController {
       _notify();
       return;
     }
+    if (_isDisposed) return;
+    final generation = _beginPlaybackRequest();
     if (shuffle) {
       ordered.shuffle(_shuffleRandom);
     }
@@ -25,6 +29,7 @@ extension AppControllerPlaybackActions on AppController {
       maxConcurrent: 8,
     );
     final items = resolvedItems.whereType<PlayerItem>().toList();
+    if (!_canCommitPlaybackRequest(generation)) return;
     if (items.isEmpty) {
       globalMessage = '没有可播放的歌曲，请检查本地文件是否存在';
       _notify();
@@ -33,14 +38,32 @@ extension AppControllerPlaybackActions on AppController {
     queue = items;
     currentQueueIndex = 0;
     shuffleEnabled = shuffle;
-    await playQueueAt(0);
+    await _playQueueAt(0, generation);
   }
 
   Future<void> playQueueAt(int index) async {
-    if (index < 0 || index >= queue.length) {
+    if (_isDisposed || index < 0 || index >= queue.length) {
       return;
     }
-    final localPath = queue[index].localPath;
+    await _playQueueAt(index, _beginPlaybackRequest());
+  }
+
+  int _beginPlaybackRequest() {
+    resolvingPlayId = null;
+    return ++_playbackRequestGeneration;
+  }
+
+  bool _canCommitPlaybackRequest(int generation) =>
+      !_isDisposed && generation == _playbackRequestGeneration;
+
+  Future<void> _playQueueAt(int index, int generation) async {
+    if (!_canCommitPlaybackRequest(generation) ||
+        index < 0 ||
+        index >= queue.length) {
+      return;
+    }
+    final requestedItem = queue[index];
+    final localPath = requestedItem.localPath;
     final acquiredRead = localPath == null || _tryBeginMetadataRead(localPath);
     if (!acquiredRead) {
       globalMessage = '正在更新“${queue[index].title}”的歌曲信息，请稍候再播放。';
@@ -49,19 +72,40 @@ extension AppControllerPlaybackActions on AppController {
     }
     var didOpen = false;
     try {
-      final item = await _hydrateQueueItemForPlayback(queue[index]);
-      if (item.id != queue[index].id ||
-          item.lyrics != queue[index].lyrics ||
-          item.album != queue[index].album ||
-          item.coverFilePath != queue[index].coverFilePath) {
-        queue[index] = item;
+      final hydrated = await _hydrateQueueItemForPlayback(requestedItem);
+      if (_isDisposed || generation != _playbackRequestGeneration) {
+        return;
       }
-      currentQueueIndex = index;
+      // The queue may have moved, removed or updated this item during I/O.
+      final targetIndex = queue.indexWhere(
+        (item) => item.id == requestedItem.id && item.uri == requestedItem.uri,
+      );
+      if (targetIndex < 0) return;
+      final latestItem = queue[targetIndex];
+      final item = identical(latestItem, requestedItem)
+          ? hydrated
+          : latestItem.copyWith(
+              lyrics: (latestItem.lyrics?.trim().isEmpty ?? true)
+                  ? hydrated.lyrics
+                  : latestItem.lyrics,
+              album: latestItem.album.trim().isEmpty
+                  ? hydrated.album
+                  : latestItem.album,
+            );
+      if (!identical(latestItem, item)) {
+        queue = List<PlayerItem>.from(queue)..[targetIndex] = item;
+      }
+      currentQueueIndex = targetIndex;
       _notify();
       unawaited(_syncAndroidMediaControls(force: true));
-      await player.open(item);
-      didOpen = true;
+      await _runPlaybackMutation(() async {
+        if (!_isCurrentPlaybackRequest(generation, item)) return;
+        await player.open(item);
+        didOpen = _isCurrentPlaybackRequest(generation, item);
+      });
+      if (!didOpen || !_isCurrentPlaybackRequest(generation, item)) return;
       await _saveQueueStateAfterPlaybackStarts();
+      if (!_isCurrentPlaybackRequest(generation, item)) return;
       await _recordRecentPlayback(item);
     } finally {
       if (localPath != null) {
@@ -73,6 +117,31 @@ extension AppControllerPlaybackActions on AppController {
         unawaited(_captureCurrentTrackDuration());
       }
     }
+  }
+
+  bool _isCurrentPlaybackRequest(int generation, PlayerItem item) =>
+      !_isDisposed &&
+      generation == _playbackRequestGeneration &&
+      currentItem?.id == item.id &&
+      currentItem?.uri == item.uri;
+
+  Future<void> _runPlaybackMutation(Future<void> Function() action) {
+    final previous = _playbackMutationQueue;
+    final operation = () async {
+      try {
+        await previous;
+      } catch (_) {
+        // A failed open must not prevent a later stop or selection.
+      }
+      if (!_isDisposed) await action();
+    }();
+    _playbackMutationQueue = operation;
+    return operation;
+  }
+
+  Future<void> _stopPlayback() {
+    _beginPlaybackRequest();
+    return _runPlaybackMutation(player.stop);
   }
 
   Future<void> playNext() {
@@ -176,7 +245,46 @@ extension AppControllerPlaybackActions on AppController {
     }
   }
 
-  Future<void> seekTo(Duration value) => player.seek(value);
+  Duration get maximumSeekPosition {
+    final duration = player.duration;
+    if (duration <= Duration.zero) {
+      return Duration.zero;
+    }
+    if (duration <= _seekEndGuard) {
+      return Duration.zero;
+    }
+    return duration - _seekEndGuard;
+  }
+
+  Future<void> seekTo(Duration value) {
+    final duration = player.duration;
+    final lowerBounded = value < Duration.zero ? Duration.zero : value;
+    if (duration <= Duration.zero) {
+      return player.seek(lowerBounded);
+    }
+    final upperBound = maximumSeekPosition;
+    return player.seek(lowerBounded > upperBound ? upperBound : lowerBounded);
+  }
+
+  Future<bool> seekToLyricLine(
+    PlayerItem expectedItem,
+    Duration? timestamp,
+  ) async {
+    final item = currentItem;
+    final duration = player.duration;
+    if (item == null ||
+        item.id != expectedItem.id ||
+        item.uri != expectedItem.uri ||
+        !player.isOpened(item) ||
+        timestamp == null ||
+        duration <= Duration.zero ||
+        timestamp < Duration.zero ||
+        timestamp >= duration) {
+      return false;
+    }
+    await player.seek(timestamp);
+    return true;
+  }
 
   Future<void> setVolume(double value) async {
     final normalized = value.clamp(0, 100).toDouble();
@@ -305,7 +413,7 @@ extension AppControllerPlaybackActions on AppController {
     ];
     if (queue.isEmpty) {
       currentQueueIndex = -1;
-      await player.stop();
+      await _stopPlayback();
     } else if (index < currentQueueIndex) {
       currentQueueIndex -= 1;
     } else if (removingCurrent) {
@@ -375,7 +483,7 @@ extension AppControllerPlaybackActions on AppController {
   Future<void> clearQueue() async {
     queue = [];
     currentQueueIndex = -1;
-    await player.stop();
+    await _stopPlayback();
     await _saveQueueState();
     unawaited(_syncAndroidMediaControls(force: true));
     _notify();
@@ -391,16 +499,21 @@ extension AppControllerPlaybackActions on AppController {
     _notify();
   }
 
-  Future<void> _enqueueAndPlay(PlayerItem item) async {
+  Future<void> _enqueueAndPlay(
+    PlayerItem item, {
+    int? requestGeneration,
+  }) async {
+    final generation = requestGeneration ?? _beginPlaybackRequest();
+    if (!_canCommitPlaybackRequest(generation)) return;
     final existingIndex = queue.indexWhere((queued) => queued.id == item.id);
     if (existingIndex >= 0) {
-      queue[existingIndex] = item;
-      await playQueueAt(existingIndex);
+      queue = List<PlayerItem>.from(queue)..[existingIndex] = item;
+      await _playQueueAt(existingIndex, generation);
       return;
     }
 
     queue = [...queue, item];
-    await playQueueAt(queue.length - 1);
+    await _playQueueAt(queue.length - 1, generation);
   }
 
   Future<void> _enqueueNext(PlayerItem item) async {
@@ -477,24 +590,19 @@ extension AppControllerPlaybackActions on AppController {
 
   Future<PlayerItem> _resolveSearchResultPlayerItem(
     TrackSearchResult result,
-    String action,
-  ) async {
+    String action, {
+    bool Function()? shouldRun,
+  }) async {
     final requestSource = _sourceForName(result.source);
-    final detail = await _runSourceRequest(
-      action,
-      () => requestSource.loadDetail(result),
-    );
-    final candidatesFuture = requestSource.resolveCandidates(detail);
-    final lyricsFuture = _lyricsForTrack(
-      existingLyrics: detail.lyrics,
-      title: detail.title,
-      artist: detail.artist,
-      durationText: result.duration,
-    );
-    final candidate = _pickPreferredCandidate(
-      await candidatesFuture,
-      allowNonMp3: true,
-    );
+    final (detail, candidates) = await _runSourceRequest(action, () async {
+      final detail = await requestSource.loadDetail(result);
+      if (shouldRun != null && !shouldRun()) {
+        throw const _ObsoleteSourceRequest();
+      }
+      final candidates = await requestSource.resolveCandidates(detail);
+      return (detail, candidates);
+    }, shouldRun: shouldRun);
+    final candidate = _pickPreferredCandidate(candidates, allowNonMp3: true);
     if (candidate == null) {
       throw const MusicSourceException('这个歌曲页面没有找到可播放的公开音频链接。');
     }
@@ -505,16 +613,52 @@ extension AppControllerPlaybackActions on AppController {
       uri: candidate.url,
       headers: candidate.headers,
       coverUrl: detail.coverUrl ?? result.coverUrl,
-      lyrics: await lyricsFuture,
+      lyrics: detail.lyrics,
       album: detail.album,
     );
   }
 
+  Future<void> _loadOnlineLyrics(
+    PlayerItem item, {
+    String? durationText,
+    int? playbackGeneration,
+  }) async {
+    if (_isDisposed || (item.lyrics?.trim().isNotEmpty ?? false)) return;
+    try {
+      final lyrics = await _lyricsForTrack(
+        existingLyrics: item.lyrics,
+        title: item.title,
+        artist: item.artist,
+        durationText: durationText,
+      );
+      if (_isDisposed || lyrics == null || lyrics.trim().isEmpty) return;
+      if (playbackGeneration != null &&
+          !_isCurrentPlaybackRequest(playbackGeneration, item)) {
+        return;
+      }
+      // Identity also rejects a removed and re-added item with the same URL.
+      final index = queue.indexWhere((queued) => identical(queued, item));
+      if (index < 0) return;
+      queue = List<PlayerItem>.from(queue)
+        ..[index] = item.copyWith(lyrics: lyrics);
+      _notify();
+      unawaited(_syncAndroidMediaControls(force: true));
+      await _saveQueueState();
+    } catch (error, stackTrace) {
+      AppLog.instance.warning(
+        'lyrics',
+        '后台补全在线歌词失败',
+        detail: '$error\n$stackTrace',
+      );
+    }
+  }
+
   Future<void> _saveQueueState() {
-    return storage.savePlayerQueue(
-      queue,
-      currentQueueIndex,
-      shuffleEnabled: shuffleEnabled,
+    final items = List<PlayerItem>.unmodifiable(queue);
+    final index = currentQueueIndex;
+    final shuffle = shuffleEnabled;
+    return _playerQueueSaveQueue.enqueue(
+      () => storage.savePlayerQueue(items, index, shuffleEnabled: shuffle),
     );
   }
 

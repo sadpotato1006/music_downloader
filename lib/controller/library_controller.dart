@@ -317,7 +317,7 @@ extension AppControllerLibraryActions on AppController {
     var fileExisted = false;
     try {
       if (deletingCurrentItem) {
-        await player.stop();
+        await _stopPlayback();
       }
       fileExisted = await fileDeletionService.deleteFile(track.path);
     } catch (error) {
@@ -469,6 +469,15 @@ extension AppControllerLibraryActions on AppController {
     return failures;
   }
 
+  Set<String> _unfinishedDownloadPaths() => {
+    for (final task in downloadTasks)
+      if (task.status != DownloadStatus.completed ||
+          _runningDownloadIds.contains(task.id) ||
+          _pendingDownloadCleanupIds.contains(task.id))
+        _trackPathKey(task.savePath),
+    for (final path in _reservedDownloadSavePaths) _trackPathKey(path),
+  };
+
   Future<int> scanCurrentDownloadDirectory() async {
     final activeSettings = settings;
     if (activeSettings == null || isScanningDownloadDirectory) {
@@ -489,6 +498,7 @@ extension AppControllerLibraryActions on AppController {
       final knownPaths = {
         for (final track in downloadedTracks) _trackPathKey(track.path): track,
       };
+      final unfinishedPaths = _unfinishedDownloadPaths();
       final newAudioFiles = <({File file, String format})>[];
 
       await for (final entity in directory.list(
@@ -505,7 +515,8 @@ extension AppControllerLibraryActions on AppController {
         }
 
         final normalizedPath = _trackPathKey(entity.path);
-        if (knownPaths.containsKey(normalizedPath)) {
+        if (knownPaths.containsKey(normalizedPath) ||
+            unfinishedPaths.contains(normalizedPath)) {
           continue;
         }
         newAudioFiles.add((file: entity, format: format));
@@ -537,18 +548,20 @@ extension AppControllerLibraryActions on AppController {
           return null;
         }
       }, maxConcurrent: 4);
-      final imported = parsed.whereType<DownloadedTrack>().toList();
+      // Downloads can start or finish while metadata is being read. Recheck
+      // before committing, and never replace a record added by a download.
+      final excludedPaths = {
+        ...unfinishedPaths,
+        ..._unfinishedDownloadPaths(),
+        for (final track in downloadedTracks) _trackPathKey(track.path),
+      };
+      final imported = parsed
+          .whereType<DownloadedTrack>()
+          .where((track) => !excludedPaths.contains(_trackPathKey(track.path)))
+          .toList();
 
       if (imported.isNotEmpty) {
-        final importedPaths = {
-          for (final item in imported) _trackPathKey(item.path),
-        };
-        downloadedTracks = [
-          ...imported,
-          ...downloadedTracks.where(
-            (track) => !importedPaths.contains(_trackPathKey(track.path)),
-          ),
-        ];
+        downloadedTracks = [...imported, ...downloadedTracks];
         await _saveDownloadedTracks();
         if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
           unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
@@ -663,7 +676,7 @@ extension AppControllerLibraryActions on AppController {
           title: trimmedTitle,
           artist: trimmedArtist,
           album: trimmedAlbum,
-          lyrics: trimmedLyrics.isEmpty ? null : trimmedLyrics,
+          lyrics: trimmedLyrics,
           cover: existingCover,
         );
         coverFilePath = await storage.cacheEmbeddedCover(
@@ -1117,13 +1130,7 @@ extension AppControllerLibraryActions on AppController {
   }
 
   DownloadedTrack? _downloadedTrackByPath(String path) {
-    final pathKey = _trackPathKey(path);
-    for (final track in downloadedTracks) {
-      if (_trackPathKey(track.path) == pathKey) {
-        return track;
-      }
-    }
-    return null;
+    return _downloadedTracksByPath[_trackPathKey(path)];
   }
 
   bool _isTrackLoadedInPlayer(String path) {
@@ -1383,7 +1390,7 @@ extension AppControllerLibraryActions on AppController {
       return;
     }
     final key = _trackPathKey(localPath);
-    if (!downloadedTracks.any((track) => _trackPathKey(track.path) == key)) {
+    if (!_downloadedTracksByPath.containsKey(key)) {
       return;
     }
     final updated = <RecentPlayback>[
@@ -1432,47 +1439,21 @@ extension AppControllerLibraryActions on AppController {
         myMusic.recentPlaybacks,
       ),
     );
-    final previousSave = _myMusicSaveQueue;
-    final operation = () async {
-      try {
-        await previousSave;
-      } catch (_) {
-        // A failed save must not prevent newer collection state from saving.
-      }
-      await storage.saveMyMusic(snapshot);
-    }();
-    _myMusicSaveQueue = operation;
-    return operation;
+    return _myMusicSaveQueue.enqueue(() => storage.saveMyMusic(snapshot));
   }
 
   Future<void> _saveDownloadedTracks() {
     final snapshot = List<DownloadedTrack>.unmodifiable(downloadedTracks);
-    final previousSave = _downloadedTracksSaveQueue;
-    final operation = () async {
-      try {
-        await previousSave;
-      } catch (_) {
-        // A failed save must not prevent newer library state from persisting.
-      }
-      await storage.saveDownloadedTracks(snapshot);
-    }();
-    _downloadedTracksSaveQueue = operation;
-    return operation;
+    return _downloadedTracksSaveQueue.enqueue(
+      () => storage.saveDownloadedTracks(snapshot),
+    );
   }
 
   Future<void> _savePendingAlbumMatches() {
     final snapshot = List<PendingAlbumMatch>.unmodifiable(pendingAlbumMatches);
-    final previousSave = _pendingAlbumMatchesSaveQueue;
-    final operation = () async {
-      try {
-        await previousSave;
-      } catch (_) {
-        // A failed save must not prevent the latest review queue from saving.
-      }
-      await storage.savePendingAlbumMatches(snapshot);
-    }();
-    _pendingAlbumMatchesSaveQueue = operation;
-    return operation;
+    return _pendingAlbumMatchesSaveQueue.enqueue(
+      () => storage.savePendingAlbumMatches(snapshot),
+    );
   }
 
   Future<void> _savePendingAlbumMatchesBestEffort() async {
@@ -1532,31 +1513,46 @@ extension AppControllerLibraryActions on AppController {
 
   Future<void> _hydrateDownloadedTracksInBackground() async {
     await Future<void>.delayed(const Duration(milliseconds: 200));
-    var pendingChanges = 0;
-    var hasChanges = false;
-
-    await mapWithConcurrency(List<DownloadedTrack>.from(downloadedTracks), (
-      track,
-    ) async {
-      if (_isDisposed) {
-        return false;
-      }
-      final changed = await _hydrateDownloadedTrack(track);
-      if (changed) {
-        pendingChanges += 1;
-        hasChanges = true;
-      }
-      if (pendingChanges >= 8) {
-        if (!_isDisposed) {
-          _notify();
+    if (_isDisposed) return;
+    final hydrated = await mapWithConcurrency(
+      List<DownloadedTrack>.from(downloadedTracks),
+      (track) async {
+        if (_isDisposed) {
+          return null;
         }
-        pendingChanges = 0;
-      }
-      await Future<void>.delayed(Duration.zero);
-      return changed;
-    }, maxConcurrent: 3);
+        final result = await _hydrateDownloadedTrack(track);
+        await Future<void>.delayed(Duration.zero);
+        return result;
+      },
+      maxConcurrent: 3,
+    );
 
-    if (hasChanges) {
+    if (_isDisposed) return;
+    final updates = {
+      for (final result in hydrated.whereType<_HydratedTrack>())
+        _trackPathKey(result.original.path): result,
+    };
+    final changedPaths = <String>{};
+    // Merge once against the live collection. Edits, removals and reimports
+    // during I/O take precedence over a background snapshot.
+    final merged = downloadedTracks.map((track) {
+      final key = _trackPathKey(track.path);
+      final result = updates[key];
+      if (result == null || !identical(track, result.original)) return track;
+      changedPaths.add(key);
+      return result.updated;
+    }).toList();
+    if (changedPaths.isNotEmpty) {
+      downloadedTracks = merged;
+      pendingAlbumMatches = [
+        for (final pending in pendingAlbumMatches)
+          if (!changedPaths.contains(_trackPathKey(pending.trackPath)) ||
+              updates[_trackPathKey(pending.trackPath)]!.updated.album
+                  .trim()
+                  .isEmpty)
+            pending,
+      ];
+      _notify();
       try {
         await Future.wait<void>([
           _saveDownloadedTracks(),
@@ -1565,9 +1561,6 @@ extension AppControllerLibraryActions on AppController {
       } catch (_) {
         // Background hydration is best-effort and can retry next launch.
       }
-    }
-    if (pendingChanges > 0 && !_isDisposed) {
-      _notify();
     }
     await _cleanupCoverCacheBestEffort();
   }
@@ -1621,10 +1614,12 @@ extension AppControllerLibraryActions on AppController {
     }
   }
 
-  Future<bool> _hydrateDownloadedTrack(DownloadedTrack snapshot) async {
+  Future<_HydratedTrack?> _hydrateDownloadedTrack(
+    DownloadedTrack snapshot,
+  ) async {
     final trackPathKey = _trackPathKey(snapshot.path);
     if (!_tryBeginMetadataWrite(trackPathKey)) {
-      return false;
+      return null;
     }
     try {
       return await _hydrateDownloadedTrackUnlocked(snapshot);
@@ -1633,11 +1628,14 @@ extension AppControllerLibraryActions on AppController {
     }
   }
 
-  Future<bool> _hydrateDownloadedTrackUnlocked(DownloadedTrack snapshot) async {
-    final snapshotKey = _libraryLyricsCacheKey(snapshot);
-    var current = _downloadedTrackByKey(snapshotKey);
-    if (current == null || current.format.toLowerCase() != 'mp3') {
-      return false;
+  Future<_HydratedTrack?> _hydrateDownloadedTrackUnlocked(
+    DownloadedTrack snapshot,
+  ) async {
+    final current = _downloadedTrackByPath(snapshot.path);
+    if (!identical(current, snapshot) ||
+        current == null ||
+        current.format.toLowerCase() != 'mp3') {
+      return null;
     }
 
     final currentCoverPath = current.coverFilePath?.trim();
@@ -1646,7 +1644,7 @@ extension AppControllerLibraryActions on AppController {
         currentCoverPath.isNotEmpty &&
         await File(currentCoverPath).exists();
     if (hasCover && current.album.trim().isNotEmpty) {
-      return false;
+      return null;
     }
 
     try {
@@ -1657,25 +1655,19 @@ extension AppControllerLibraryActions on AppController {
       if (!hasCover && metadata.cover != null) {
         hydratedCoverPath = await storage.cacheCoverImage(
           metadata.cover!,
-          cacheKey:
-              'startup-${current.id}-${p.basenameWithoutExtension(current.path)}',
+          cacheKey: 'startup-${_trackPathKey(p.absolute(current.path))}',
         );
       }
       final hydratedAlbum = metadata.album?.trim();
 
-      current = _downloadedTrackByKey(snapshotKey);
-      if (current == null) {
-        return false;
+      if (_isDisposed ||
+          !identical(_downloadedTrackByPath(snapshot.path), snapshot)) {
+        return null;
       }
 
       var updated = current;
       var changed = false;
-      final latestCoverPath = current.coverFilePath?.trim();
-      final latestHasCover =
-          latestCoverPath != null &&
-          latestCoverPath.isNotEmpty &&
-          await File(latestCoverPath).exists();
-      if (!latestHasCover && hydratedCoverPath != null) {
+      if (!hasCover && hydratedCoverPath != null) {
         updated = updated.copyWith(coverFilePath: hydratedCoverPath);
         changed = true;
       }
@@ -1686,30 +1678,12 @@ extension AppControllerLibraryActions on AppController {
         changed = true;
       }
       if (!changed) {
-        return false;
+        return null;
       }
-
-      if (updated.album.trim().isNotEmpty) {
-        _removePendingAlbumMatchForPath(updated.path);
-      }
-
-      downloadedTracks = [
-        for (final track in downloadedTracks)
-          _libraryLyricsCacheKey(track) == snapshotKey ? updated : track,
-      ];
-      return true;
+      return _HydratedTrack(original: current, updated: updated);
     } catch (_) {
-      return false;
+      return null;
     }
-  }
-
-  DownloadedTrack? _downloadedTrackByKey(String key) {
-    for (final track in downloadedTracks) {
-      if (_libraryLyricsCacheKey(track) == key) {
-        return track;
-      }
-    }
-    return null;
   }
 
   Future<_LocalAudioMetadata> _readLocalAudioMetadata(
@@ -1725,7 +1699,7 @@ extension AppControllerLibraryActions on AppController {
     if (metadata.cover != null) {
       coverFilePath = await storage.cacheCoverImage(
         metadata.cover!,
-        cacheKey: 'scan-${p.basenameWithoutExtension(file.path)}',
+        cacheKey: 'scan-${_trackPathKey(p.absolute(file.path))}',
       );
     }
     return _LocalAudioMetadata(

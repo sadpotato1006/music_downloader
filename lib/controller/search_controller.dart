@@ -143,6 +143,7 @@ extension AppControllerSearchActions on AppController {
       final results = await _runSourceRequest(
         '搜索',
         () => requestSource.search(keyword),
+        shouldRun: () => _canCommitSourceSearch(generation),
       );
       if (!_canCommitSourceSearch(generation)) {
         return;
@@ -151,6 +152,8 @@ extension AppControllerSearchActions on AppController {
       if (results.isEmpty) {
         searchError = '没有找到公开可解析的搜索结果。';
       }
+    } on _ObsoleteSourceRequest {
+      return;
     } on MusicSourceException catch (error) {
       if (!_canCommitSourceSearch(generation)) {
         return;
@@ -221,21 +224,42 @@ extension AppControllerSearchActions on AppController {
   }
 
   Future<void> playSearchResult(TrackSearchResult result) async {
+    if (_isDisposed) return;
+    final generation = _beginPlaybackRequest();
     resolvingPlayId = result.id;
     globalMessage = '正在准备播放：${result.title}';
     _notify();
 
     try {
-      final item = await _resolveSearchResultPlayerItem(result, '播放');
-      await _enqueueAndPlay(item);
+      final item = await _resolveSearchResultPlayerItem(
+        result,
+        '播放',
+        shouldRun: () => _canCommitPlaybackRequest(generation),
+      );
+      if (!_canCommitPlaybackRequest(generation)) return;
+      await _enqueueAndPlay(item, requestGeneration: generation);
+      if (!_isCurrentPlaybackRequest(generation, item)) return;
       globalMessage = '已开始播放：${item.title}';
+      unawaited(
+        _loadOnlineLyrics(
+          item,
+          durationText: result.duration,
+          playbackGeneration: generation,
+        ),
+      );
+    } on _ObsoleteSourceRequest {
+      return;
     } on MusicSourceException catch (error) {
+      if (!_canCommitPlaybackRequest(generation)) return;
       globalMessage = error.message;
     } catch (error) {
+      if (!_canCommitPlaybackRequest(generation)) return;
       globalMessage = '播放失败：${_friendlyUnexpectedError(error)}';
     } finally {
-      resolvingPlayId = null;
-      _notify();
+      if (_canCommitPlaybackRequest(generation)) {
+        resolvingPlayId = null;
+        _notify();
+      }
     }
   }
 
@@ -246,7 +270,9 @@ extension AppControllerSearchActions on AppController {
 
     try {
       final item = await _resolveSearchResultPlayerItem(result, '下一首播放');
+      if (_isDisposed) return;
       final started = await _enqueueNextOrPlayWhenIdle(item);
+      unawaited(_loadOnlineLyrics(item, durationText: result.duration));
       globalMessage = started
           ? '已开始播放：${item.title}'
           : '已加入下一首播放：${item.title}';
@@ -261,6 +287,8 @@ extension AppControllerSearchActions on AppController {
   }
 
   Future<void> playDownloaded(DownloadedTrack track) async {
+    if (_isDisposed) return;
+    final generation = _beginPlaybackRequest();
     if (!_tryBeginMetadataRead(track.path)) {
       globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候再播放。';
       _notify();
@@ -272,11 +300,11 @@ extension AppControllerSearchActions on AppController {
         track,
         metadataReadHeld: true,
       );
-      if (item == null) {
+      if (item == null || !_canCommitPlaybackRequest(generation)) {
         return;
       }
-      await _enqueueAndPlay(item);
-      startedPlayback = true;
+      await _enqueueAndPlay(item, requestGeneration: generation);
+      startedPlayback = _isCurrentPlaybackRequest(generation, item);
     } finally {
       _endMetadataRead(track.path);
       if (startedPlayback) {

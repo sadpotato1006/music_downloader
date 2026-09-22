@@ -543,6 +543,9 @@ class _LyricsSheetState extends State<_LyricsSheet> {
 
   final ScrollController scrollController = ScrollController();
   final Map<int, GlobalKey> _lyricLineKeys = {};
+  List<LyricLine> _lines = const [];
+  int _highlightedIndex = -1;
+  bool _scrollScheduled = false;
   int lastScrolledIndex = -1;
   String? lastScrolledItemId;
   double _lyricsVerticalPadding = _lyricsMinListPadding;
@@ -554,6 +557,7 @@ class _LyricsSheetState extends State<_LyricsSheet> {
     widget.controller.player.positionListenable.addListener(
       _handlePlayerPositionChanged,
     );
+    _updateLyricState();
     _scheduleScroll();
   }
 
@@ -571,20 +575,38 @@ class _LyricsSheetState extends State<_LyricsSheet> {
     if (!mounted) {
       return;
     }
-    setState(() {});
+    setState(_updateLyricState);
     _scheduleScroll();
+  }
+
+  void _updateLyricState() {
+    final lines = parseLyricLines(widget.controller.currentItem?.lyrics);
+    if (!identical(lines, _lines)) {
+      _lines = lines;
+      _lyricLineKeys.clear();
+      lastScrolledIndex = -1;
+    }
+    _highlightedIndex = _currentLyricIndex(
+      _lines,
+      widget.controller.player.position,
+    );
   }
 
   void _handlePlayerPositionChanged() {
     if (!mounted) {
       return;
     }
-    setState(() {});
+    final index = _currentLyricIndex(_lines, widget.controller.player.position);
+    if (index == _highlightedIndex) return;
+    setState(() => _highlightedIndex = index);
     _scheduleScroll();
   }
 
   void _scheduleScroll() {
+    if (_scrollScheduled) return;
+    _scrollScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollScheduled = false;
       if (!mounted || !scrollController.hasClients) {
         return;
       }
@@ -593,11 +615,7 @@ class _LyricsSheetState extends State<_LyricsSheet> {
         lastScrolledItemId = item?.id;
         lastScrolledIndex = -1;
       }
-      final lines = parseLyricLines(item?.lyrics);
-      final currentIndex = _currentLyricIndex(
-        lines,
-        widget.controller.player.position,
-      );
+      final currentIndex = _highlightedIndex;
       if (currentIndex < 0 || currentIndex == lastScrolledIndex) {
         return;
       }
@@ -646,18 +664,9 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   @override
   Widget build(BuildContext context) {
     final item = widget.controller.currentItem;
-    final lines = parseLyricLines(item?.lyrics);
-    final currentIndex = _currentLyricIndex(
-      lines,
-      widget.controller.player.position,
-    );
+    final lines = _lines;
+    final currentIndex = _highlightedIndex;
     final duration = widget.controller.player.duration;
-    final durationMs = duration.inMilliseconds;
-    final maxMs = (durationMs <= 0 ? 1 : durationMs).toDouble();
-    final positionMs = widget.controller.player.position.inMilliseconds.clamp(
-      0,
-      durationMs <= 0 ? 1 : durationMs,
-    );
     final album = item?.album.trim();
 
     return SizedBox(
@@ -752,8 +761,9 @@ class _LyricsSheetState extends State<_LyricsSheet> {
                                       duration,
                                     )
                                     ? null
-                                    : () => widget.controller.seekTo(
-                                        lines[index].time!,
+                                    : () => widget.controller.seekToLyricLine(
+                                        item!,
+                                        lines[index].time,
                                       ),
                                 child: AnimatedDefaultTextStyle(
                                   duration: const Duration(milliseconds: 160),
@@ -785,55 +795,73 @@ class _LyricsSheetState extends State<_LyricsSheet> {
                       ),
               ),
               const SizedBox(height: 8),
-              Row(
-                children: [
-                  SizedBox(
-                    width: 42,
-                    child: Text(
-                      _formatDuration(widget.controller.player.position),
-                      style: const TextStyle(fontSize: 12, color: _muted),
-                    ),
-                  ),
-                  Expanded(
-                    child: SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        trackHeight: 4,
-                        thumbShape: const RoundSliderThumbShape(
-                          enabledThumbRadius: 6,
-                          disabledThumbRadius: 6,
-                        ),
-                        overlayShape: const RoundSliderOverlayShape(
-                          overlayRadius: 14,
-                        ),
-                      ),
-                      child: Slider(
-                        value: positionMs.toDouble(),
-                        min: 0,
-                        max: maxMs,
-                        onChanged: item == null
-                            ? null
-                            : (value) => widget.controller.seekTo(
-                                Duration(milliseconds: value.round()),
-                              ),
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 42,
-                    child: Text(
-                      _formatDuration(duration),
-                      textAlign: TextAlign.right,
-                      style: const TextStyle(fontSize: 12, color: _muted),
-                    ),
-                  ),
-                ],
-              ),
+              _LyricsProgress(controller: widget.controller),
               const SizedBox(height: 8),
               _LyricsPlaybackControls(controller: widget.controller),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+class _LyricsProgress extends StatelessWidget {
+  const _LyricsProgress({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<Duration>(
+      valueListenable: controller.player.positionListenable,
+      builder: (context, position, child) {
+        final maximum = controller.maximumSeekPosition.inMilliseconds;
+        final maxMs = (maximum <= 0 ? 1 : maximum).toDouble();
+        return Row(
+          children: [
+            SizedBox(
+              width: 42,
+              child: Text(
+                _formatDuration(position),
+                style: const TextStyle(fontSize: 12, color: _muted),
+              ),
+            ),
+            Expanded(
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 4,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 6,
+                    disabledThumbRadius: 6,
+                  ),
+                  overlayShape: const RoundSliderOverlayShape(
+                    overlayRadius: 14,
+                  ),
+                ),
+                child: Slider(
+                  value: position.inMilliseconds.clamp(0, maxMs).toDouble(),
+                  min: 0,
+                  max: maxMs,
+                  onChanged: controller.currentItem == null
+                      ? null
+                      : (value) => controller.seekTo(
+                          Duration(milliseconds: value.round()),
+                        ),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 42,
+              child: Text(
+                _formatDuration(controller.player.duration),
+                textAlign: TextAlign.right,
+                style: const TextStyle(fontSize: 12, color: _muted),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

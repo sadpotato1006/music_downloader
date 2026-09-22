@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -190,7 +191,7 @@ class StorageService {
 
     return cacheEmbeddedCover(
       audioFile,
-      cacheKey: '${track.id}-${p.basenameWithoutExtension(track.path)}',
+      cacheKey: 'embedded-${_normalizedPath(track.path)}',
     );
   }
 
@@ -211,9 +212,8 @@ class StorageService {
     required String cacheKey,
   }) async {
     final directory = await _supportDirectory('covers');
-    final safeKey = sanitizeFilePart(cacheKey).isEmpty
-        ? 'cover'
-        : sanitizeFilePart(cacheKey);
+    // Preserve the entire identity, including directory and long filenames.
+    final safeKey = sha256.convert(utf8.encode(cacheKey)).toString();
     final file = File(
       p.join(directory.path, '$safeKey.${_coverExtension(cover.mimeType)}'),
     );
@@ -291,15 +291,18 @@ class StorageService {
     required String title,
     required String artist,
     required String format,
+    Iterable<String> reservedPaths = const [],
   }) async {
     final directory = Directory(downloadDirectory);
     await directory.create(recursive: true);
 
     final extension = format.trim().isEmpty ? 'mp3' : format.toLowerCase();
     final baseName = safeTrackBaseName(title: title, artist: artist);
+    final reserved = reservedPaths.map(_normalizedPath).toSet();
     var candidate = p.join(directory.path, '$baseName.$extension');
     var index = 1;
-    while (await File(candidate).exists()) {
+    while (reserved.contains(_normalizedPath(candidate)) ||
+        await File(candidate).exists()) {
       candidate = p.join(directory.path, '$baseName ($index).$extension');
       index += 1;
     }
@@ -383,9 +386,8 @@ class StorageService {
   }
 
   Future<void> _saveJson(String fileName, Object? value) async {
-    final file = await _supportFile(fileName);
-    final content = const JsonEncoder.withIndent('  ').convert(value);
-    final previous = _writeQueues[file.path];
+    final content = jsonEncode(value);
+    final previous = _writeQueues[fileName];
     late final Future<void> operation;
     operation = () async {
       if (previous != null) {
@@ -395,15 +397,33 @@ class StorageService {
           // A failed generation must not block a newer save.
         }
       }
+      final file = await _supportFile(fileName);
       await _atomicWrite(file, content);
     }();
-    _writeQueues[file.path] = operation;
+    // Register before the first filesystem await so an immediate flush sees it.
+    _writeQueues[fileName] = operation;
     try {
       await operation;
     } finally {
-      if (identical(_writeQueues[file.path], operation)) {
-        _writeQueues.remove(file.path);
+      if (identical(_writeQueues[fileName], operation)) {
+        _writeQueues.remove(fileName);
       }
+    }
+  }
+
+  Future<void> flushPendingWrites() async {
+    Object? firstError;
+    StackTrace? firstStackTrace;
+    while (_writeQueues.isNotEmpty) {
+      try {
+        await Future.wait(_writeQueues.values.toList());
+      } catch (error, stackTrace) {
+        firstError ??= error;
+        firstStackTrace ??= stackTrace;
+      }
+    }
+    if (firstError != null) {
+      Error.throwWithStackTrace(firstError, firstStackTrace!);
     }
   }
 

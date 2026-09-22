@@ -8,7 +8,7 @@ import 'models.dart';
 import 'music_source.dart';
 import 'app_info.dart';
 
-class GequbaoSource implements MusicSource {
+class GequbaoSource implements MusicSource, DownloadMusicSource {
   GequbaoSource({Dio? dio, Uri? baseUri})
     : _baseUri = baseUri ?? Uri.parse('https://www.gequbao.com/'),
       _dio =
@@ -46,34 +46,41 @@ class GequbaoSource implements MusicSource {
   Future<TrackDetail> loadDetail(TrackSearchResult result) async {
     final detailUri = _baseUri.resolve(result.detailUrl);
     final html = await _getString(detailUri, referer: _baseUri.toString());
-    final detail = GequbaoParser.parseTrackDetail(
+    return GequbaoParser.parseTrackDetail(
       html,
       baseUrl: _baseUri,
       fallback: result,
-    );
-    final playId = detail.rawMetadata['play_id'];
-    final apiCandidate = playId == null || playId.isEmpty
-        ? null
-        : await _resolveCommonPlayCandidate(playId, detail.sourceUrl);
-
-    if (apiCandidate == null) {
-      return detail;
-    }
-    return TrackDetail(
-      title: detail.title,
-      artist: detail.artist,
-      sourceUrl: detail.sourceUrl,
-      candidates: [apiCandidate, ...detail.candidates],
-      rawMetadata: detail.rawMetadata,
-      lyrics: detail.lyrics,
-      coverUrl: detail.coverUrl,
-      album: detail.album,
     );
   }
 
   @override
   Future<List<AudioCandidate>> resolveCandidates(TrackDetail detail) async {
-    return detail.candidates;
+    return _resolveCandidates(detail, purpose: 'play');
+  }
+
+  @override
+  Future<List<AudioCandidate>> resolveDownloadCandidates(
+    TrackDetail detail,
+  ) async {
+    return _resolveCandidates(detail, purpose: 'download');
+  }
+
+  Future<List<AudioCandidate>> _resolveCandidates(
+    TrackDetail detail, {
+    required String purpose,
+  }) async {
+    final playId = detail.rawMetadata['play_id'];
+    if (playId == null || playId.isEmpty) {
+      return detail.candidates;
+    }
+    // The API requires an explicit purpose and authorizes each separately.
+    // Resolve here so loading metadata never consumes a playback quota.
+    final apiCandidate = await _resolveCommonPlayCandidate(
+      playId,
+      detail.sourceUrl,
+      purpose: purpose,
+    );
+    return [?apiCandidate, ...detail.candidates];
   }
 
   Future<String> _getString(Uri uri, {String? referer}) async {
@@ -119,12 +126,13 @@ class GequbaoSource implements MusicSource {
 
   Future<AudioCandidate?> _resolveCommonPlayCandidate(
     String playId,
-    String sourceUrl,
-  ) async {
+    String sourceUrl, {
+    required String purpose,
+  }) async {
     try {
       final response = await _dio.postUri<String>(
         _baseUri.resolve('/member/common-play-url'),
-        data: {'id': playId},
+        data: {'id': playId, 'purpose': purpose},
         options: Options(
           contentType: Headers.formUrlEncodedContentType,
           headers: {

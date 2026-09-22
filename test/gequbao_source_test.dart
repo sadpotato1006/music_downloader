@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -127,6 +128,73 @@ void main() {
     expect(detail.candidates, hasLength(2));
     expect(detail.candidates.first.format, 'mp3');
   });
+
+  for (final purpose in ['play', 'download']) {
+    test('resolves $purpose with the required API purpose', () async {
+      final adapter = _CommonPlayAdapter();
+      final source = GequbaoSource(
+        dio: Dio(BaseOptions(responseType: ResponseType.plain))
+          ..httpClientAdapter = adapter,
+        baseUri: baseUrl,
+      );
+      final detail = await source.loadDetail(_apiTrack);
+
+      // Downloads must not resolve a play URL while loading metadata.
+      expect(adapter.requests, isEmpty);
+      expect(detail.title, 'Song');
+      expect(detail.rawMetadata['play_id'], 'signed+id/=');
+
+      final candidates = purpose == 'play'
+          ? await source.resolveCandidates(detail)
+          : await source.resolveDownloadCandidates(detail);
+
+      expect(adapter.requests, hasLength(1));
+      final request = adapter.requests.single;
+      expect(request.method, 'POST');
+      expect(request.uri.path, '/member/common-play-url');
+      expect(request.contentType, Headers.formUrlEncodedContentType);
+      expect(request.headers['Referer'], _apiTrack.detailUrl);
+      expect(request.headers['Origin'], 'https://www.gequbao.com');
+      expect(adapter.forms.single, {'id': 'signed+id/=', 'purpose': purpose});
+      expect(candidates.first.url, 'https://cdn.example.test/$purpose.mp3');
+      expect(candidates.first.format, 'mp3');
+      expect(candidates.last.url, 'https://cdn.example.test/fallback.mp3');
+    });
+  }
+
+  test('keeps direct audio candidates when the page has no play id', () async {
+    final adapter = _CommonPlayAdapter(includePlayId: false);
+    final source = GequbaoSource(
+      dio: Dio(BaseOptions(responseType: ResponseType.plain))
+        ..httpClientAdapter = adapter,
+    );
+    final detail = await source.loadDetail(_apiTrack);
+
+    for (final candidates in [
+      await source.resolveCandidates(detail),
+      await source.resolveDownloadCandidates(detail),
+    ]) {
+      expect(candidates.single.url, 'https://cdn.example.test/fallback.mp3');
+    }
+    expect(adapter.requests, isEmpty);
+  });
+
+  for (final code in [2, 3, 4, 5]) {
+    test('preserves API verification and quota errors (code $code)', () async {
+      final adapter = _CommonPlayAdapter(responseCode: code);
+      final source = GequbaoSource(
+        dio: Dio(BaseOptions(responseType: ResponseType.plain))
+          ..httpClientAdapter = adapter,
+      );
+      final detail = await source.loadDetail(_apiTrack);
+
+      await expectLater(
+        source.resolveDownloadCandidates(detail),
+        throwsA(predicate((error) => error.toString() == 'API refusal $code')),
+      );
+      expect(adapter.requests, hasLength(1));
+    });
+  }
 
   test('treats a dynamic common-play endpoint as mp3', () {
     expect(
@@ -406,6 +474,67 @@ void main() {
     expect(restored.normalizedCurrentIndex, 0);
     expect(restored.shuffleEnabled, isTrue);
   });
+}
+
+const _apiTrack = TrackSearchResult(
+  id: '200',
+  title: 'Song',
+  artist: 'Artist',
+  source: '歌曲宝',
+  detailUrl: 'https://www.gequbao.com/music/200',
+);
+
+class _CommonPlayAdapter implements HttpClientAdapter {
+  _CommonPlayAdapter({this.includePlayId = true, this.responseCode = 1});
+
+  final bool includePlayId;
+  final int responseCode;
+  final requests = <RequestOptions>[];
+  final forms = <Map<String, String>>[];
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    if (options.uri.path == '/music/200') {
+      final appData = jsonEncode({
+        'mp3_title': 'Song',
+        if (includePlayId) 'play_id': 'signed+id/=',
+      });
+      return ResponseBody.fromString(
+        '''<script>window.appData = JSON.parse('$appData');</script>
+        <audio src="https://cdn.example.test/fallback.mp3"></audio>''',
+        200,
+      );
+    }
+    if (options.uri.path == '/member/common-play-url') {
+      requests.add(options);
+      final bytes = await requestStream!.expand((chunk) => chunk).toList();
+      final form = Uri.splitQueryString(utf8.decode(bytes));
+      forms.add(form);
+      final purpose = form['purpose'];
+      if (purpose != 'play' && purpose != 'download') {
+        return ResponseBody.fromString(
+          '{"message":"The purpose field is required."}',
+          422,
+        );
+      }
+      return ResponseBody.fromString(
+        jsonEncode({
+          'code': responseCode,
+          'msg': 'API refusal $responseCode',
+          'data': {'url': 'https://cdn.example.test/$purpose.mp3'},
+        }),
+        200,
+      );
+    }
+    throw StateError('Unexpected request: ${options.method} ${options.uri}');
+  }
+
+  @override
+  void close({bool force = false}) {}
 }
 
 class _FakeGequbaoAdapter implements HttpClientAdapter {

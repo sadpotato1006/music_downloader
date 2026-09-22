@@ -42,4 +42,40 @@ void main() {
     expect(LibrarySearch.matchesDownloadedTrack(track, 'what s going'), isTrue);
     expect(LibrarySearch.matchesDownloadedTrack(track, 'not-found'), isFalse);
   });
+
+  test('reused index keeps folded and fuzzy pinyin matching boundaries', () {
+    final index = LibrarySearchIndex.fromTrack(track);
+    for (var read = 0; read < 3; read += 1) {
+      for (final query in ['fssx', 'fsx', 'fjx', 'cyx', 'fushishanxia']) {
+        expect(index.matchesNormalizedQuery(query), isTrue, reason: query);
+      }
+      for (final query in ['fjz', 'fa', 'f9x', '富虚', 'nonexistent']) {
+        expect(index.matchesNormalizedQuery(query), isFalse, reason: query);
+      }
+    }
+  });
+
+  test(
+    'normalization removes mixed whitespace and punctuation in one pass',
+    () {
+      expect(
+        LibrarySearch.normalize('  WHAT\tS\nGOING\r\nON\u00a0...?\u3000'),
+        'whatsgoingon',
+      );
+      expect(LibrarySearch.normalize('《富 士-山_下》'), '富士山下');
+    },
+  );
+
+  test(
+    'empty metadata can still match lyrics without spurious pinyin matches',
+    () {
+      final index = LibrarySearchIndex.fromTrack(
+        track.copyWith(title: '', artist: '', album: ''),
+        lyrics: '何不把悲哀感觉假设是来自你虚构',
+      );
+      expect(index.matchesNormalizedQuery(''), isTrue);
+      expect(index.matchesNormalizedQuery('悲哀'), isTrue);
+      expect(index.matchesNormalizedQuery('fjx'), isFalse);
+    },
+  );
 }

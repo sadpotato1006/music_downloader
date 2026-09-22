@@ -27,14 +27,14 @@ extension AppControllerDownloadActions on AppController {
 
     try {
       final requestSource = _sourceForName(result.source);
-      final detail = await _runSourceRequest(
-        '下载',
-        () => requestSource.loadDetail(result),
-      );
-      final candidates = requestSource is DownloadMusicSource
-          ? await (requestSource as DownloadMusicSource)
-                .resolveDownloadCandidates(detail)
-          : await requestSource.resolveCandidates(detail);
+      final (detail, candidates) = await _runSourceRequest('下载', () async {
+        final detail = await requestSource.loadDetail(result);
+        final candidates = requestSource is DownloadMusicSource
+            ? await (requestSource as DownloadMusicSource)
+                  .resolveDownloadCandidates(detail)
+            : await requestSource.resolveCandidates(detail);
+        return (detail, candidates);
+      });
       final candidate = _pickPreferredCandidate(candidates, allowNonMp3: true);
       if (candidate == null) {
         return const DownloadStartResult.failed('这个歌曲页面没有找到可下载的公开音频链接。');
@@ -53,7 +53,7 @@ extension AppControllerDownloadActions on AppController {
         coverUrl: detail.coverUrl ?? result.coverUrl,
         album: detail.album,
       );
-      final savePath = await storage.uniqueSavePath(
+      final savePath = await _reserveDownloadSavePath(
         downloadDirectory: activeSettings.downloadDirectory,
         title: detail.title,
         artist: detail.artist,
@@ -70,7 +70,16 @@ extension AppControllerDownloadActions on AppController {
         album: detail.album,
       );
       downloadTasks = [task, ...downloadTasks];
-      await _saveDownloadTasks();
+      try {
+        await _saveDownloadTasks();
+      } catch (_) {
+        downloadTasks = [
+          for (final current in downloadTasks)
+            if (current.id != task.id) current,
+        ];
+        _reservedDownloadSavePaths.remove(savePath);
+        rethrow;
+      }
       _scheduleDownloads();
       return const DownloadStartResult.started();
     } on MusicSourceException catch (error) {
@@ -88,6 +97,40 @@ extension AppControllerDownloadActions on AppController {
 
   String _downloadKey(TrackSearchResult result) =>
       '${result.source}\u0000${result.id}';
+
+  Future<String> _reserveDownloadSavePath({
+    required String downloadDirectory,
+    required String title,
+    required String artist,
+    required String format,
+  }) async {
+    final previous = _downloadPathReservationQueue;
+    final completer = Completer<void>();
+    _downloadPathReservationQueue = previous.whenComplete(
+      () => completer.future,
+    );
+    await previous;
+
+    try {
+      final savePath = await storage.uniqueSavePath(
+        downloadDirectory: downloadDirectory,
+        title: title,
+        artist: artist,
+        format: format,
+        reservedPaths: [
+          ..._reservedDownloadSavePaths,
+          for (final task in downloadTasks) task.savePath,
+          for (final track in downloadedTracks) track.path,
+        ],
+      );
+      _reservedDownloadSavePaths.add(savePath);
+      return savePath;
+    } finally {
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    }
+  }
 
   bool _isTrackDownloaded(TrackSearchResult result) {
     return downloadedTracks.any((track) => track.id == result.id);
@@ -162,20 +205,30 @@ extension AppControllerDownloadActions on AppController {
 
   Future<T> _runSourceRequest<T>(
     String action,
-    Future<T> Function() request,
-  ) async {
+    Future<T> Function() request, {
+    bool Function()? shouldRun,
+  }) async {
     final previous = _sourceRequestQueue;
     final completer = Completer<void>();
     _sourceRequestQueue = previous.whenComplete(() => completer.future);
     await previous;
 
     try {
+      if (shouldRun != null && !shouldRun()) {
+        throw const _ObsoleteSourceRequest();
+      }
       _throwIfSourceCoolingDown();
       await _waitForSourceGap();
+      // A newer search can arrive while this request waits for the rate limit.
+      if (shouldRun != null && !shouldRun()) {
+        throw const _ObsoleteSourceRequest();
+      }
       final result = await request();
       _lastSourceRequestAt = DateTime.now();
       _clearExpiredCooldown();
       return result;
+    } on _ObsoleteSourceRequest {
+      rethrow;
     } on MusicSourceException catch (error) {
       _activateCooldownIfNeeded(error.message);
       AppLog.instance.warning(
@@ -371,17 +424,9 @@ extension AppControllerDownloadActions on AppController {
             task.status != DownloadStatus.canceled,
       ),
     );
-    final previousSave = _downloadTasksSaveQueue;
-    final operation = () async {
-      try {
-        await previousSave;
-      } catch (_) {
-        // A failed save must not prevent newer task state from persisting.
-      }
-      await storage.saveDownloadTasks(snapshot);
-    }();
-    _downloadTasksSaveQueue = operation;
-    return operation;
+    return _downloadTasksSaveQueue.enqueue(
+      () => storage.saveDownloadTasks(snapshot),
+    );
   }
 
   Future<void> _persistDownloadTasksBestEffort() async {
@@ -604,6 +649,7 @@ extension AppControllerDownloadActions on AppController {
     final status = response.statusCode ?? 0;
     final contentRange = response.headers.value(HttpHeaders.contentRangeHeader);
     final rangeTotal = _contentRangeTotal(contentRange);
+    final responseValidator = _resumeValidator(response.headers);
     if (status == 416) {
       await body.stream.drain();
       if (existingBytes > 0 &&
@@ -651,6 +697,29 @@ extension AppControllerDownloadActions on AppController {
       throw const FileSystemException('服务器返回了无效的断点位置。');
     }
 
+    final requestedValidator = task.resumeValidator?.trim();
+    if (status == 206 &&
+        existingBytes > 0 &&
+        requestedValidator != null &&
+        requestedValidator.isNotEmpty &&
+        responseValidator.isNotEmpty &&
+        responseValidator != requestedValidator) {
+      await body.stream.drain();
+      if (await file.exists()) {
+        await file.delete();
+      }
+      if (allowResume) {
+        AppLog.instance.warning(
+          'download',
+          '断点文件版本已变化，回退为完整下载',
+          detail: 'expected=$requestedValidator, actual=$responseValidator',
+        );
+        await _downloadTaskFile(task, token, allowResume: false);
+        return;
+      }
+      throw const FileSystemException('服务器返回了不同版本的断点文件。');
+    }
+
     final isPartialResponse = status == 206 && existingBytes > 0;
     if (isPartialResponse) {
       AppLog.instance.info(
@@ -672,10 +741,6 @@ extension AppControllerDownloadActions on AppController {
     final totalBytes =
         rangeTotal ??
         (responseLength == null ? null : baseBytes + responseLength);
-    final validator =
-        response.headers.value(HttpHeaders.etagHeader) ??
-        response.headers.value(HttpHeaders.lastModifiedHeader) ??
-        '';
     _replaceTask(
       task.id,
       (current) => current.copyWith(
@@ -684,7 +749,7 @@ extension AppControllerDownloadActions on AppController {
         progress: totalBytes != null && totalBytes > 0
             ? baseBytes / totalBytes
             : current.progress,
-        resumeValidator: validator,
+        resumeValidator: responseValidator,
       ),
     );
     unawaited(_persistDownloadTasksBestEffort());
@@ -775,6 +840,13 @@ extension AppControllerDownloadActions on AppController {
       caseSensitive: false,
     ).firstMatch(value.trim());
     return match == null ? null : int.tryParse(match.group(1)!);
+  }
+
+  String _resumeValidator(Headers headers) {
+    return (headers.value(HttpHeaders.etagHeader) ??
+            headers.value(HttpHeaders.lastModifiedHeader) ??
+            '')
+        .trim();
   }
 
   MusicSource _sourceForName(String sourceName) {
@@ -886,7 +958,6 @@ extension AppControllerDownloadActions on AppController {
       return null;
     }
 
-    Response<List<int>>? response;
     for (final headers in [
       {
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
@@ -898,54 +969,92 @@ extension AppControllerDownloadActions on AppController {
         'User-Agent': appUserAgent,
       },
     ]) {
+      final coverRequestToken = CancelToken();
+      final activeDownloadToken = cancelToken;
+      if (activeDownloadToken != null) {
+        if (activeDownloadToken.isCancelled) {
+          coverRequestToken.cancel(activeDownloadToken.cancelError);
+        } else {
+          unawaited(
+            activeDownloadToken.whenCancel.then((error) {
+              if (!coverRequestToken.isCancelled) {
+                coverRequestToken.cancel(error);
+              }
+            }),
+          );
+        }
+      }
       try {
-        response = await _downloadDio.get<List<int>>(
-          coverUrl,
-          cancelToken: cancelToken,
+        final response = await _downloadDio.getUri<ResponseBody>(
+          Uri.parse(coverUrl),
+          cancelToken: coverRequestToken,
           options: Options(
-            responseType: ResponseType.bytes,
+            responseType: ResponseType.stream,
             receiveTimeout: const Duration(seconds: 12),
             headers: headers,
           ),
         );
-        break;
+        final status = response.statusCode ?? 0;
+        final body = response.data;
+        if (status >= 400 || body == null) {
+          return null;
+        }
+        final bytes = await _readResponseBytes(
+          body,
+          maxBytes: AppController._maxEmbeddedCoverBytes,
+          advertisedLength: int.tryParse(
+            response.headers.value(HttpHeaders.contentLengthHeader) ?? '',
+          ),
+          requestToken: coverRequestToken,
+        );
+        if (bytes == null || bytes.isEmpty) {
+          return null;
+        }
+        final mimeType = _coverMimeType(
+          bytes,
+          contentType: response.headers.value(Headers.contentTypeHeader),
+          url: coverUrl,
+        );
+        if (mimeType == null) {
+          return null;
+        }
+        return Id3CoverImage(mimeType: mimeType, bytes: bytes);
       } on DioException catch (error) {
-        if (CancelToken.isCancel(error)) {
+        if (activeDownloadToken?.isCancelled ?? false) {
           rethrow;
         }
-        response = null;
+        if (CancelToken.isCancel(error) && coverRequestToken.isCancelled) {
+          return null;
+        }
       } catch (_) {
-        response = null;
+        // Retry once without the Referer header below.
       }
     }
+    return null;
+  }
 
-    try {
-      if (response == null) {
-        return null;
-      }
-      final status = response.statusCode ?? 0;
-      final bytes = response.data;
-      if (status >= 400 || bytes == null || bytes.isEmpty) {
-        return null;
-      }
-      if (bytes.length > 5 * 1024 * 1024) {
-        return null;
-      }
-      final mimeType = _coverMimeType(
-        bytes,
-        contentType: response.headers.value(Headers.contentTypeHeader),
-        url: coverUrl,
-      );
-      if (mimeType == null) {
-        return null;
-      }
-      return Id3CoverImage(
-        mimeType: mimeType,
-        bytes: Uint8List.fromList(bytes),
-      );
-    } catch (_) {
+  Future<Uint8List?> _readResponseBytes(
+    ResponseBody body, {
+    required int maxBytes,
+    required int? advertisedLength,
+    required CancelToken requestToken,
+  }) async {
+    if (advertisedLength != null && advertisedLength > maxBytes) {
+      final subscription = body.stream.listen(null, onError: (_) {});
+      requestToken.cancel('cover response exceeds $maxBytes bytes');
+      await subscription.cancel();
       return null;
     }
+
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in body.stream) {
+      if (builder.length + chunk.length > maxBytes) {
+        requestToken.cancel('cover response exceeds $maxBytes bytes');
+        return null;
+      }
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
   }
 
   Future<Id3CoverImage?> _loadCoverFromManualInput(String input) async {
@@ -1172,4 +1281,8 @@ extension AppControllerDownloadActions on AppController {
       rethrow;
     }
   }
+}
+
+class _ObsoleteSourceRequest implements Exception {
+  const _ObsoleteSourceRequest();
 }

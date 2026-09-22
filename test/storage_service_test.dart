@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,95 @@ import 'package:qingting/pending_album_match.dart';
 import 'package:qingting/storage_service.dart';
 
 void main() {
+  test('JSON is compact and preserves Unicode and multiline text', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-compact-json-',
+    );
+    final storage = StorageService(supportDirectory: directory);
+    const item = PlayerItem(
+      id: 'song',
+      title: '中文歌名',
+      artist: '歌手',
+      uri: 'file:///song.mp3',
+      lyrics: '[00:01.00]第一句\n[00:02.00]第二句',
+    );
+    try {
+      await storage.savePlayerQueue([item], 0, shuffleEnabled: true);
+      final text = await File(
+        '${directory.path}${Platform.pathSeparator}queue.json',
+      ).readAsString();
+      expect(text, jsonEncode(jsonDecode(text)));
+      expect(text, isNot(contains('\n')));
+      final restored = await storage.loadPlayerQueue();
+      expect(restored.items.single.title, item.title);
+      expect(restored.items.single.lyrics, item.lyrics);
+      expect(
+        await File(
+          '${directory.path}${Platform.pathSeparator}queue.json.bak',
+        ).exists(),
+        isTrue,
+      );
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test(
+    'an immediate flush includes writes waiting for their directory',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-flush-storage-',
+      );
+      final storage = StorageService(supportDirectory: directory);
+      try {
+        final saves = [
+          storage.saveSettings(const AppSettings(downloadDirectory: 'first')),
+          storage.saveSettings(const AppSettings(downloadDirectory: 'latest')),
+          storage.saveMyMusic(
+            const MyMusicData(favoriteTrackPaths: ['song.mp3']),
+          ),
+        ];
+        await storage.flushPendingWrites();
+        final reloaded = StorageService(supportDirectory: directory);
+        expect((await reloaded.loadSettings()).downloadDirectory, 'latest');
+        expect((await reloaded.loadMyMusic()).favoriteTrackPaths, ['song.mp3']);
+        await Future.wait(saves);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test('failed storage flush does not block a later retry', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-flush-failure-',
+    );
+    final path = '${directory.path}${Platform.pathSeparator}blocked';
+    final blocker = File(path);
+    await blocker.writeAsString('not a directory');
+    final storage = StorageService(supportDirectory: Directory(path));
+    try {
+      final save = storage.saveSettings(
+        const AppSettings(downloadDirectory: 'music'),
+      );
+      await Future.wait([
+        expectLater(save, throwsA(isA<FileSystemException>())),
+        expectLater(
+          storage.flushPendingWrites(),
+          throwsA(isA<FileSystemException>()),
+        ),
+      ]);
+      await blocker.delete();
+      await storage.saveSettings(
+        const AppSettings(downloadDirectory: 'recovered'),
+      );
+      await storage.flushPendingWrites();
+      expect((await storage.loadSettings()).downloadDirectory, 'recovered');
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
   test(
     'atomic JSON storage recovers settings library queue and playlists',
     () async {
@@ -153,6 +243,33 @@ void main() {
       expect(restored.resumeValidator, '"etag-1"');
       expect(restored.candidate.headers['Referer'], 'https://example.test/');
       expect(restored.album, 'Album');
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('unique save path skips paths reserved by queued downloads', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-reserved-download-path-',
+    );
+    final storage = StorageService(supportDirectory: directory);
+    final basePath =
+        '${directory.path}${Platform.pathSeparator}Artist - Song.mp3';
+
+    try {
+      final savePath = await storage.uniqueSavePath(
+        downloadDirectory: directory.path,
+        title: 'Song',
+        artist: 'Artist',
+        format: 'mp3',
+        reservedPaths: [basePath],
+      );
+
+      expect(
+        savePath,
+        '${directory.path}${Platform.pathSeparator}Artist - Song (1).mp3',
+      );
+      expect(await File(basePath).exists(), isFalse);
     } finally {
       await directory.delete(recursive: true);
     }

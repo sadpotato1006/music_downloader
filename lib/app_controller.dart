@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:open_filex/open_filex.dart';
@@ -13,6 +14,7 @@ import 'app_info.dart';
 import 'app_log.dart';
 import 'async_utils.dart';
 import 'audio_route_service.dart';
+import 'coalescing_write_queue.dart';
 import 'file_deletion_service.dart';
 import 'id3_lyrics_embedder.dart';
 import 'library_search.dart';
@@ -48,6 +50,7 @@ class AppController extends ChangeNotifier {
        lyricsService = lyricsService ?? LyricsService(),
        fileDeletionService =
            fileDeletionService ?? PlatformFileDeletionService(),
+       _ownsDownloadDio = downloadDio == null,
        _downloadDio =
            downloadDio ??
            Dio(
@@ -73,6 +76,7 @@ class AppController extends ChangeNotifier {
   final AlbumMetadataService albumMetadata;
   final LyricsService lyricsService;
   final FileDeletionService fileDeletionService;
+  final bool _ownsDownloadDio;
   final Dio _downloadDio;
   final Random _shuffleRandom = Random();
   final Map<String, CancelToken> _cancelTokens = {};
@@ -101,11 +105,16 @@ class AppController extends ChangeNotifier {
   String? _lastMediaControlsSignature;
   bool _isDisposed = false;
   int _sourceSearchGeneration = 0;
-  Future<void> _downloadedTracksSaveQueue = Future<void>.value();
-  Future<void> _myMusicSaveQueue = Future<void>.value();
-  Future<void> _downloadTasksSaveQueue = Future<void>.value();
-  Future<void> _pendingAlbumMatchesSaveQueue = Future<void>.value();
+  final _downloadedTracksSaveQueue = CoalescingWriteQueue();
+  final _myMusicSaveQueue = CoalescingWriteQueue();
+  final _downloadTasksSaveQueue = CoalescingWriteQueue();
+  final _playerQueueSaveQueue = CoalescingWriteQueue();
+  Future<void> _downloadPathReservationQueue = Future<void>.value();
+  final Set<String> _reservedDownloadSavePaths = {};
+  final _pendingAlbumMatchesSaveQueue = CoalescingWriteQueue();
   Future<void>? _playNextOperation;
+  int _playbackRequestGeneration = 0;
+  Future<void> _playbackMutationQueue = Future<void>.value();
   Future<void>? _playbackCompletionOperation;
   Future<void>? _durationCaptureOperation;
   bool _durationCaptureRetryRequested = false;
@@ -126,10 +135,15 @@ class AppController extends ChangeNotifier {
   final ValueNotifier<int> _downloadProgressListenable = ValueNotifier(0);
   final Map<String, int> _lastDownloadProgressUpdateMillis = {};
   static const _downloadProgressUpdateInterval = Duration(milliseconds: 100);
+  static const _maxEmbeddedCoverBytes = 5 * 1024 * 1024;
 
   List<DownloadedTrack> downloadedTracks = [];
   MyMusicData myMusic = const MyMusicData();
   static const int maxRecentPlaybacks = 100;
+  List<DownloadedTrack>? _downloadedTracksByPathSource;
+  Map<String, DownloadedTrack> _downloadedTracksByPathCache = const {};
+  List<String>? _favoriteTrackPathsSource;
+  Set<String> _favoriteTrackPathKeys = const {};
 
   bool lastDirectoryNeedsAllFilesAccess = false;
   bool isScanningDownloadDirectory = false;
@@ -260,8 +274,12 @@ class AppController extends ChangeNotifier {
   }
 
   bool isFavorite(DownloadedTrack track) {
-    final key = _trackPathKey(track.path);
-    return myMusic.favoriteTrackPaths.any((path) => _trackPathKey(path) == key);
+    final paths = myMusic.favoriteTrackPaths;
+    if (!identical(_favoriteTrackPathsSource, paths)) {
+      _favoriteTrackPathKeys = paths.map(_trackPathKey).toSet();
+      _favoriteTrackPathsSource = paths;
+    }
+    return _favoriteTrackPathKeys.contains(_trackPathKey(track.path));
   }
 
   bool isTrackInPlaylist(String playlistId, DownloadedTrack track) {
@@ -273,10 +291,19 @@ class AppController extends ChangeNotifier {
     return playlist.trackPaths.any((path) => _trackPathKey(path) == key);
   }
 
+  Map<String, DownloadedTrack> get _downloadedTracksByPath {
+    // Library edits replace the list, as with the visible-tracks cache.
+    if (!identical(_downloadedTracksByPathSource, downloadedTracks)) {
+      _downloadedTracksByPathCache = {
+        for (final track in downloadedTracks) _trackPathKey(track.path): track,
+      };
+      _downloadedTracksByPathSource = downloadedTracks;
+    }
+    return _downloadedTracksByPathCache;
+  }
+
   List<DownloadedTrack> _tracksForPaths(Iterable<String> paths) {
-    final tracksByPath = {
-      for (final track in downloadedTracks) _trackPathKey(track.path): track,
-    };
+    final tracksByPath = _downloadedTracksByPath;
     final result = <DownloadedTrack>[];
     final seen = <String>{};
     for (final path in paths) {
@@ -367,7 +394,7 @@ class AppController extends ChangeNotifier {
       unawaited(_hydrateDownloadedTracksInBackground());
       _scheduleDownloads();
       if (startupItem != null) {
-        unawaited(player.open(startupItem));
+        unawaited(_openCurrentItemForPlayback());
       }
     } catch (error, stackTrace) {
       if (_isDisposed) {
@@ -412,22 +439,36 @@ class AppController extends ChangeNotifier {
     }
 
     final pendingWrites = <Future<void>>[
-      _downloadedTracksSaveQueue,
-      _myMusicSaveQueue,
-      _downloadTasksSaveQueue,
-      _pendingAlbumMatchesSaveQueue,
+      _downloadedTracksSaveQueue.flush(),
+      _myMusicSaveQueue.flush(),
+      _downloadTasksSaveQueue.flush(),
+      _pendingAlbumMatchesSaveQueue.flush(),
+      _playerQueueSaveQueue.flush(),
     ];
-    for (final write in pendingWrites) {
-      try {
-        await write;
-      } catch (error, stackTrace) {
-        AppLog.instance.error(
-          'storage',
-          '等待待处理数据写入失败',
-          error: error,
-          stackTrace: stackTrace,
-        );
-      }
+    await Future.wait(
+      pendingWrites.map((write) async {
+        try {
+          await write;
+        } catch (error, stackTrace) {
+          AppLog.instance.error(
+            'storage',
+            '等待待处理数据写入失败',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }),
+    );
+    try {
+      // Also wait for direct settings saves already running in StorageService.
+      await storage.flushPendingWrites();
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'storage',
+        '等待存储写入失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
     }
     await AppLog.instance.flush();
   }
@@ -544,6 +585,9 @@ class AppController extends ChangeNotifier {
     player.positionListenable.removeListener(_handlePlayerPositionChanged);
     player.onCompleted = null;
     _downloadProgressListenable.dispose();
+    if (_ownsDownloadDio) {
+      _downloadDio.close(force: true);
+    }
     unawaited(player.dispose());
     super.dispose();
   }
@@ -561,6 +605,13 @@ class _LocalAudioMetadata {
   final String? artist;
   final String? album;
   final String? coverFilePath;
+}
+
+class _HydratedTrack {
+  const _HydratedTrack({required this.original, required this.updated});
+
+  final DownloadedTrack original;
+  final DownloadedTrack updated;
 }
 
 class _ParsedTrackFileName {

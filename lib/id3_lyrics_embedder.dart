@@ -5,6 +5,8 @@ import 'dart:typed_data';
 class Id3LyricsEmbedder {
   const Id3LyricsEmbedder._();
 
+  /// Updates the supplied fields while preserving other ID3 frames.
+  /// Null album, lyrics or cover preserves that field; empty text clears it.
   static Future<bool> embedMetadata(
     File file, {
     required String title,
@@ -23,15 +25,16 @@ class Id3LyricsEmbedder {
       return false;
     }
 
+    final existingTag = await _readId3Tag(file, forEditing: true);
     final tagBytes = embedMetadataBytes(
-      const <int>[],
+      existingTag,
       title: title,
       artist: artist,
       album: cleanedAlbum,
       lyrics: cleanedLyrics,
       cover: cover,
     );
-    final sourceOffset = await _existingId3TagLength(file);
+    final sourceOffset = existingTag.length;
     final temporaryFile = File(
       '${file.path}.qingting-${DateTime.now().microsecondsSinceEpoch}.tmp',
     );
@@ -229,64 +232,81 @@ class Id3LyricsEmbedder {
     Id3CoverImage? cover,
   }) {
     final source = Uint8List.fromList(bytes);
-    final audioBytes = _stripExistingTag(source);
+    final tag = _readTagForEditing(source);
+    final audioBytes = source.sublist(tag.byteLength);
     final cleanedAlbum = album?.trim();
     final cleanedLyrics = lyrics?.trim();
     final body = BytesBuilder(copy: false);
 
     if (title.trim().isNotEmpty) {
-      body.add(_textFrame('TIT2', title.trim()));
+      body.add(
+        _textFrame('TIT2', title.trim(), majorVersion: tag.majorVersion),
+      );
     }
     if (artist.trim().isNotEmpty) {
-      body.add(_textFrame('TPE1', artist.trim()));
+      body.add(
+        _textFrame('TPE1', artist.trim(), majorVersion: tag.majorVersion),
+      );
     }
     if (cleanedAlbum != null && cleanedAlbum.isNotEmpty) {
-      body.add(_textFrame('TALB', cleanedAlbum));
+      body.add(
+        _textFrame('TALB', cleanedAlbum, majorVersion: tag.majorVersion),
+      );
     }
     if (cleanedLyrics != null && cleanedLyrics.isNotEmpty) {
-      body.add(_unsynchronizedLyricsFrame(cleanedLyrics));
+      body.add(
+        _unsynchronizedLyricsFrame(
+          cleanedLyrics,
+          majorVersion: tag.majorVersion,
+        ),
+      );
     }
     if (cover != null) {
-      body.add(_attachedPictureFrame(cover));
+      body.add(_attachedPictureFrame(cover, majorVersion: tag.majorVersion));
+    }
+
+    // Keep raw frames in their original ID3 version, including private,
+    // compressed and encrypted frames that the metadata reader cannot decode.
+    for (final frame in tag.frames) {
+      if (_replacesFrame(
+        frame,
+        tag.majorVersion,
+        album: album != null,
+        lyrics: lyrics != null,
+        cover: cover != null,
+      )) {
+        continue;
+      }
+      body.add(frame.bytes);
     }
 
     final bodyBytes = body.toBytes();
     final output = BytesBuilder(copy: false)
       ..add(ascii.encode('ID3'))
-      ..add([3, 0, 0])
+      ..add([tag.majorVersion, tag.revision, tag.flags])
       ..add(_writeSynchsafe(bodyBytes.length))
       ..add(bodyBytes)
       ..add(audioBytes);
     return output.toBytes();
   }
 
-  static Future<Uint8List> _readId3Tag(File file) async {
+  static Future<Uint8List> _readId3Tag(
+    File file, {
+    bool forEditing = false,
+  }) async {
     final input = await file.open();
     try {
       final fileLength = await input.length();
-      if (fileLength < 10) {
-        return Uint8List(0);
-      }
       final header = await input.read(10);
       final tagLength = _id3TagLengthFromHeader(header, fileLength);
       if (tagLength == 0) {
+        if (forEditing && _hasId3Header(header)) {
+          throw const FormatException('ID3 标签不完整，已保留原文件。');
+        }
         return Uint8List(0);
       }
       await input.setPosition(0);
       return await input.read(tagLength);
-    } finally {
-      await input.close();
-    }
-  }
-
-  static Future<int> _existingId3TagLength(File file) async {
-    final input = await file.open();
-    try {
-      final fileLength = await input.length();
-      if (fileLength < 10) {
-        return 0;
-      }
-      return _id3TagLengthFromHeader(await input.read(10), fileLength);
     } finally {
       await input.close();
     }
@@ -332,25 +352,129 @@ class Id3LyricsEmbedder {
     }
   }
 
-  static Uint8List _stripExistingTag(Uint8List bytes) {
-    if (bytes.length < 10 ||
-        bytes[0] != 0x49 ||
-        bytes[1] != 0x44 ||
-        bytes[2] != 0x33) {
-      return bytes;
-    }
+  static bool _hasId3Header(Uint8List bytes) =>
+      bytes.length >= 3 &&
+      bytes[0] == 0x49 &&
+      bytes[1] == 0x44 &&
+      bytes[2] == 0x33;
 
-    final majorVersion = bytes[3];
-    final flags = bytes[5];
-    final tagBodySize = _readSynchsafe(bytes, 6);
-    var tagEnd = 10 + tagBodySize;
-    if (majorVersion == 4 && (flags & 0x10) != 0) {
-      tagEnd += 10;
+  static _EditableId3Tag _readTagForEditing(Uint8List source) {
+    if (!_hasId3Header(source)) {
+      return const _EditableId3Tag(3, 0, 0, 0, []);
     }
-    if (tagEnd > bytes.length) {
-      return bytes;
+    const invalid = FormatException('ID3 标签无法安全编辑，已保留原文件。');
+    if (source.length < 10) throw invalid;
+    final version = source[3];
+    final flags = source[5];
+    final allowedFlags = switch (version) {
+      2 => 0x80,
+      3 => 0xE0,
+      4 => 0xF0,
+      _ => -1,
+    };
+    if (allowedFlags < 0 ||
+        source[4] == 0xFF ||
+        (flags & ~allowedFlags) != 0 ||
+        source.sublist(6, 10).any((byte) => byte >= 0x80)) {
+      throw invalid;
     }
-    return bytes.sublist(tagEnd);
+    final byteLength = _id3TagLengthFromHeader(source, source.length);
+    if (byteLength == 0) throw invalid;
+    final bodyEnd = 10 + _readSynchsafe(source, 6);
+    if (version == 4 && (flags & 0x10) != 0) {
+      const footerIdentifier = [0x33, 0x44, 0x49];
+      for (var index = 0; index < 10; index++) {
+        final expected = index < 3 ? footerIdentifier[index] : source[index];
+        if (source[bodyEnd + index] != expected) throw invalid;
+      }
+    }
+    var body = source.sublist(10, bodyEnd);
+    // v2.2/v2.3 unsynchronisation applies before frame boundaries are read.
+    if (version < 4 && (flags & 0x80) != 0) {
+      body = _removeUnsynchronization(body);
+    }
+    var offset = 0;
+    if ((flags & 0x40) != 0) {
+      if (body.length < 4) throw invalid;
+      offset = version == 3
+          ? 4 + _readUint32(body, 0)
+          : _readSynchsafe(body, 0);
+      if (offset < (version == 3 ? 10 : 6) || offset > body.length) {
+        throw invalid;
+      }
+      // Omit the optional extended header: its old CRC/padding is now stale.
+    }
+    final frames = <_RawId3Frame>[];
+    final headerLength = version == 2 ? 6 : 10;
+    while (offset < body.length) {
+      if (body[offset] == 0 &&
+          body.sublist(offset).every((byte) => byte == 0)) {
+        break;
+      }
+      if (offset + headerLength > body.length) throw invalid;
+      final id = ascii.decode(
+        body.sublist(offset, offset + (version == 2 ? 3 : 4)),
+        allowInvalid: true,
+      );
+      if (!_isValidFrameId(id)) throw invalid;
+      if (version == 4 &&
+          body.sublist(offset + 4, offset + 8).any((byte) => byte >= 0x80)) {
+        throw invalid;
+      }
+      final size = switch (version) {
+        2 => _readUint24(body, offset + 3),
+        4 => _readSynchsafe(body, offset + 4),
+        _ => _readUint32(body, offset + 4),
+      };
+      final end = offset + headerLength + size;
+      if (size <= 0 || end > body.length) throw invalid;
+      final bytes = body.sublist(offset, end);
+      if (version == 4 && (flags & 0x80) != 0) {
+        // Preserve global unsynchronisation as the equivalent per-frame flag.
+        bytes[9] |= 0x02;
+      }
+      frames.add(_RawId3Frame(id, bytes));
+      offset = end;
+    }
+    return _EditableId3Tag(
+      version,
+      source[4],
+      version >= 3 ? flags & 0x20 : 0,
+      byteLength,
+      frames,
+    );
+  }
+
+  static bool _replacesFrame(
+    _RawId3Frame frame,
+    int version, {
+    required bool album,
+    required bool lyrics,
+    required bool cover,
+  }) {
+    if (const ['TIT2', 'TT2', 'TPE1', 'TP1'].contains(frame.id)) return true;
+    if (album && const ['TALB', 'TAL'].contains(frame.id)) return true;
+    if (cover && const ['APIC', 'PIC'].contains(frame.id)) return true;
+    if (!lyrics) return false;
+    if (const ['USLT', 'ULT', 'SYLT', 'SLT'].contains(frame.id)) return true;
+    final isComment = const ['COMM', 'COM'].contains(frame.id);
+    if (!isComment && !const ['TXXX', 'TXX'].contains(frame.id)) return false;
+    final payload = _normalizeFramePayload(
+      frame.bytes.sublist(version == 2 ? 6 : 10),
+      majorVersion: version,
+      formatFlags: version == 2 ? 0 : frame.bytes[9],
+      tagUnsynchronized: false,
+    );
+    final start = isComment ? 4 : 1;
+    if (payload == null || payload.length <= start) return false;
+    final end = _indexOfTextTerminator(payload, payload[0], start);
+    if (end < 0) return false;
+    return _isLyricsDescription(
+      _decodeId3Text(
+        payload[0],
+        payload.sublist(start, end),
+      ).trim().toLowerCase(),
+    );
   }
 
   static Iterable<_Id3Frame> _readId3Frames(Uint8List source) sync* {
@@ -483,32 +607,49 @@ class Id3LyricsEmbedder {
     return output.toBytes();
   }
 
-  static Uint8List _textFrame(String id, String value) {
+  static Uint8List _textFrame(String id, String value, {int majorVersion = 3}) {
     final payload = BytesBuilder(copy: false)
       ..addByte(1)
       ..add(_utf16WithBom(value));
-    return _frame(id, payload.toBytes());
+    return _frame(id, payload.toBytes(), majorVersion: majorVersion);
   }
 
-  static Uint8List _unsynchronizedLyricsFrame(String lyrics) {
+  static Uint8List _unsynchronizedLyricsFrame(
+    String lyrics, {
+    int majorVersion = 3,
+  }) {
     final payload = BytesBuilder(copy: false)
       ..addByte(1)
       ..add(ascii.encode('chi'))
       ..add(_utf16WithBom('QingTing'))
       ..add([0, 0])
       ..add(_utf16Le(lyrics));
-    return _frame('USLT', payload.toBytes());
+    return _frame('USLT', payload.toBytes(), majorVersion: majorVersion);
   }
 
-  static Uint8List _attachedPictureFrame(Id3CoverImage cover) {
-    final payload = BytesBuilder(copy: false)
-      ..addByte(0)
-      ..add(latin1.encode(cover.mimeType))
-      ..addByte(0)
+  static Uint8List _attachedPictureFrame(
+    Id3CoverImage cover, {
+    int majorVersion = 3,
+  }) {
+    final payload = BytesBuilder(copy: false)..addByte(0);
+    if (majorVersion == 2) {
+      final format = switch (cover.mimeType.toLowerCase()) {
+        'image/jpeg' => 'JPG',
+        'image/png' => 'PNG',
+        'image/gif' => 'GIF',
+        _ => throw const FormatException('该封面格式不能写入 ID3v2.2 标签。'),
+      };
+      payload.add(ascii.encode(format));
+    } else {
+      payload
+        ..add(latin1.encode(cover.mimeType))
+        ..addByte(0);
+    }
+    payload
       ..addByte(3)
       ..addByte(0)
       ..add(cover.bytes);
-    return _frame('APIC', payload.toBytes());
+    return _frame('APIC', payload.toBytes(), majorVersion: majorVersion);
   }
 
   static Id3CoverImage? _parseAttachedPictureFrame(
@@ -758,10 +899,35 @@ class Id3LyricsEmbedder {
     };
   }
 
-  static Uint8List _frame(String id, Uint8List payload) {
+  static Uint8List _frame(
+    String id,
+    Uint8List payload, {
+    int majorVersion = 3,
+  }) {
+    if (majorVersion == 2) {
+      final legacyId = const {
+        'TIT2': 'TT2',
+        'TPE1': 'TP1',
+        'TALB': 'TAL',
+        'USLT': 'ULT',
+        'APIC': 'PIC',
+      }[id]!;
+      if (payload.length > 0xFFFFFF) {
+        throw const FormatException('ID3v2.2 标签帧过大。');
+      }
+      return (BytesBuilder(copy: false)
+            ..add(ascii.encode(legacyId))
+            ..add(_writeUint32(payload.length).sublist(1))
+            ..add(payload))
+          .toBytes();
+    }
     final frame = BytesBuilder(copy: false)
       ..add(ascii.encode(id))
-      ..add(_writeUint32(payload.length))
+      ..add(
+        majorVersion == 4
+            ? _writeSynchsafe(payload.length)
+            : _writeUint32(payload.length),
+      )
       ..add([0, 0])
       ..add(payload);
     return frame.toBytes();
@@ -921,4 +1087,25 @@ class _Id3Frame {
 
   final String id;
   final Uint8List payload;
+}
+
+class _EditableId3Tag {
+  const _EditableId3Tag(
+    this.majorVersion,
+    this.revision,
+    this.flags,
+    this.byteLength,
+    this.frames,
+  );
+  final int majorVersion;
+  final int revision;
+  final int flags;
+  final int byteLength;
+  final List<_RawId3Frame> frames;
+}
+
+class _RawId3Frame {
+  const _RawId3Frame(this.id, this.bytes);
+  final String id;
+  final Uint8List bytes;
 }

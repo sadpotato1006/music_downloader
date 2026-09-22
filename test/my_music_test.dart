@@ -103,6 +103,131 @@ void main() {
     expect(playlist.name, '未命名歌单');
   });
 
+  test(
+    'collection lookups preserve path order and ignore missing duplicates',
+    () {
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      addTearDown(controller.dispose);
+      final first = _lookupTrack('first');
+      final second = _lookupTrack('second');
+      final paths = [
+        second.path,
+        '/music/./first.mp3',
+        '/music/missing.mp3',
+        second.path,
+      ];
+      controller.downloadedTracks = [first, second];
+      controller.myMusic = MyMusicData(
+        favoriteTrackPaths: paths,
+        playlists: [
+          MusicPlaylist(
+            id: 'lookup-playlist',
+            name: '通勤',
+            trackPaths: paths,
+            createdAt: DateTime(2026),
+          ),
+        ],
+        recentPlaybacks: [
+          for (final path in paths)
+            RecentPlayback(trackPath: path, playedAt: DateTime(2026)),
+        ],
+      );
+
+      for (var read = 0; read < 2; read += 1) {
+        expect(controller.favoriteTracks, [second, first]);
+        expect(controller.tracksForPlaylist('lookup-playlist'), [
+          second,
+          first,
+        ]);
+        expect(controller.recentTracks, [second, first]);
+        expect(controller.isFavorite(first), isTrue);
+      }
+    },
+  );
+
+  test(
+    'collection lookups reflect edited added and removed library tracks',
+    () {
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      addTearDown(controller.dispose);
+      final first = _lookupTrack('first');
+      final second = _lookupTrack('second');
+      final paths = [first.path, second.path];
+      controller.downloadedTracks = [first];
+      controller.myMusic = MyMusicData(
+        favoriteTrackPaths: paths,
+        playlists: [
+          MusicPlaylist(
+            id: 'lookup-playlist',
+            name: '通勤',
+            trackPaths: paths,
+            createdAt: DateTime(2026),
+          ),
+        ],
+        recentPlaybacks: [
+          for (final path in paths)
+            RecentPlayback(trackPath: path, playedAt: DateTime(2026)),
+        ],
+      );
+
+      void expectCollections(List<DownloadedTrack> expected) {
+        expect(controller.favoriteTracks, expected);
+        expect(controller.tracksForPlaylist('lookup-playlist'), expected);
+        expect(controller.recentTracks, expected);
+      }
+
+      expectCollections([first]);
+      final updated = first.copyWith(title: '修正标题', album: '修正专辑');
+      controller.downloadedTracks = [updated, second];
+      expectCollections([updated, second]);
+      controller.downloadedTracks = [second];
+      expectCollections([second]);
+      controller.downloadedTracks = [];
+      expectCollections([]);
+    },
+  );
+
+  test(
+    'favorite membership refreshes after toggles and restored data',
+    () async {
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      addTearDown(controller.dispose);
+      final first = _lookupTrack('first');
+      final second = _lookupTrack('second');
+      controller.downloadedTracks = [first, second];
+
+      expect(controller.isFavorite(first), isFalse);
+      await controller.toggleFavorite(first);
+      expect(controller.isFavorite(first), isTrue);
+      expect(controller.isFavorite(second), isFalse);
+      await controller.toggleFavorite(first);
+      expect(controller.isFavorite(first), isFalse);
+
+      controller.myMusic = MyMusicData(
+        favoriteTrackPaths: [
+          Platform.isWindows ? second.path.toUpperCase() : second.path,
+        ],
+      );
+      expect(controller.isFavorite(first), isFalse);
+      expect(controller.isFavorite(second), isTrue);
+      expect(controller.favoriteTracks, [second]);
+      controller.myMusic = const MyMusicData();
+      expect(controller.isFavorite(second), isFalse);
+    },
+  );
+
   test('deleting a downloaded track removes its file and record', () async {
     final directory = await Directory.systemTemp.createTemp(
       'qingting-delete-track-',
@@ -331,6 +456,16 @@ void main() {
     },
   );
 }
+
+DownloadedTrack _lookupTrack(String id) => DownloadedTrack(
+  id: id,
+  title: id,
+  artist: 'Artist',
+  path: '/music/$id.mp3',
+  format: 'mp3',
+  downloadedAt: DateTime(2026),
+  sourceUrl: '',
+);
 
 class _FakeStorageService extends StorageService {
   MyMusicData savedMyMusic = const MyMusicData();

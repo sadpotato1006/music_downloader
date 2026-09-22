@@ -43,10 +43,7 @@ class LibrarySearch {
   }
 
   static String normalize(String value) {
-    return value
-        .toLowerCase()
-        .replaceAll(_noisePattern, '')
-        .replaceAll(RegExp(r'\s+'), '');
+    return value.toLowerCase().replaceAll(_noisePattern, '');
   }
 
   static String _safeShortPinyin(String text) {
@@ -65,18 +62,22 @@ class LibrarySearch {
     }
   }
 
-  static bool _isClosePinyinInitialQuery(String query, String initials) {
+  static bool _isClosePinyinInitialQuery(
+    String query,
+    String initials, {
+    String? foldedInitials,
+  }) {
     if (!_asciiLetterPattern.hasMatch(query) || initials.length < 2) {
       return false;
     }
-    final foldedInitials = _foldRepeatedAsciiLetters(initials);
-    if (foldedInitials.contains(query)) {
+    final folded = foldedInitials ?? _foldRepeatedAsciiLetters(initials);
+    if (folded.contains(query)) {
       return true;
     }
     if (query.length < 3 || query.length > 6) {
       return false;
     }
-    return _editDistanceAtMostOne(query, foldedInitials);
+    return _editDistanceAtMostOne(query, folded);
   }
 
   static String _foldRepeatedAsciiLetters(String value) {
@@ -139,6 +140,7 @@ class LibrarySearchIndex {
     required this.foldedPinyinInitials,
     required this.fullPinyin,
     required this.fieldPinyinInitials,
+    required this.foldedFieldPinyinInitials,
     required this.fieldFullPinyin,
     required this.normalizedLyrics,
   });
@@ -156,6 +158,10 @@ class LibrarySearchIndex {
     final pinyinInitials = LibrarySearch.normalize(
       LibrarySearch._safeShortPinyin(metadataText),
     );
+    final fieldPinyinInitials = List<String>.unmodifiable([
+      for (final field in metadataFields)
+        LibrarySearch.normalize(LibrarySearch._safeShortPinyin(field)),
+    ]);
     return LibrarySearchIndex._(
       normalizedText: LibrarySearch.normalize(metadataText),
       pinyinInitials: pinyinInitials,
@@ -165,9 +171,10 @@ class LibrarySearchIndex {
       fullPinyin: LibrarySearch.normalize(
         LibrarySearch._safeFullPinyin(metadataText),
       ),
-      fieldPinyinInitials: [
-        for (final field in metadataFields)
-          LibrarySearch.normalize(LibrarySearch._safeShortPinyin(field)),
+      fieldPinyinInitials: fieldPinyinInitials,
+      foldedFieldPinyinInitials: [
+        for (final field in fieldPinyinInitials)
+          LibrarySearch._foldRepeatedAsciiLetters(field),
       ],
       fieldFullPinyin: [
         for (final field in metadataFields)
@@ -182,6 +189,7 @@ class LibrarySearchIndex {
   final String foldedPinyinInitials;
   final String fullPinyin;
   final List<String> fieldPinyinInitials;
+  final List<String> foldedFieldPinyinInitials;
   final List<String> fieldFullPinyin;
   final String normalizedLyrics;
 
@@ -195,18 +203,21 @@ class LibrarySearchIndex {
         foldedPinyinInitials.contains(normalizedQuery) ||
         fullPinyin.contains(normalizedQuery) ||
         fieldFullPinyin.any((field) => field.contains(normalizedQuery)) ||
-        fieldPinyinInitials.any(
-          (field) =>
-              field.contains(normalizedQuery) ||
-              LibrarySearch._foldRepeatedAsciiLetters(
-                field,
-              ).contains(normalizedQuery),
-        )) {
+        foldedFieldPinyinInitials.any(
+          (field) => field.contains(normalizedQuery),
+        ) ||
+        fieldPinyinInitials.any((field) => field.contains(normalizedQuery))) {
       return true;
     }
-    return fieldPinyinInitials.any(
-      (field) =>
-          LibrarySearch._isClosePinyinInitialQuery(normalizedQuery, field),
-    );
+    for (var index = 0; index < fieldPinyinInitials.length; index += 1) {
+      if (LibrarySearch._isClosePinyinInitialQuery(
+        normalizedQuery,
+        fieldPinyinInitials[index],
+        foldedInitials: foldedFieldPinyinInitials[index],
+      )) {
+        return true;
+      }
+    }
+    return false;
   }
 }

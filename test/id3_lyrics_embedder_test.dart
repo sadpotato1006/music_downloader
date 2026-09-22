@@ -6,6 +6,305 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/id3_lyrics_embedder.dart';
 
 void main() {
+  for (final version in [2, 3, 4]) {
+    test(
+      'editing ID3v2.$version preserves unrelated frames and audio',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'qingting-preserve-id3-',
+        );
+        final file = File('${directory.path}/song.mp3');
+        final extras = [
+          _versionedFrame(version, version == 2 ? 'TRK' : 'TRCK', [
+            0,
+            ...ascii.encode('7/12'),
+          ]),
+          _versionedFrame(
+            version,
+            version == 2
+                ? 'TYE'
+                : version == 3
+                ? 'TYER'
+                : 'TDRC',
+            [0, ...ascii.encode('2024')],
+          ),
+          _versionedFrame(version, version == 2 ? 'TCO' : 'TCON', [
+            0,
+            ...ascii.encode('Rock'),
+          ]),
+          _versionedFrame(version, version == 2 ? 'TXX' : 'TXXX', [
+            0,
+            ...ascii.encode('REPLAYGAIN_TRACK_GAIN'),
+            0,
+            ...ascii.encode('-3.5 dB'),
+          ]),
+          _versionedFrame(
+            version,
+            version == 2 ? 'XYZ' : 'XTRA',
+            List.generate(160, (index) => index),
+          ),
+        ];
+        final original = _versionedTag(version, extras);
+        await file.writeAsBytes(original);
+        try {
+          await Id3LyricsEmbedder.embedMetadata(
+            file,
+            title: '新歌名',
+            artist: '歌手',
+            album: '专辑',
+            lyrics: '[00:01.00]歌词',
+          );
+          final updated = await file.readAsBytes();
+          expect(updated[3], version);
+          final raw = latin1.decode(updated);
+          for (final frame in extras) {
+            expect(raw, contains(latin1.decode(frame)));
+          }
+          expect(
+            updated.sublist(updated.length - 5),
+            original.sublist(original.length - 5),
+          );
+          final metadata = await Id3LyricsEmbedder.extractMetadata(file);
+          expect(metadata.title, '新歌名');
+          expect(metadata.artist, '歌手');
+          expect(metadata.album, '专辑');
+          expect(metadata.lyrics, '[00:01.00]歌词');
+        } finally {
+          await file.delete();
+          await directory.delete();
+        }
+      },
+    );
+  }
+
+  for (final version in [2, 4]) {
+    test('writes large lyrics and cover frames in ID3v2.$version format', () {
+      final lyrics = List.filled(50, '[00:01.00]歌词').join('\n');
+      final cover = Uint8List.fromList(List.generate(200, (index) => index));
+      final original = _versionedTag(version, [
+        _versionedFrame(version, version == 2 ? 'TRK' : 'TRCK', [0, 55]),
+      ]);
+      final updated = Id3LyricsEmbedder.embedMetadataBytes(
+        original,
+        title: 'Song',
+        artist: 'Artist',
+        lyrics: lyrics,
+        cover: Id3CoverImage(mimeType: 'image/png', bytes: cover),
+      );
+      final metadata = Id3LyricsEmbedder.extractMetadataBytes(updated);
+      expect(metadata.lyrics, lyrics);
+      expect(metadata.cover?.mimeType, 'image/png');
+      expect(metadata.cover?.bytes, cover);
+      expect(updated[3], version);
+    });
+  }
+
+  test('omitted metadata is preserved and explicit empty values clear it', () {
+    final original = Id3LyricsEmbedder.embedMetadataBytes(
+      [255, 251, 144, 100, 0],
+      title: 'Song',
+      artist: 'Artist',
+      album: 'Album',
+      lyrics: 'Lyrics',
+      cover: Id3CoverImage(
+        mimeType: 'image/png',
+        bytes: Uint8List.fromList([1, 2, 3]),
+      ),
+    );
+    final updated = Id3LyricsEmbedder.embedLyricsBytes(
+      original,
+      title: 'Song',
+      artist: 'Artist',
+      lyrics: 'New lyrics',
+    );
+    final metadata = Id3LyricsEmbedder.extractMetadataBytes(updated);
+    expect(metadata.album, 'Album');
+    expect(metadata.cover?.bytes, [1, 2, 3]);
+    expect(metadata.lyrics, 'New lyrics');
+    final cleared = Id3LyricsEmbedder.embedMetadataBytes(
+      updated,
+      title: 'Song',
+      artist: 'Artist',
+      album: '',
+      lyrics: '',
+    );
+    expect(Id3LyricsEmbedder.extractMetadataBytes(cleared).album, isNull);
+    expect(Id3LyricsEmbedder.extractLyricsBytes(cleared), isNull);
+    expect(Id3LyricsEmbedder.extractCoverBytes(cleared)?.bytes, [1, 2, 3]);
+  });
+
+  test(
+    'replacing lyrics preserves unrelated user text and multiline comments',
+    () {
+      final comment = _versionedFrame(3, 'COMM', [
+        0,
+        ...ascii.encode('eng'),
+        0,
+        ...ascii.encode('one\ntwo\nthree\nfour'),
+      ]);
+      final replayGain = _versionedFrame(3, 'TXXX', [
+        0,
+        ...ascii.encode('REPLAYGAIN_TRACK_GAIN'),
+        0,
+        ...ascii.encode('-3 dB'),
+      ]);
+      final lyrics = _versionedFrame(3, 'TXXX', [
+        0,
+        ...ascii.encode('LYRICS'),
+        0,
+        ...ascii.encode('old lyrics'),
+      ]);
+      final updated = Id3LyricsEmbedder.embedMetadataBytes(
+        _versionedTag(3, [comment, replayGain, lyrics]),
+        title: 'Song',
+        artist: 'Artist',
+        lyrics: 'New lyrics',
+      );
+      final raw = latin1.decode(updated);
+      expect(raw, contains(latin1.decode(comment)));
+      expect(raw, contains(latin1.decode(replayGain)));
+      expect(raw, isNot(contains(latin1.decode(lyrics))));
+      expect(Id3LyricsEmbedder.extractLyricsBytes(updated), 'New lyrics');
+    },
+  );
+
+  test('editing preserves compressed and encrypted frame bytes', () {
+    for (final version in [3, 4]) {
+      final frame = _versionedFrame(version, 'XTRA', [0, 0, 0, 4, 1, 2, 3, 4]);
+      frame[9] = version == 3 ? 0xC0 : 0x0C;
+      final updated = Id3LyricsEmbedder.embedMetadataBytes(
+        _versionedTag(version, [frame]),
+        title: 'Song',
+        artist: 'Artist',
+      );
+      expect(latin1.decode(updated), contains(latin1.decode(frame)));
+    }
+  });
+
+  test(
+    'editing unsynchronised v2.3 preserves raw frame payload boundaries',
+    () {
+      final frame = _versionedFrame(3, 'XTRA', [1, 255, 224, 2, 255, 0, 3]);
+      final body = <int>[];
+      for (var index = 0; index < frame.length; index++) {
+        body.add(frame[index]);
+        if (frame[index] == 255 &&
+            index + 1 < frame.length &&
+            (frame[index + 1] == 0 || frame[index + 1] >= 224)) {
+          body.add(0);
+        }
+      }
+      final source = Uint8List.fromList([
+        ...ascii.encode('ID3'),
+        3,
+        0,
+        0x80,
+        ..._synchsafe(body.length),
+        ...body,
+        255,
+        251,
+        144,
+        100,
+        0,
+      ]);
+      final updated = Id3LyricsEmbedder.embedMetadataBytes(
+        source,
+        title: 'Song',
+        artist: 'Artist',
+      );
+      expect(latin1.decode(updated), contains(latin1.decode(frame)));
+      expect(updated[5] & 0x80, 0);
+    },
+  );
+
+  test(
+    'editing v2.4 preserves frame unsynchronisation and removes old footer',
+    () {
+      final frame = _versionedFrame(4, 'XTRA', [1, 255, 0, 224, 2]);
+      final header = [
+        ...ascii.encode('ID3'),
+        4,
+        0,
+        0x90,
+        ..._synchsafe(frame.length),
+      ];
+      final source = [
+        ...header,
+        ...frame,
+        ...ascii.encode('3DI'),
+        ...header.sublist(3),
+        255,
+        251,
+        144,
+        100,
+        0,
+      ];
+      final updated = Id3LyricsEmbedder.embedMetadataBytes(
+        source,
+        title: 'Song',
+        artist: 'Artist',
+      );
+      final expectedFrame = Uint8List.fromList(frame)..[9] = 0x02;
+      expect(latin1.decode(updated), contains(latin1.decode(expectedFrame)));
+      expect(updated[5] & 0x90, 0);
+      expect(updated.sublist(updated.length - 5), [255, 251, 144, 100, 0]);
+      expect(Id3LyricsEmbedder.extractMetadataBytes(updated).title, 'Song');
+    },
+  );
+
+  test('editing an extended header preserves unrelated frames', () {
+    final frame = _versionedFrame(3, 'TRCK', [0, 55]);
+    final updated = Id3LyricsEmbedder.embedMetadataBytes(
+      _id3v23WithExtendedHeader([frame]),
+      title: 'Song',
+      artist: 'Artist',
+    );
+    expect(latin1.decode(updated), contains(latin1.decode(frame)));
+    expect(updated[5] & 0x40, 0);
+  });
+
+  test('malformed or unsupported tags are not modified on disk', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-invalid-id3-',
+    );
+    final file = File('${directory.path}/song.mp3');
+    try {
+      for (final bytes in [
+        [73, 68, 51, 3],
+        [73, 68, 51, 3, 0, 0, 0, 0, 1, 0],
+        _versionedTag(5, []),
+        [73, 68, 51, 2, 0, 0x40, 0, 0, 0, 1, 1],
+        _versionedTag(3, [
+          Uint8List.fromList([
+            ...ascii.encode('TRCK'),
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            55,
+          ]),
+        ]),
+      ]) {
+        await file.writeAsBytes(bytes);
+        await expectLater(
+          Id3LyricsEmbedder.embedMetadata(
+            file,
+            title: 'Song',
+            artist: 'Artist',
+          ),
+          throwsFormatException,
+        );
+        expect(await file.readAsBytes(), bytes);
+      }
+    } finally {
+      await file.delete();
+      await directory.delete();
+    }
+  });
+
   test('embeds lrc lyrics into an id3 uslt frame', () {
     final sourceMp3 = <int>[0xFF, 0xFB, 0x90, 0x64, 0x00];
 
@@ -276,6 +575,35 @@ Uint8List _id3WithFrames(List<Uint8List> frames) {
     ..add(tagBodyBytes)
     ..add([0xFF, 0xFB, 0x90, 0x64, 0x00]);
   return output.toBytes();
+}
+
+Uint8List _versionedFrame(int version, String id, List<int> payload) =>
+    Uint8List.fromList([
+      ...ascii.encode(id),
+      ...(version == 2
+          ? _uint24(payload.length)
+          : version == 4
+          ? _synchsafe(payload.length)
+          : _uint32(payload.length)),
+      if (version != 2) ...[0, 0],
+      ...payload,
+    ]);
+
+Uint8List _versionedTag(int version, List<Uint8List> frames) {
+  final body = frames.expand((frame) => frame).toList();
+  return Uint8List.fromList([
+    ...ascii.encode('ID3'),
+    version,
+    0,
+    0,
+    ..._synchsafe(body.length),
+    ...body,
+    255,
+    251,
+    144,
+    100,
+    0,
+  ]);
 }
 
 Uint8List _id3v23WithExtendedHeader(List<Uint8List> frames) {
