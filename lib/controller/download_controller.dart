@@ -143,7 +143,8 @@ extension AppControllerDownloadActions on AppController {
           task.track.source == result.source &&
           (task.status == DownloadStatus.queued ||
               task.status == DownloadStatus.downloading ||
-              task.status == DownloadStatus.paused),
+              task.status == DownloadStatus.paused ||
+              task.libraryPending),
     );
   }
 
@@ -187,6 +188,11 @@ extension AppControllerDownloadActions on AppController {
 
   void retryDownload(String taskId) {
     final current = _taskById(taskId);
+    if (current?.status == DownloadStatus.completed &&
+        current!.libraryPending) {
+      unawaited(_importCompletedDownload(taskId));
+      return;
+    }
     if (current == null ||
         current.status == DownloadStatus.queued ||
         current.status == DownloadStatus.downloading ||
@@ -217,7 +223,6 @@ extension AppControllerDownloadActions on AppController {
       if (shouldRun != null && !shouldRun()) {
         throw const _ObsoleteSourceRequest();
       }
-      _throwIfSourceCoolingDown();
       await _waitForSourceGap();
       // A newer search can arrive while this request waits for the rate limit.
       if (shouldRun != null && !shouldRun()) {
@@ -225,12 +230,10 @@ extension AppControllerDownloadActions on AppController {
       }
       final result = await request();
       _lastSourceRequestAt = DateTime.now();
-      _clearExpiredCooldown();
       return result;
     } on _ObsoleteSourceRequest {
       rethrow;
     } on MusicSourceException catch (error) {
-      _activateCooldownIfNeeded(error.message);
       AppLog.instance.warning(
         'source',
         '${source.name} $action失败',
@@ -256,17 +259,6 @@ extension AppControllerDownloadActions on AppController {
     }
   }
 
-  void _throwIfSourceCoolingDown() {
-    final remaining = sourceCooldownRemaining;
-    if (remaining <= Duration.zero) {
-      _clearExpiredCooldown();
-      return;
-    }
-    throw MusicSourceException(
-      '${sourceCooldownReason ?? '请求太频繁'}，青听已暂停访问 ${source.name} ${_formatCooldown(remaining)}。',
-    );
-  }
-
   Future<void> _waitForSourceGap() async {
     final last = _lastSourceRequestAt;
     if (last == null) {
@@ -278,42 +270,6 @@ extension AppControllerDownloadActions on AppController {
     }
   }
 
-  void _activateCooldownIfNeeded(String message) {
-    final lower = message.toLowerCase();
-    Duration? cooldown;
-    String? reason;
-    if (lower.contains('520') ||
-        lower.contains('521') ||
-        lower.contains('522') ||
-        lower.contains('523') ||
-        lower.contains('524')) {
-      cooldown = AppController._cooldown520;
-      reason = '${source.name} 临时拦截或异常返回';
-    } else if (lower.contains('429') || lower.contains('频繁')) {
-      cooldown = AppController._cooldown429;
-      reason = '请求太频繁';
-    } else if (lower.contains('403') ||
-        lower.contains('拒绝') ||
-        lower.contains('验证')) {
-      cooldown = AppController._cooldown403;
-      reason = '${source.name} 拒绝访问';
-    }
-    if (cooldown == null) {
-      return;
-    }
-    sourceCooldownUntil = DateTime.now().add(cooldown);
-    sourceCooldownReason = reason;
-  }
-
-  void _clearExpiredCooldown() {
-    if (sourceCooldownUntil == null ||
-        sourceCooldownUntil!.isAfter(DateTime.now())) {
-      return;
-    }
-    sourceCooldownUntil = null;
-    sourceCooldownReason = null;
-  }
-
   String _friendlySourceMessage(
     String message,
     String action,
@@ -321,13 +277,15 @@ extension AppControllerDownloadActions on AppController {
   ) {
     final lower = message.toLowerCase();
     if (lower.contains('520')) {
-      return '$sourceName 返回 HTTP 520，通常是短时间请求太多或被网站临时拦截。青听已自动冷却几分钟，稍后再试。';
+      return '$sourceName 返回 HTTP 520，网站可能临时异常或拦截了请求。请检查网络后重试。';
     }
     if (lower.contains('403') || lower.contains('拒绝')) {
-      return '$sourceName 拒绝了这次$action请求。可能是访问太频繁、链接过期，或该页面不允许程序读取。';
+      final status = lower.contains('403') ? '（HTTP 403）' : '';
+      return '$sourceName 拒绝了这次$action请求$status。如浏览器能正常访问，请检查青听与浏览器的代理设置及网络出口是否一致；也可能是网站限制了程序访问。';
     }
     if (lower.contains('429') || lower.contains('频繁')) {
-      return '请求太频繁，青听已暂停访问 $sourceName 一会儿，稍后再试。';
+      final status = lower.contains('429') ? '（HTTP 429）' : '';
+      return '$sourceName 提示请求太频繁$status，请稍后重试。';
     }
     if (lower.contains('验证')) {
       return '$sourceName 要求验证后才能继续，青听不会绕过验证。请稍后重试。';
@@ -356,16 +314,6 @@ extension AppControllerDownloadActions on AppController {
     return error.toString();
   }
 
-  String _formatCooldown(Duration duration) {
-    final totalSeconds = duration.inSeconds <= 0 ? 1 : duration.inSeconds;
-    final minutes = totalSeconds ~/ 60;
-    final seconds = totalSeconds % 60;
-    if (minutes <= 0) {
-      return '$seconds 秒';
-    }
-    return '$minutes 分 $seconds 秒';
-  }
-
   Future<void> _restoreDownloadTasks() async {
     if (downloadTasks.isEmpty) {
       return;
@@ -373,7 +321,7 @@ extension AppControllerDownloadActions on AppController {
     var changed = false;
     final restored = <DownloadTask>[];
     for (final task in downloadTasks) {
-      if (task.status == DownloadStatus.completed ||
+      if ((task.status == DownloadStatus.completed && !task.libraryPending) ||
           task.status == DownloadStatus.canceled) {
         changed = true;
       }
@@ -407,6 +355,7 @@ extension AppControllerDownloadActions on AppController {
           progress: progress,
           error: error,
           receivedBytes: receivedBytes,
+          libraryPending: task.libraryPending && exists,
         ),
       );
     }
@@ -420,7 +369,7 @@ extension AppControllerDownloadActions on AppController {
     final snapshot = List<DownloadTask>.unmodifiable(
       downloadTasks.where(
         (task) =>
-            task.status != DownloadStatus.completed &&
+            (task.status != DownloadStatus.completed || task.libraryPending) &&
             task.status != DownloadStatus.canceled,
       ),
     );
@@ -432,8 +381,13 @@ extension AppControllerDownloadActions on AppController {
   Future<void> _persistDownloadTasksBestEffort() async {
     try {
       await _saveDownloadTasks();
-    } catch (_) {
+    } catch (error, stackTrace) {
       // The current transfer can continue; a later state change will retry.
+      AppLog.instance.warning(
+        'storage',
+        '保存下载任务失败',
+        detail: '$error\n$stackTrace',
+      );
     }
   }
 
@@ -542,17 +496,21 @@ extension AppControllerDownloadActions on AppController {
       }
       _replaceTask(
         taskId,
-        (task) => task.copyWith(status: DownloadStatus.completed, progress: 1),
+        (task) => task.copyWith(
+          status: DownloadStatus.completed,
+          progress: 1,
+          libraryPending: true,
+        ),
       );
-      await _addDownloadedTrack(completedTask);
-      await _saveDownloadTasks();
+      // Checkpoint the finished file before any fallible library/cache writes.
+      await _persistDownloadTasksBestEffort();
+      await _importCompletedDownload(taskId);
       AppLog.instance.info(
         'download',
         '下载完成',
         detail:
             '${completedTask.track.title}, bytes=${completedTask.receivedBytes}',
       );
-      globalMessage = '下载完成：${completedTask.track.title}';
     } on DioException catch (error) {
       if (CancelToken.isCancel(error)) {
         AppLog.instance.info('download', '下载连接已中止', detail: task.track.title);
@@ -604,6 +562,68 @@ extension AppControllerDownloadActions on AppController {
         _notify();
       }
     }
+  }
+
+  bool isImportingDownload(String taskId) =>
+      _downloadImportOperations.containsKey(taskId);
+
+  Future<void> _importCompletedDownload(String taskId) {
+    final active = _downloadImportOperations[taskId];
+    if (active != null) return active;
+    final task = _taskById(taskId);
+    if (_isDisposed || task == null || !task.libraryPending) {
+      return Future<void>.value();
+    }
+    late final Future<void> operation;
+    operation = _runDownloadImport(task).whenComplete(() {
+      _downloadImportOperations.remove(taskId);
+      _notify();
+    });
+    _downloadImportOperations[taskId] = operation;
+    _notify();
+    return operation;
+  }
+
+  Future<void> _runDownloadImport(DownloadTask task) async {
+    _replaceTask(task.id, (current) => current.copyWith(error: null));
+    var readHeld = false;
+    try {
+      readHeld = _tryBeginMetadataRead(task.savePath);
+      if (!readHeld) {
+        throw const FileSystemException('歌曲正在编辑或删除，请稍后重试保存。');
+      }
+      if (!await File(task.savePath).exists()) {
+        _replaceTask(
+          task.id,
+          (current) => current.copyWith(
+            status: DownloadStatus.failed,
+            libraryPending: false,
+            error: '已下载文件不存在，请重新下载。',
+          ),
+        );
+        await _persistDownloadTasksBestEffort();
+        return;
+      }
+      await _addDownloadedTrack(task);
+      _replaceTask(
+        task.id,
+        (current) => current.copyWith(libraryPending: false),
+      );
+      globalMessage = '下载完成：${task.track.title}';
+    } catch (error, stackTrace) {
+      const message = '音频已下载，保存到曲库失败，可重试保存。';
+      _replaceTask(task.id, (current) => current.copyWith(error: message));
+      globalMessage = '${task.track.title}：$message';
+      AppLog.instance.error(
+        'storage',
+        '下载文件已保留，曲库入库待重试',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    } finally {
+      if (readHeld) _endMetadataRead(task.savePath);
+    }
+    await _persistDownloadTasksBestEffort();
   }
 
   Future<void> _downloadTaskFile(
@@ -1068,9 +1088,21 @@ extension AppControllerDownloadActions on AppController {
       if (!await file.exists()) {
         return null;
       }
-      final bytes = await file.readAsBytes();
-      if (bytes.isEmpty || bytes.length > 5 * 1024 * 1024) {
-        return null;
+      final coverFile = await file.open();
+      late final Uint8List bytes;
+      try {
+        final length = await coverFile.length();
+        if (length == 0 || length > AppController._maxEmbeddedCoverBytes) {
+          return null;
+        }
+        // Bound the read as well as checking length, including growing files.
+        bytes = await coverFile.read(AppController._maxEmbeddedCoverBytes + 1);
+        if (bytes.isEmpty ||
+            bytes.length > AppController._maxEmbeddedCoverBytes) {
+          return null;
+        }
+      } finally {
+        await coverFile.close();
       }
       final mimeType = _coverMimeType(bytes, contentType: null, url: input);
       if (mimeType == null) {
@@ -1150,10 +1182,7 @@ extension AppControllerDownloadActions on AppController {
       return '下载链接不存在或已经失效。请重新搜索后再试。';
     }
     if (status == 429 || status == 520) {
-      if (sourceName == source.name) {
-        _activateCooldownIfNeeded('HTTP $status');
-      }
-      return '$sourceName 返回 HTTP $status，可能是请求太频繁。青听已自动冷却，稍后再试。';
+      return '$sourceName 返回 HTTP $status，可能是请求太频繁或网站临时异常。请稍后重试。';
     }
     if (status != null) {
       return '下载失败：HTTP $status。';

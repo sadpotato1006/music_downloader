@@ -104,7 +104,7 @@ class GequbaoSource implements MusicSource, DownloadMusicSource {
       final response = lastResponse;
       final status = response?.statusCode ?? 0;
       if (status == 403) {
-        throw const MusicSourceException('歌曲宝拒绝了程序请求。请稍后重试，或在浏览器打开歌曲宝后再试。');
+        throw const MusicSourceException(_forbiddenMessage);
       }
       if (status == 520) {
         throw const MusicSourceException(
@@ -146,7 +146,7 @@ class GequbaoSource implements MusicSource, DownloadMusicSource {
       );
       final status = response.statusCode ?? 0;
       if (status == 403) {
-        throw const MusicSourceException('歌曲宝要求验证后才能解析这个音频链接。');
+        throw const MusicSourceException(_forbiddenMessage);
       }
       if (status >= 400) {
         throw MusicSourceException('歌曲宝播放接口返回 HTTP $status。');
@@ -187,6 +187,8 @@ class GequbaoSource implements MusicSource, DownloadMusicSource {
 
   static bool _validateAnyStatus(int? status) => status != null;
 
+  static const _forbiddenMessage = '歌曲宝拒绝了程序请求（HTTP 403）。请检查代理和网络设置，或稍后重试。';
+
   static bool _shouldRetryStatus(int status) {
     return status == 520 ||
         status == 521 ||
@@ -222,7 +224,7 @@ class GequbaoSource implements MusicSource, DownloadMusicSource {
   static String _messageForDio(DioException error) {
     final status = error.response?.statusCode;
     if (status == 403) {
-      return '歌曲宝拒绝了程序请求。请稍后重试，或在浏览器确认该公开页面是否仍可访问。';
+      return _forbiddenMessage;
     }
     if (status != null) {
       return '歌曲宝返回 HTTP $status，当前无法读取该页面。';

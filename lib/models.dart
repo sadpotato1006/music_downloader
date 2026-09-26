@@ -153,6 +153,7 @@ class DownloadTask {
     this.resumeValidator,
     this.lyrics,
     this.album = '',
+    this.libraryPending = false,
   });
 
   final String id;
@@ -162,6 +163,9 @@ class DownloadTask {
   final double progress;
   final String savePath;
   final String? error;
+
+  /// The finished audio is safe; only its library record still needs saving.
+  final bool libraryPending;
   final int receivedBytes;
   final int? totalBytes;
   final String? resumeValidator;
@@ -179,6 +183,7 @@ class DownloadTask {
     String? resumeValidator,
     String? lyrics,
     String? album,
+    bool? libraryPending,
   }) {
     return DownloadTask(
       id: id,
@@ -193,6 +198,7 @@ class DownloadTask {
       resumeValidator: resumeValidator ?? this.resumeValidator,
       lyrics: lyrics ?? this.lyrics,
       album: album ?? this.album,
+      libraryPending: libraryPending ?? this.libraryPending,
     );
   }
 
@@ -207,6 +213,7 @@ class DownloadTask {
     'receivedBytes': receivedBytes,
     'totalBytes': totalBytes,
     'resumeValidator': resumeValidator,
+    'libraryPending': libraryPending,
     'lyrics': lyrics,
     'album': album,
   };
@@ -231,6 +238,7 @@ class DownloadTask {
       receivedBytes: (json['receivedBytes'] as num?)?.toInt() ?? 0,
       totalBytes: (json['totalBytes'] as num?)?.toInt(),
       resumeValidator: json['resumeValidator'] as String?,
+      libraryPending: json['libraryPending'] as bool? ?? false,
       lyrics: json['lyrics'] as String?,
       album: json['album'] as String? ?? '',
     );

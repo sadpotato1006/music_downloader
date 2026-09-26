@@ -25,57 +25,12 @@ extension AppControllerSearchActions on AppController {
 
   void _setLibraryQuery(String value) {
     libraryQuery = value.trim();
-    if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
-      unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
-    } else {
-      _libraryLyricsSearchGeneration += 1;
-    }
+    _visibleDownloadedTracksSource = null;
+    unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
   }
 
-  Future<void> _ensureLibraryLyricsForQuery(String query) async {
-    final normalizedQuery = LibrarySearch.normalize(query);
-    if (normalizedQuery.isEmpty) {
-      return;
-    }
-    final generation = ++_libraryLyricsSearchGeneration;
-    var changed = false;
-
-    for (final track in List<DownloadedTrack>.from(downloadedTracks)) {
-      if (generation != _libraryLyricsSearchGeneration ||
-          LibrarySearch.normalize(libraryQuery) != normalizedQuery) {
-        return;
-      }
-
-      if (_librarySearchIndexFor(
-        track,
-        includeCachedLyrics: false,
-      ).matchesNormalizedQuery(normalizedQuery)) {
-        continue;
-      }
-
-      final key = _libraryLyricsCacheKey(track);
-      if (_libraryLyricsSearchCache.containsKey(key) ||
-          !_loadingLibraryLyricsKeys.add(key)) {
-        continue;
-      }
-
-      try {
-        await Future<void>.delayed(Duration.zero);
-        _libraryLyricsSearchCache[key] =
-            (await readDownloadedLyrics(track))?.trim() ?? '';
-        changed = true;
-      } finally {
-        _loadingLibraryLyricsKeys.remove(key);
-      }
-    }
-
-    if (changed &&
-        generation == _libraryLyricsSearchGeneration &&
-        LibrarySearch.normalize(libraryQuery) == normalizedQuery) {
-      _visibleDownloadedTracksSource = null;
-      _notify();
-    }
-  }
+  Future<void> _ensureLibraryLyricsForQuery(String query) =>
+      _libraryLyricsSearch.search(query, downloadedTracks);
 
   void setLibrarySortMode(LibrarySortMode mode) {
     if (librarySortMode == mode) {
@@ -104,8 +59,6 @@ extension AppControllerSearchActions on AppController {
     }
     final currentIndex = sources.indexWhere((item) => item.name == source.name);
     source = sources[(currentIndex + 1) % sources.length];
-    sourceCooldownUntil = null;
-    sourceCooldownReason = null;
     _lastSourceRequestAt = null;
     searchResults = [];
     searchError = null;
@@ -264,27 +217,43 @@ extension AppControllerSearchActions on AppController {
   }
 
   Future<void> queueSearchResultNext(TrackSearchResult result) async {
+    if (_isDisposed) return;
+    final generation = ++_queueNextRequestGeneration;
     preparingQueueNextId = result.id;
     globalMessage = null;
     _notify();
 
     try {
-      final item = await _resolveSearchResultPlayerItem(result, '下一首播放');
-      if (_isDisposed) return;
+      final item = await _resolveSearchResultPlayerItem(
+        result,
+        '下一首播放',
+        shouldRun: () => _canCommitQueueNext(generation),
+      );
+      if (!_canCommitQueueNext(generation)) return;
       final started = await _enqueueNextOrPlayWhenIdle(item);
       unawaited(_loadOnlineLyrics(item, durationText: result.duration));
+      if (!_canCommitQueueNext(generation)) return;
       globalMessage = started
           ? '已开始播放：${item.title}'
           : '已加入下一首播放：${item.title}';
+    } on _ObsoleteSourceRequest {
+      return;
     } on MusicSourceException catch (error) {
+      if (!_canCommitQueueNext(generation)) return;
       globalMessage = error.message;
     } catch (error) {
+      if (!_canCommitQueueNext(generation)) return;
       globalMessage = '加入下一首播放失败：${_friendlyUnexpectedError(error)}';
     } finally {
-      preparingQueueNextId = null;
-      _notify();
+      if (_canCommitQueueNext(generation)) {
+        preparingQueueNextId = null;
+        _notify();
+      }
     }
   }
+
+  bool _canCommitQueueNext(int generation) =>
+      !_isDisposed && generation == _queueNextRequestGeneration;
 
   Future<void> playDownloaded(DownloadedTrack track) async {
     if (_isDisposed) return;
@@ -314,6 +283,8 @@ extension AppControllerSearchActions on AppController {
   }
 
   Future<void> queueDownloadedNext(DownloadedTrack track) async {
+    if (_isDisposed) return;
+    final generation = ++_queueNextRequestGeneration;
     preparingQueueNextId = track.id;
     globalMessage = null;
     _notify();
@@ -329,11 +300,12 @@ extension AppControllerSearchActions on AppController {
           track,
           metadataReadHeld: true,
         );
-        if (item == null) {
+        if (item == null || !_canCommitQueueNext(generation)) {
           return;
         }
         final started = await _enqueueNextOrPlayWhenIdle(item);
         startedPlayback = started;
+        if (!_canCommitQueueNext(generation)) return;
         globalMessage = started
             ? '已开始播放：${item.title}'
             : '已加入下一首播放：${item.title}';
@@ -344,10 +316,13 @@ extension AppControllerSearchActions on AppController {
         }
       }
     } catch (error) {
+      if (!_canCommitQueueNext(generation)) return;
       globalMessage = '加入下一首播放失败：${_friendlyUnexpectedError(error)}';
     } finally {
-      preparingQueueNextId = null;
-      _notify();
+      if (_canCommitQueueNext(generation)) {
+        preparingQueueNextId = null;
+        _notify();
+      }
     }
   }
 }

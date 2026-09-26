@@ -481,6 +481,8 @@ extension AppControllerPlaybackActions on AppController {
   }
 
   Future<void> clearQueue() async {
+    _queueNextRequestGeneration++;
+    preparingQueueNextId = null;
     queue = [];
     currentQueueIndex = -1;
     await _stopPlayback();

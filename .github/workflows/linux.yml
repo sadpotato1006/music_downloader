@@ -1,0 +1,38 @@
+name: Build Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev \
+            libstdc++-12-dev libmpv-dev libmimalloc-dev liblzma-dev dpkg-dev
+      - name: Install Flutter 3.44.2
+        run: |
+          git clone --depth 1 --branch 3.44.2 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" config --enable-linux-desktop --no-analytics
+      - name: Analyze and test
+        run: |
+          flutter pub get --enforce-lockfile
+          flutter analyze --no-pub
+          flutter test --no-pub
+      - name: Build packages
+        run: bash tools/linux/build-linux.sh --deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QingTing-linux-x64
+          path: |
+            dist/*-linux-x64.tar.gz
+            dist/*-linux-x64.deb
+          if-no-files-found: error

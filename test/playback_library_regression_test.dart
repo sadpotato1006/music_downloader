@@ -164,6 +164,107 @@ void main() {
   );
 
   test(
+    'only the latest pending next request owns the queue and loading state',
+    () async {
+      final source = _ControlledSource(
+        blockDetails: true,
+        blockSecondDetails: true,
+      );
+      final controller = controllerFor(source: source);
+      controller.queue = [_item('existing')];
+      controller.currentQueueIndex = 0;
+      player.isPlaying = true;
+      final first = controller.queueSearchResultNext(_result('a'));
+      await source.firstStarted.future;
+      final second = controller.queueSearchResultNext(_result('b'));
+      source.release.complete();
+      await first;
+      await source.secondStarted.future;
+      expect(controller.preparingQueueNextId, 'b');
+      expect(controller.queue.map((item) => item.id), ['existing']);
+      source.secondRelease.complete();
+      await second;
+      expect(controller.queue.map((item) => item.id), ['existing', 'b']);
+      expect(controller.preparingQueueNextId, isNull);
+    },
+  );
+
+  for (final action in ['local', 'clear']) {
+    test('pending next request cannot undo $action or its message', () async {
+      final source = _ControlledSource(blockDetails: true);
+      final controller = controllerFor(source: source);
+      controller.queue = [_item('existing')];
+      controller.currentQueueIndex = 0;
+      player.isPlaying = true;
+      final pending = controller.queueSearchResultNext(_result('old'));
+      await source.firstStarted.future;
+      if (action == 'local') {
+        final file = await File('${directory.path}/next.m4a').writeAsBytes([1]);
+        await controller.queueDownloadedNext(_track(file.path, format: 'm4a'));
+      } else {
+        await controller.clearQueue();
+      }
+      controller.showMessage('Latest action');
+      source.release.completeError(StateError('old request failed'));
+      await pending;
+      expect(controller.queue.any((item) => item.id == 'old'), isFalse);
+      expect(controller.globalMessage, 'Latest action');
+      if (action == 'local') expect(controller.queue.length, 2);
+    });
+  }
+
+  test(
+    'an online next request supersedes a pending local metadata read',
+    () async {
+      final controller = controllerFor();
+      controller.queue = [_item('existing')];
+      controller.currentQueueIndex = 0;
+      player.isPlaying = true;
+      final file = await File('${directory.path}/next.m4a').writeAsBytes([1]);
+      final local = controller.queueDownloadedNext(
+        _track(file.path, format: 'm4a'),
+      );
+      final online = controller.queueSearchResultNext(_result('online'));
+      await Future.wait([local, online]);
+      expect(controller.queue.map((item) => item.id), ['existing', 'online']);
+    },
+  );
+
+  test(
+    'manual covers reject oversized files and accept a bounded image',
+    () async {
+      final controller = controllerFor();
+      final audio = await File(
+        '${directory.path}/cover-test.m4a',
+      ).writeAsBytes([1]);
+      final track = _track(audio.path, format: 'm4a');
+      controller.downloadedTracks = [track];
+      final coverFile = File('${directory.path}/manual.jpg');
+      final oversized = await coverFile.open(mode: FileMode.write);
+      await oversized.truncate(5 * 1024 * 1024 + 1);
+      await oversized.close();
+      Future<bool> updateCover() => controller.updateDownloadedTrack(
+        track,
+        title: track.title,
+        artist: track.artist,
+        album: '',
+        lyrics: '',
+        coverInput: coverFile.path,
+      );
+      expect(await updateCover(), isFalse);
+      expect(controller.downloadedTracks.single, same(track));
+      await coverFile.writeAsBytes(_cover(42).bytes);
+      expect(await updateCover(), isTrue);
+      expect(
+        await File(
+          controller.downloadedTracks.single.coverFilePath!,
+        ).readAsBytes(),
+        _cover(42).bytes,
+      );
+    },
+  );
+
+  test(
     'recursive scan preserves different covers for same filenames',
     () async {
       final first = await _audioFile(directory, 'one/same.mp3', marker: 11);
@@ -376,11 +477,19 @@ Future<File> _audioFile(
 }
 
 class _ControlledSource implements MusicSource {
-  _ControlledSource({this.blockDetails = false, this.embeddedLyrics = true});
+  _ControlledSource({
+    this.blockDetails = false,
+    this.blockSecondDetails = false,
+    this.embeddedLyrics = true,
+  });
   final bool blockDetails;
+  final bool blockSecondDetails;
   final bool embeddedLyrics;
   final firstStarted = Completer<void>();
   final release = Completer<void>();
+  final secondStarted = Completer<void>();
+  final secondRelease = Completer<void>();
+  int detailCalls = 0;
   int resolveCalls = 0;
   @override
   String get name => 'controlled';
@@ -391,9 +500,14 @@ class _ControlledSource implements MusicSource {
   }) async => [];
   @override
   Future<TrackDetail> loadDetail(TrackSearchResult result) async {
+    detailCalls++;
     if (!firstStarted.isCompleted) {
       firstStarted.complete();
       if (blockDetails) await release.future;
+    }
+    if (detailCalls == 2 && blockSecondDetails) {
+      secondStarted.complete();
+      await secondRelease.future;
     }
     return TrackDetail(
       title: result.title,

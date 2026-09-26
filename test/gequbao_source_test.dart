@@ -5,10 +5,58 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/gequbao_source.dart';
 import 'package:qingting/models.dart';
+import 'package:qingting/music_source.dart';
 import 'package:qingting/storage_service.dart';
 
 void main() {
   final baseUrl = Uri.parse('https://www.gequbao.com/');
+
+  for (final acceptErrorStatus in [true, false]) {
+    for (final action in ['search', 'download']) {
+      test(
+        'preserves HTTP 403 for $action (accept=$acceptErrorStatus)',
+        () async {
+          final adapter = _ForbiddenGequbaoAdapter();
+          final dio = Dio(
+            BaseOptions(
+              responseType: ResponseType.plain,
+              validateStatus: acceptErrorStatus ? (_) => true : null,
+            ),
+          )..httpClientAdapter = adapter;
+          addTearDown(() => dio.close(force: true));
+          final source = GequbaoSource(dio: dio);
+          final Future<Object> request;
+          if (action == 'search') {
+            request = source.search('测试');
+          } else {
+            request = source.resolveDownloadCandidates(
+              const TrackDetail(
+                title: 'Song',
+                artist: 'Artist',
+                sourceUrl: 'https://www.gequbao.com/music/200',
+                candidates: [],
+                rawMetadata: {'play_id': 'test-id'},
+              ),
+            );
+          }
+
+          await expectLater(
+            request,
+            throwsA(
+              isA<MusicSourceException>()
+                  .having(
+                    (error) => error.message,
+                    'status',
+                    contains('HTTP 403'),
+                  )
+                  .having((error) => error.message, 'guidance', contains('代理')),
+            ),
+          );
+          expect(adapter.calls, 1);
+        },
+      );
+    }
+  }
 
   test('parses search result anchors from public HTML', () {
     const html = '''
@@ -531,6 +579,23 @@ class _CommonPlayAdapter implements HttpClientAdapter {
       );
     }
     throw StateError('Unexpected request: ${options.method} ${options.uri}');
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _ForbiddenGequbaoAdapter implements HttpClientAdapter {
+  int calls = 0;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    calls += 1;
+    return ResponseBody.fromString('Forbidden', 403);
   }
 
   @override

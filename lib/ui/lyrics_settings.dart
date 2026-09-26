@@ -15,9 +15,15 @@ class _LyricsSettingsButton extends StatelessWidget {
     return SizedBox(
       width: double.infinity,
       child: OutlinedButton.icon(
-        onPressed: onPressed,
+        onPressed: DesktopLyricsService.isSupported ? onPressed : null,
         icon: Icon(enabled ? Icons.subtitles : Icons.subtitles_outlined),
-        label: Text(enabled ? '桌面歌词已开启' : '桌面歌词已关闭'),
+        label: Text(
+          !DesktopLyricsService.isSupported
+              ? '此平台暂不支持桌面歌词'
+              : enabled
+              ? '桌面歌词已开启'
+              : '桌面歌词已关闭',
+        ),
       ),
     );
   }

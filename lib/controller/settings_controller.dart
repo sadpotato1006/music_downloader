@@ -3,8 +3,11 @@ part of '../app_controller.dart';
 extension AppControllerSettingsActions on AppController {
   Future<bool> setDownloadDirectory(String selected) async {
     lastDirectoryNeedsAllFilesAccess = false;
-    final trimmed = _normalizeManualDownloadPath(selected);
-    if (trimmed.isEmpty || settings == null) {
+    // Backslashes, commas and trailing spaces are valid Linux directory names.
+    final trimmed = Platform.isLinux
+        ? selected
+        : _normalizeManualDownloadPath(selected);
+    if (trimmed.trim().isEmpty || settings == null) {
       return false;
     }
     try {
@@ -32,6 +35,11 @@ extension AppControllerSettingsActions on AppController {
   }
 
   Future<String?> pickDownloadDirectory() async {
+    if (Platform.isLinux) {
+      return LinuxDesktopService.pickDirectory(
+        settings?.downloadDirectory ?? '',
+      );
+    }
     if (!Platform.isWindows) {
       return null;
     }
@@ -81,6 +89,9 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   }
 
   Future<bool> openExternalUrl(String url) async {
+    if (Platform.isLinux) {
+      return LinuxDesktopService.openUrl(url);
+    }
     if (AndroidStorageAccess.isAndroid) {
       return AndroidStorageAccess.openUrl(url);
     }

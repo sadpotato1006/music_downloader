@@ -71,7 +71,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     runSpacing: 8,
                     alignment: WrapAlignment.end,
                     children: [
-                      if (Platform.isWindows)
+                      if (Platform.isWindows || Platform.isLinux)
                         OutlinedButton.icon(
                           onPressed: () => _pickDownloadDirectory(context),
                           icon: const Icon(Icons.folder_open),

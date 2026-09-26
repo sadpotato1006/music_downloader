@@ -486,8 +486,8 @@ Future<void> _confirmDeleteDownloadedTrack(
 ) async {
   final movesToRecycleBin = controller.movesDeletedFilesToRecycleBin;
   final consequence = movesToRecycleBin
-      ? '电脑端会将歌曲文件本身移入回收站，并同时移除青听中的歌曲记录和播放队列项目；文件仍可从回收站恢复。'
-      : '手机端会直接永久删除歌曲文件本身，并同时移除青听中的歌曲记录和播放队列项目；删除后无法恢复。';
+      ? '将歌曲文件本身移入回收站，并同时移除青听中的歌曲记录和播放队列项目；文件仍可从回收站恢复。'
+      : '将直接永久删除歌曲文件本身，并同时移除青听中的歌曲记录和播放队列项目；删除后无法恢复。';
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(

@@ -253,12 +253,24 @@ extension AppControllerLibraryActions on AppController {
       _notify();
       return;
     }
+    if (Platform.isLinux) {
+      if (!await LinuxDesktopService.openFile(track.path)) {
+        globalMessage = '无法打开歌曲文件，请检查系统默认播放器。';
+        _notify();
+      }
+      return;
+    }
     await OpenFilex.open(track.path);
   }
 
   Future<void> revealDownloadedFile(DownloadedTrack track) async {
     if (Platform.isWindows) {
       await Process.run('explorer.exe', ['/select,', track.path]);
+    } else if (Platform.isLinux) {
+      if (!await LinuxDesktopService.revealFile(track.path)) {
+        globalMessage = '无法打开所在目录，请检查目录是否存在及系统文件管理器。';
+        _notify();
+      }
     } else {
       await openDownloadedFile(track);
     }
@@ -427,9 +439,7 @@ extension AppControllerLibraryActions on AppController {
     downloadedTracks = downloadedTracks
         .where((item) => item.id != track.id || item.path != track.path)
         .toList();
-    final key = _libraryLyricsCacheKey(track);
-    _libraryLyricsSearchCache.remove(key);
-    _loadingLibraryLyricsKeys.remove(key);
+    _libraryLyricsSearch.remove(track);
     _removePendingAlbumMatchForPath(track.path);
     _removeTrackFromMyMusicInMemory(track.path);
   }
@@ -710,7 +720,8 @@ extension AppControllerLibraryActions on AppController {
       for (final item in downloadedTracks)
         item.id == track.id && item.path == track.path ? updated : item,
     ];
-    _libraryLyricsSearchCache[_libraryLyricsCacheKey(updated)] = trimmedLyrics;
+    _libraryLyricsSearch.update(updated, trimmedLyrics);
+    _visibleDownloadedTracksSource = null;
     queue = [
       for (final item in queue)
         item.localPath != null &&
@@ -1469,17 +1480,25 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<void> _addDownloadedTrack(DownloadTask task) async {
-    DownloadedTrack? replacedTrack;
-    for (final track in downloadedTracks) {
-      if (track.path == task.savePath) {
-        replacedTrack = track;
-        break;
-      }
+    // A previous attempt may have added the record before its save failed.
+    // Preserve subsequent user edits when retrying or recovering at startup.
+    if (_downloadedTrackByPath(task.savePath) != null) {
+      await _saveDownloadedTracks();
+      return;
     }
-    final coverFilePath = await storage.cacheEmbeddedCover(
-      File(task.savePath),
-      cacheKey: '${task.track.id}-${DateTime.now().microsecondsSinceEpoch}',
-    );
+    String? coverFilePath;
+    try {
+      coverFilePath = await storage.cacheEmbeddedCover(
+        File(task.savePath),
+        cacheKey: '${task.track.id}-${DateTime.now().microsecondsSinceEpoch}',
+      );
+    } catch (error, stackTrace) {
+      AppLog.instance.warning(
+        'storage',
+        '封面缓存失败，保留已下载歌曲并在下次启动时补全',
+        detail: '$error\n$stackTrace',
+      );
+    }
     final item = DownloadedTrack(
       id: task.track.id,
       title: task.track.title,
@@ -1497,15 +1516,10 @@ extension AppControllerLibraryActions on AppController {
       item,
       ...downloadedTracks.where((track) => track.path != item.path),
     ];
-    _libraryLyricsSearchCache.remove(_libraryLyricsCacheKey(item));
+    _libraryLyricsSearch.remove(item);
     final removedPending = _removePendingAlbumMatchForPath(item.path);
-    await Future.wait<void>([
-      _saveDownloadedTracks(),
-      if (removedPending) _savePendingAlbumMatches(),
-    ]);
-    if (replacedTrack?.coverFilePath != coverFilePath) {
-      await _deleteUnusedCachedCover(replacedTrack?.coverFilePath);
-    }
+    await _saveDownloadedTracks();
+    if (removedPending) await _savePendingAlbumMatchesBestEffort();
     if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
       unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
     }
@@ -1741,23 +1755,12 @@ extension AppControllerLibraryActions on AppController {
     return 'local-${safeName.isEmpty ? 'track' : safeName}-${stat.size}-${stat.modified.millisecondsSinceEpoch}';
   }
 
-  String _libraryLyricsCacheKey(DownloadedTrack track) {
-    return p.normalize(track.path).toLowerCase();
-  }
-
-  LibrarySearchIndex _librarySearchIndexFor(
-    DownloadedTrack track, {
-    bool includeCachedLyrics = true,
-  }) {
-    final lyrics = includeCachedLyrics
-        ? _libraryLyricsSearchCache[_libraryLyricsCacheKey(track)] ?? ''
-        : '';
+  LibrarySearchIndex _librarySearchIndexFor(DownloadedTrack track) {
     final key = [
-      p.normalize(track.path).toLowerCase(),
+      _trackPathKey(track.path),
       track.title,
       track.artist,
       track.album,
-      lyrics.hashCode,
     ].join('\u0001');
     final maxCacheEntries = max(256, downloadedTracks.length * 2);
     if (_librarySearchIndexCache.length >= maxCacheEntries &&
@@ -1766,7 +1769,7 @@ extension AppControllerLibraryActions on AppController {
     }
     return _librarySearchIndexCache.putIfAbsent(
       key,
-      () => LibrarySearchIndex.fromTrack(track, lyrics: lyrics),
+      () => LibrarySearchIndex.fromTrack(track),
     );
   }
 

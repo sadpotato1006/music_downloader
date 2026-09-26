@@ -1,0 +1,46 @@
+name: Build Arch Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arch:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 45
+    steps:
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel clang cmake ninja pkgconf \
+            gtk3 mpv mimalloc xdg-user-dirs git curl unzip xz
+      - uses: actions/checkout@v4
+      - name: Prepare a normal build user and Flutter
+        run: |
+          useradd -m builder
+          git clone --depth 1 --branch 3.44.2 https://github.com/flutter/flutter.git /opt/flutter
+          mkdir -p /home/builder/qingting
+          tar -cf - lib test linux tools assets pubspec.yaml pubspec.lock analysis_options.yaml .metadata \
+            | tar -xf - -C /home/builder/qingting
+          chown -R builder:builder /home/builder/qingting /opt/flutter
+      - name: Analyze, test and build
+        run: |
+          runuser -u builder -- bash -c '
+            set -e
+            export PATH="/opt/flutter/bin:$PATH"
+            cd /home/builder/qingting
+            flutter config --enable-linux-desktop --no-analytics
+            flutter pub get --enforce-lockfile
+            flutter analyze --no-pub
+            flutter test --no-pub
+            bash tools/arch/build-arch.sh
+          '
+          mkdir -p dist
+          cp /home/builder/qingting/dist/*.pkg.tar.zst* dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QingTing-Arch-Linux-x86_64
+          path: dist/*.pkg.tar.zst*
+          if-no-files-found: error

@@ -44,7 +44,6 @@ class _SearchPageState extends State<SearchPage> {
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller;
-    final cooldownText = controller.sourceCooldownText;
     final searchHistory =
         controller.settings?.sourceSearchHistory ?? const <String>[];
     return _PageFrame(
@@ -107,10 +106,6 @@ class _SearchPageState extends State<SearchPage> {
           if (searchFocusNode.hasFocus && searchHistory.isNotEmpty) ...[
             const SizedBox(height: 10),
             _SearchHistoryDropdown(history: searchHistory, onSelected: _search),
-          ],
-          if (cooldownText != null) ...[
-            const SizedBox(height: 10),
-            _InlineNotice(icon: Icons.timer_outlined, text: cooldownText),
           ],
           const SizedBox(height: 18),
           Expanded(
@@ -367,7 +362,7 @@ class _TaskTile extends StatelessWidget {
                 child: _TrackText(
                   title: task.track.title,
                   subtitle:
-                      '${task.track.displayArtist} · ${_statusLabel(task.status)}',
+                      '${task.track.displayArtist} · ${task.libraryPending ? '已下载 · 待保存到曲库' : _statusLabel(task.status)}',
                 ),
               ),
               if (task.status == DownloadStatus.downloading)
@@ -378,11 +373,14 @@ class _TaskTile extends StatelessWidget {
                 ),
               if (task.status == DownloadStatus.failed ||
                   task.status == DownloadStatus.paused ||
-                  task.status == DownloadStatus.canceled)
+                  task.status == DownloadStatus.canceled ||
+                  task.libraryPending)
                 _IconAction(
-                  tooltip: '重试',
+                  tooltip: task.libraryPending ? '重试保存到曲库' : '重试',
                   icon: Icons.refresh,
-                  onPressed: () => controller.retryDownload(task.id),
+                  onPressed: controller.isImportingDownload(task.id)
+                      ? null
+                      : () => controller.retryDownload(task.id),
                 ),
               if (task.status != DownloadStatus.completed)
                 _IconAction(

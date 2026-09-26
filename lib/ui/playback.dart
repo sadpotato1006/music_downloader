@@ -485,38 +485,6 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-class _InlineNotice extends StatelessWidget {
-  const _InlineNotice({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: _accent.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _accent.withValues(alpha: 0.28)),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: _accentStrong, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(color: _muted, fontSize: 13),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 void _showLyricsSheet(BuildContext context, AppController controller) {
   showModalBottomSheet<void>(
     context: context,

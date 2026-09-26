@@ -18,6 +18,8 @@ import 'coalescing_write_queue.dart';
 import 'file_deletion_service.dart';
 import 'id3_lyrics_embedder.dart';
 import 'library_search.dart';
+import 'library_lyrics_search.dart';
+import 'linux_desktop_service.dart';
 import 'lyrics_service.dart';
 import 'models.dart';
 import 'music_source.dart';
@@ -87,16 +89,11 @@ class AppController extends ChangeNotifier {
   final Set<String> _metadataWriteKeys = {};
   final Map<String, int> _metadataReadCounts = {};
   static const _sourceRequestGap = Duration(seconds: 2);
-  static const _cooldown520 = Duration(minutes: 3);
-  static const _cooldown403 = Duration(minutes: 10);
-  static const _cooldown429 = Duration(minutes: 5);
 
   AppSettings? settings = const AppSettings(downloadDirectory: '');
   AppBootstrapStatus bootstrapStatus = AppBootstrapStatus.loading;
   String? bootstrapError;
   int selectedIndex = 0;
-  DateTime? sourceCooldownUntil;
-  String? sourceCooldownReason;
   Future<void> _sourceRequestQueue = Future<void>.value();
   DateTime? _lastSourceRequestAt;
   Timer? _settingsSaveDebounce;
@@ -114,11 +111,13 @@ class AppController extends ChangeNotifier {
   final _pendingAlbumMatchesSaveQueue = CoalescingWriteQueue();
   Future<void>? _playNextOperation;
   int _playbackRequestGeneration = 0;
+  int _queueNextRequestGeneration = 0;
   Future<void> _playbackMutationQueue = Future<void>.value();
   Future<void>? _playbackCompletionOperation;
   Future<void>? _durationCaptureOperation;
   bool _durationCaptureRetryRequested = false;
   Future<void>? _albumMatchCompletion;
+  final Map<String, Future<void>> _downloadImportOperations = {};
 
   String searchQuery = '';
   bool isSearching = false;
@@ -159,10 +158,23 @@ class AppController extends ChangeNotifier {
   List<PendingAlbumMatch> pendingAlbumMatches = const [];
   String libraryQuery = '';
   LibrarySortMode librarySortMode = LibrarySortMode.downloadedAtDesc;
-  final Map<String, String> _libraryLyricsSearchCache = {};
   final Map<String, LibrarySearchIndex> _librarySearchIndexCache = {};
-  final Set<String> _loadingLibraryLyricsKeys = {};
-  int _libraryLyricsSearchGeneration = 0;
+  late final _libraryLyricsSearch = LibraryLyricsSearch(
+    readLyrics: readDownloadedLyrics,
+    trackKey: (track) => _trackPathKey(track.path),
+    isCurrent: (track) => identical(_downloadedTrackByPath(track.path), track),
+    matchesMetadata: (track, query) =>
+        _librarySearchIndexFor(track).matchesNormalizedQuery(query),
+    onChanged: () {
+      _visibleDownloadedTracksSource = null;
+      _notify();
+    },
+    onError: (error, stackTrace) => AppLog.instance.warning(
+      'library',
+      '读取搜索歌词失败，继续搜索其他歌曲',
+      detail: '$error\n$stackTrace',
+    ),
+  );
   List<DownloadedTrack>? _visibleDownloadedTracksSource;
   String _visibleDownloadedTracksQuery = '';
   LibrarySortMode? _visibleDownloadedTracksSortMode;
@@ -191,25 +203,6 @@ class AppController extends ChangeNotifier {
     return queue[currentQueueIndex];
   }
 
-  bool get isSourceCoolingDown => sourceCooldownRemaining > Duration.zero;
-
-  Duration get sourceCooldownRemaining {
-    final until = sourceCooldownUntil;
-    if (until == null) {
-      return Duration.zero;
-    }
-    final remaining = until.difference(DateTime.now());
-    return remaining.isNegative ? Duration.zero : remaining;
-  }
-
-  String? get sourceCooldownText {
-    final remaining = sourceCooldownRemaining;
-    if (remaining <= Duration.zero) {
-      return null;
-    }
-    return '${sourceCooldownReason ?? '请求太频繁'}，请等待 ${_formatCooldown(remaining)} 后再试。';
-  }
-
   bool get canSwitchSource => sources.length > 1;
 
   List<DownloadedTrack> get visibleDownloadedTracks {
@@ -224,8 +217,9 @@ class AppController extends ChangeNotifier {
         ? List<DownloadedTrack>.from(downloadedTracks)
         : downloadedTracks.where((track) {
             return _librarySearchIndexFor(
-              track,
-            ).matchesNormalizedQuery(normalizedQuery);
+                  track,
+                ).matchesNormalizedQuery(normalizedQuery) ||
+                _libraryLyricsSearch.matches(track, normalizedQuery);
           }).toList();
 
     filtered.sort((a, b) {
@@ -393,6 +387,11 @@ class AppController extends ChangeNotifier {
       unawaited(_syncAndroidMediaControls(force: true));
       unawaited(_hydrateDownloadedTracksInBackground());
       _scheduleDownloads();
+      for (final task in downloadTasks) {
+        if (task.status == DownloadStatus.completed && task.libraryPending) {
+          unawaited(_importCompletedDownload(task.id));
+        }
+      }
       if (startupItem != null) {
         unawaited(_openCurrentItemForPlayback());
       }
@@ -413,6 +412,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> flushPendingWrites() async {
+    await Future.wait(_downloadImportOperations.values.toList());
     final albumMatchCompletion = _albumMatchCompletion;
     if (albumMatchCompletion != null) {
       _albumMatchCancelRequested = true;
@@ -573,6 +573,7 @@ class AppController extends ChangeNotifier {
     unawaited(_persistDownloadTasksBestEffort());
     unawaited(flushPendingWrites());
     _isDisposed = true;
+    _libraryLyricsSearch.dispose();
     _albumMatchCancelRequested = true;
     for (final token in _cancelTokens.values) {
       token.cancel('disposed');

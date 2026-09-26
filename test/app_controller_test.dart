@@ -21,6 +21,29 @@ import 'package:qingting/storage_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'Linux directory selection preserves valid POSIX path characters',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-linux-path-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final selected = '${directory.path}/music\\set, ';
+      await Directory(selected).create();
+      final storage = _RecordingSettingsStorageService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: _FakePlaybackService(),
+      );
+      addTearDown(controller.dispose);
+      expect(await controller.setDownloadDirectory(selected), isTrue);
+      expect(storage.lastSettings!.downloadDirectory, selected);
+      expect(await directory.list().length, 1);
+    },
+    skip: !Platform.isLinux,
+  );
+
   test('rapid favorites changes persist only the latest collection', () async {
     final storage = _CoalescingStorageService();
     final controller = AppController(
@@ -708,6 +731,44 @@ void main() {
     controller.dispose();
   });
 
+  for (final status in [403, 429, 520]) {
+    test('HTTP $status never blocks subsequent source requests', () async {
+      final source = _ControlledSearchMusicSource();
+      final controller = AppController(
+        source: source,
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      addTearDown(controller.dispose);
+
+      final rejected = controller.search('首次搜索');
+      await source.waitForCalls(1);
+      source.fail(0, 'HTTP $status');
+      await rejected;
+
+      expect(controller.searchError, contains('HTTP $status'));
+      if (status == 403) {
+        expect(controller.searchError, contains('代理'));
+      }
+      expect(controller.searchError, isNot(contains('青听已暂停')));
+      expect(controller.searchError, isNot(contains('冷却')));
+
+      final retry = controller.search('再次被拒绝');
+      await source.waitForCalls(2);
+      source.fail(1, 'HTTP $status');
+      await retry;
+      expect(controller.searchError, contains('HTTP $status'));
+
+      final resumed = controller.search('恢复网络后重试');
+      await source.waitForCalls(3);
+      source.complete(2, keyword: '恢复网络后重试');
+      await resumed;
+
+      expect(controller.searchResults.single.title, '恢复网络后重试');
+      expect(controller.searchError, isNull);
+    });
+  }
+
   test('only the latest overlapping search can update results', () async {
     final source = _ControlledSearchMusicSource();
     final controller = AppController(
@@ -809,7 +870,7 @@ void main() {
     await Future.wait([obsolete, latest]);
 
     expect(controller.searchResults.single.title, '最后搜索');
-    expect(controller.isSourceCoolingDown, isFalse);
+    expect(controller.searchError, isNull);
   });
 
   test('clearing the query drops queued searches without a request', () async {
@@ -1594,6 +1655,120 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'cover cache failure keeps the finished download in the library',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-cache-failure-',
+      );
+      final storage = _ImportFailureStorage('${directory.path}/song.m4a')
+        ..failCover = true;
+      final adapter = _CountingAudioDownloadAdapter();
+      final source = _AlbumDownloadMusicSource();
+      final controller = AppController(
+        source: source,
+        storage: storage,
+        player: _FakePlaybackService(),
+        downloadDio: Dio()..httpClientAdapter = adapter,
+        albumMetadata: _RecordingAlbumMetadataService(),
+        lyricsService: _FakeLyricsService(),
+      );
+      try {
+        await controller.startDownload(source.result, allowNonMp3: true);
+        await _waitForDownloadImport(controller);
+        final task = controller.downloadTasks.single;
+        expect(task.status, DownloadStatus.completed);
+        expect(task.libraryPending, isFalse);
+        expect(task.error, isNull);
+        expect(storage.savedDownloadedTracks.single.coverFilePath, isNull);
+        expect(await File(task.savePath).exists(), isTrue);
+        expect(adapter.calls, 1);
+      } finally {
+        controller.dispose();
+        await controller.flushPendingWrites();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  for (final recovery in ['retry', 'restart']) {
+    test(
+      'library save failure recovers by $recovery without downloading again',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'qingting-import-retry-',
+        );
+        final storage = _ImportFailureStorage('${directory.path}/song.m4a')
+          ..failLibrary = true;
+        final adapter = _CountingAudioDownloadAdapter();
+        final source = _AlbumDownloadMusicSource();
+        AppController createController(StorageService store) => AppController(
+          source: source,
+          storage: store,
+          player: _FakePlaybackService(),
+          downloadDio: Dio()..httpClientAdapter = adapter,
+          albumMetadata: _RecordingAlbumMetadataService(),
+          lyricsService: _FakeLyricsService(),
+        );
+        var controller = createController(storage);
+        try {
+          await controller.startDownload(source.result, allowNonMp3: true);
+          await _waitForDownloadImport(controller);
+          final task = controller.downloadTasks.single;
+          expect(task.status, DownloadStatus.completed);
+          expect(task.libraryPending, isTrue);
+          expect(task.error, contains('音频已下载'));
+          expect(storage.savedTasks.single.libraryPending, isTrue);
+          final originalBytes = await File(task.savePath).readAsBytes();
+          if (recovery == 'retry') {
+            controller.downloadedTracks = [
+              controller.downloadedTracks.single.copyWith(
+                title: 'Edited after failure',
+              ),
+            ];
+            storage.failLibrary = false;
+            storage.libraryGate = Completer<void>();
+            final previousSaves = storage.librarySaves;
+            controller.retryDownload(task.id);
+            controller.retryDownload(task.id);
+            controller.retryDownload(task.id);
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            expect(storage.librarySaves, previousSaves + 1);
+            storage.libraryGate!.complete();
+            await controller.flushPendingWrites();
+            expect(
+              storage.savedDownloadedTracks.single.title,
+              'Edited after failure',
+            );
+            expect(storage.savedTasks, isEmpty);
+          } else {
+            final restored = _ImportFailureStorage(storage.savePath)
+              ..savedTasks = storage.savedTasks;
+            controller.dispose();
+            await controller.flushPendingWrites();
+            controller = createController(restored);
+            await controller.bootstrap();
+            await controller.flushPendingWrites();
+            expect(restored.savedDownloadedTracks, hasLength(1));
+            expect(restored.savedTasks, isEmpty);
+          }
+          expect(
+            controller.downloadTasks.single.status,
+            DownloadStatus.completed,
+          );
+          expect(controller.downloadTasks.single.libraryPending, isFalse);
+          expect(controller.downloadTasks.single.error, isNull);
+          expect(await File(task.savePath).readAsBytes(), originalBytes);
+          expect(adapter.calls, 1, reason: 'retry must only save the library');
+        } finally {
+          controller.dispose();
+          await controller.flushPendingWrites();
+          await directory.delete(recursive: true);
+        }
+      },
+    );
+  }
+
   test('pauses only when bluetooth changes during playback', () async {
     final player = _FakePlaybackService()..isPlaying = true;
     final controller = AppController(
@@ -2234,7 +2409,7 @@ void main() {
     await tester.tap(find.text('删除歌曲'));
     await tester.pumpAndSettle();
     expect(find.text('确认删除歌曲'), findsOneWidget);
-    expect(find.textContaining('电脑端会将歌曲文件本身移入回收站'), findsOneWidget);
+    expect(find.textContaining('将歌曲文件本身移入回收站'), findsOneWidget);
     expect(find.widgetWithText(TextButton, '移入回收站'), findsOneWidget);
     expect(file.existsSync(), isTrue);
     expect(controller.downloadedTracks, [track]);
@@ -2283,7 +2458,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('确认删除歌曲'), findsOneWidget);
-    expect(find.textContaining('手机端会直接永久删除'), findsOneWidget);
+    expect(find.textContaining('将直接永久删除'), findsOneWidget);
     expect(find.widgetWithText(TextButton, '删除歌曲'), findsOneWidget);
 
     await tester.tap(find.widgetWithText(TextButton, '取消'));
@@ -2803,6 +2978,75 @@ class _FailingDownloadTaskStorageService extends _DownloadStorageService {
   @override
   Future<void> saveDownloadTasks(List<DownloadTask> tasks) {
     throw const FileSystemException('download task storage unavailable');
+  }
+}
+
+class _ImportFailureStorage extends _DownloadStorageService {
+  _ImportFailureStorage(super.savePath);
+  bool failCover = false;
+  bool failLibrary = false;
+  int librarySaves = 0;
+  Completer<void>? libraryGate;
+  List<DownloadTask> savedTasks = [];
+
+  @override
+  Future<String?> cacheEmbeddedCover(
+    File audioFile, {
+    required String cacheKey,
+  }) async {
+    if (failCover) throw const FileSystemException('cover cache unavailable');
+    return null;
+  }
+
+  @override
+  Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
+    librarySaves++;
+    if (failLibrary) throw const FileSystemException('library unavailable');
+    final gate = libraryGate;
+    if (gate != null) await gate.future;
+    savedDownloadedTracks = List.of(tracks);
+  }
+
+  @override
+  Future<void> saveDownloadTasks(List<DownloadTask> tasks) async {
+    savedTasks = [
+      for (final task in tasks) DownloadTask.fromJson(task.toJson()),
+    ];
+  }
+
+  @override
+  Future<AppSettings> loadSettings() async =>
+      const AppSettings(downloadDirectory: '');
+  @override
+  Future<MyMusicData> loadMyMusic() async => const MyMusicData();
+  @override
+  Future<List<DownloadedTrack>> loadDownloadedTracks() async =>
+      savedDownloadedTracks;
+  @override
+  Future<List<DownloadTask>> loadDownloadTasks() async => savedTasks;
+  @override
+  Future<SavedPlayerQueue> loadPlayerQueue() async =>
+      const SavedPlayerQueue(items: [], currentIndex: -1);
+  @override
+  Future<int> cleanupCachedCovers(
+    Iterable<String?> paths, {
+    Duration minimumAge = const Duration(days: 1),
+  }) async => 0;
+}
+
+Future<void> _waitForDownloadImport(AppController controller) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 3));
+  while (true) {
+    final task = controller.downloadTasks.single;
+    if (task.status == DownloadStatus.completed &&
+        !controller.isImportingDownload(task.id) &&
+        (!task.libraryPending || task.error != null)) {
+      return;
+    }
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Download did not finish: ${task.status} ${task.error}');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
   }
 }
 
@@ -3411,6 +3655,10 @@ class _ControlledSearchMusicSource implements MusicSource {
   final List<DateTime> startedAt = [];
 
   int get calls => _pending.length;
+
+  void fail(int index, String message) {
+    _pending[index].completeError(MusicSourceException(message));
+  }
 
   @override
   String get name => 'controlled-search';

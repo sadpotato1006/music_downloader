@@ -120,7 +120,7 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (Platform.isWindows) {
+    if (Platform.isWindows || Platform.isLinux) {
       _appLifecycleChannel.setMethodCallHandler(_handleLifecycleMethod);
     }
     unawaited(controller.bootstrap());
@@ -151,7 +151,7 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    if (Platform.isWindows) {
+    if (Platform.isWindows || Platform.isLinux) {
       _appLifecycleChannel.setMethodCallHandler(null);
     }
     unawaited(controller.flushPendingWrites());
@@ -174,7 +174,7 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
             surface: Colors.white,
           ),
           scaffoldBackgroundColor: _surface,
-          fontFamily: 'Microsoft YaHei',
+          fontFamily: Platform.isLinux ? 'Noto Sans CJK SC' : 'Microsoft YaHei',
           textTheme: ThemeData.light().textTheme.apply(
             bodyColor: _ink,
             displayColor: _ink,

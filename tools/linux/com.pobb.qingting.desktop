@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=QingTing
+Name[zh_CN]=青听
+Comment=Music search, playback and library
+Comment[zh_CN]=音乐搜索、播放、下载与曲库管理
+Exec=qingting
+Icon=com.pobb.qingting
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=com.pobb.qingting
