@@ -12,9 +12,17 @@ class AndroidMediaControlsService {
     'qingting/media_controls',
   );
   static AndroidMediaControlHandler? _handler;
+  static Future<void> Function(String property, Object value)? _propertyHandler;
   static bool _methodHandlerRegistered = false;
 
-  static bool get isSupported => Platform.isAndroid;
+  static bool get isSupported => Platform.isAndroid || Platform.isLinux;
+
+  static void setPropertyHandler(
+    Future<void> Function(String property, Object value)? handler,
+  ) {
+    _propertyHandler = handler;
+    _ensureMethodHandler();
+  }
 
   static void setHandler(AndroidMediaControlHandler? handler) {
     _handler = handler;
@@ -28,6 +36,10 @@ class AndroidMediaControlsService {
     required Duration duration,
     required bool canPlayPrevious,
     required bool canPlayNext,
+    double volume = 100,
+    bool shuffle = false,
+    String loopStatus = 'None',
+    bool isOpened = true,
   }) async {
     if (!isSupported) {
       return false;
@@ -43,12 +55,36 @@ class AndroidMediaControlsService {
         'canPlayPrevious': canPlayPrevious,
         'canPlayNext': canPlayNext,
         'coverFilePath': item.coverFilePath,
+        'trackId': '${item.id}|${item.uri}',
+        'volume': volume / 100,
+        'shuffle': shuffle,
+        'loopStatus': loopStatus,
+        'isOpened': isOpened,
       });
       return result ?? false;
     } on MissingPluginException {
       return false;
     } on PlatformException {
       return false;
+    }
+  }
+
+  static Future<void> updateState({
+    required double volume,
+    required bool shuffle,
+    required String loopStatus,
+  }) async {
+    if (!Platform.isLinux) return;
+    try {
+      await _channel.invokeMethod<void>('state', {
+        'volume': volume / 100,
+        'shuffle': shuffle,
+        'loopStatus': loopStatus,
+      });
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
     }
   }
 
@@ -74,6 +110,20 @@ class AndroidMediaControlsService {
   }
 
   static Future<bool> _handleMethodCall(MethodCall call) async {
+    if (call.method == 'setProperty') {
+      final args = call.arguments;
+      if (args is! Map || _propertyHandler == null) return false;
+      final property = args['property'];
+      final value = args['value'];
+      final valid =
+          (property == 'Volume' && value is num && value.isFinite) ||
+          (property == 'Shuffle' && value is bool) ||
+          (property == 'LoopStatus' &&
+              const ['None', 'Track', 'Playlist'].contains(value));
+      if (!valid || value == null) return false;
+      await _propertyHandler!(property as String, value);
+      return true;
+    }
     final handler = _handler;
     if (handler == null) {
       return false;
@@ -84,6 +134,7 @@ class AndroidMediaControlsService {
       case 'toggle':
       case 'previous':
       case 'next':
+      case 'stop':
         await handler(call.method, null);
         return true;
       case 'seek':

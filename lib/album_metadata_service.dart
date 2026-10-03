@@ -53,7 +53,7 @@ class AlbumMetadataService {
 
   static const _userAgent = appProjectUserAgent;
 
-  /// Candidates below this score are never written automatically.
+  /// Minimum score for conservative download matching and source discovery.
   ///
   /// A score alone is not sufficient: [selectAutomaticMatch] also checks the
   /// runner-up, source evidence, and version compatibility.
@@ -89,6 +89,18 @@ class AlbumMetadataService {
       hasArtist: _cleanArtist(artist).isNotEmpty,
       hasDuration: duration != null,
     );
+  }
+
+  /// Picks the highest scored usable album for scans and explicit lookups.
+  static AlbumMetadataMatch? selectHighestScoreMatch(
+    Iterable<AlbumMetadataMatch> candidates,
+  ) {
+    AlbumMetadataMatch? best;
+    for (final candidate in candidates) {
+      if (candidate.album.trim().isEmpty) continue;
+      if (best == null || candidate.compareTo(best) < 0) best = candidate;
+    }
+    return best;
   }
 
   /// Returns a candidate only when it is safe to apply without confirmation.

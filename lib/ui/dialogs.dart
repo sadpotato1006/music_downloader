@@ -15,81 +15,92 @@ Future<void> _showEditDownloadedTrackDialog(
   final albumController = TextEditingController(text: track.album);
   final lyricsController = TextEditingController(text: lyrics);
   final coverController = TextEditingController();
+  var removeCover = false;
 
   try {
     final saved = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('编辑歌曲信息'),
-        content: SizedBox(
-          width: 520,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: titleController,
-                  textInputAction: TextInputAction.next,
-                  decoration: const InputDecoration(
-                    labelText: '歌名',
-                    prefixIcon: Icon(Icons.music_note),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('编辑歌曲信息'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: titleController,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(
+                      labelText: '歌名',
+                      prefixIcon: Icon(Icons.music_note),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: artistController,
-                  textInputAction: TextInputAction.next,
-                  decoration: const InputDecoration(
-                    labelText: '歌手',
-                    prefixIcon: Icon(Icons.person_outline),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: artistController,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(
+                      labelText: '歌手',
+                      prefixIcon: Icon(Icons.person_outline),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: albumController,
-                  textInputAction: TextInputAction.next,
-                  decoration: const InputDecoration(
-                    labelText: '专辑',
-                    prefixIcon: Icon(Icons.album_outlined),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: albumController,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(
+                      labelText: '专辑',
+                      prefixIcon: Icon(Icons.album_outlined),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: coverController,
-                  minLines: 1,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                    labelText: '封面图片路径或网址',
-                    hintText: '留空则保留当前封面',
-                    prefixIcon: Icon(Icons.image_outlined),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: coverController,
+                    enabled: !removeCover,
+                    minLines: 1,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                      labelText: '封面图片路径或网址',
+                      hintText: '留空则保留当前封面',
+                      prefixIcon: Icon(Icons.image_outlined),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: lyricsController,
-                  minLines: 5,
-                  maxLines: 9,
-                  decoration: const InputDecoration(
-                    labelText: '歌词',
-                    alignLabelWithHint: true,
-                    prefixIcon: Icon(Icons.lyrics_outlined),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('移除当前封面'),
+                    value: removeCover,
+                    onChanged: (value) =>
+                        setDialogState(() => removeCover = value ?? false),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: lyricsController,
+                    minLines: 5,
+                    maxLines: 9,
+                    decoration: const InputDecoration(
+                      labelText: '歌词',
+                      alignLabelWithHint: true,
+                      prefixIcon: Icon(Icons.lyrics_outlined),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(context, true),
+              icon: const Icon(Icons.save),
+              label: const Text('保存'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton.icon(
-            onPressed: () => Navigator.pop(context, true),
-            icon: const Icon(Icons.save),
-            label: const Text('保存'),
-          ),
-        ],
       ),
     );
 
@@ -103,11 +114,14 @@ Future<void> _showEditDownloadedTrackDialog(
       album: albumController.text,
       lyrics: lyricsController.text,
       coverInput: coverController.text,
+      removeCover: removeCover,
     );
     if (!context.mounted) {
       return;
     }
-    controller.showMessage(success ? '歌曲信息已保存' : '歌曲信息保存失败');
+    controller.showMessage(
+      success ? '歌曲信息已保存' : controller.globalMessage ?? '歌曲信息保存失败',
+    );
   } finally {
     titleController.dispose();
     artistController.dispose();
@@ -130,119 +144,22 @@ Future<void> _fetchAlbumForDownloadedTrack(
     return;
   }
 
-  AlbumMetadataMatch? selected = AlbumMetadataService.selectAutomaticMatch(
-    candidates,
-    hasArtist: track.artist.trim().isNotEmpty,
-    hasDuration: track.durationMs != null,
-  );
+  final selected = AlbumMetadataService.selectHighestScoreMatch(candidates);
   if (selected == null) {
-    selected = await _showAlbumCandidateDialog(
-      context,
-      candidates,
-      trackTitle: track.title,
-      trackArtist: track.artist,
-    );
-    if (!context.mounted || selected == null) {
-      return;
-    }
+    controller.showMessage('没有找到可用的专辑候选。');
+    return;
   }
 
-  final success = await controller.applyDownloadedAlbumName(
-    track,
-    selected.album,
-  );
+  final success = await controller.applyDownloadedAlbumMatch(track, selected);
   if (!context.mounted) {
     return;
   }
-  controller.showMessage(success ? '已设置专辑名称：${selected.album}' : '专辑名称写入失败');
-}
-
-Future<AlbumMetadataMatch?> _showAlbumCandidateDialog(
-  BuildContext context,
-  List<AlbumMetadataMatch> candidates, {
-  String? trackTitle,
-  String? trackArtist,
-}) {
-  return showDialog<AlbumMetadataMatch>(
-    context: context,
-    builder: (context) {
-      return AlertDialog(
-        title: const Text('选择专辑名称'),
-        content: SizedBox(
-          width: 520,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '没有找到高置信度结果，可以从下面的候选中手动选择一个。',
-                style: TextStyle(color: _muted, fontSize: 13),
-              ),
-              if (trackTitle != null) ...[
-                const SizedBox(height: 5),
-                Text(
-                  trackArtist == null || trackArtist.trim().isEmpty
-                      ? trackTitle
-                      : '$trackArtist · $trackTitle',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ],
-              const SizedBox(height: 12),
-              ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.sizeOf(context).height * 0.52,
-                ),
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: candidates.length,
-                  separatorBuilder: (_, _) => const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    final candidate = candidates[index];
-                    final date = candidate.releaseDate?.trim();
-                    final info = [
-                      candidate.sourceLabel,
-                      candidate.recordingArtist.trim().isEmpty
-                          ? '未知歌手'
-                          : candidate.recordingArtist.trim(),
-                      candidate.recordingTitle.trim().isEmpty
-                          ? null
-                          : candidate.recordingTitle.trim(),
-                      if (!candidate.releasePreferred) '合辑或非首选发行',
-                      if (!candidate.durationVerified) '未校验时长',
-                      if (date != null && date.isNotEmpty) date,
-                      '置信度 ${candidate.score.round()}',
-                    ].whereType<String>().join(' · ');
-                    return ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.album_outlined),
-                      title: Text(
-                        candidate.album,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        info,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      onTap: () => Navigator.pop(context, candidate),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-        ],
-      );
-    },
+  controller.showMessage(
+    success
+        ? controller.hasDeferredAlbumWrite(track)
+              ? '已选专辑：${selected.album}，切歌后自动写入'
+              : '已设置专辑名称：${selected.album}'
+        : '专辑名称写入失败',
   );
 }
 
@@ -300,7 +217,9 @@ class _PendingAlbumMatchesSheetState extends State<_PendingAlbumMatchesSheet> {
       return;
     }
     _activePath = pending.trackPath;
-    _selected = pending.candidates.isEmpty ? null : pending.candidates.first;
+    _selected = AlbumMetadataService.selectHighestScoreMatch(
+      pending.candidates,
+    );
   }
 
   Future<void> _apply(PendingAlbumMatch pending) async {
@@ -488,11 +407,17 @@ Future<void> _confirmDeleteDownloadedTrack(
   final consequence = movesToRecycleBin
       ? '将歌曲文件本身移入回收站，并同时移除青听中的歌曲记录和播放队列项目；文件仍可从回收站恢复。'
       : '将直接永久删除歌曲文件本身，并同时移除青听中的歌曲记录和播放队列项目；删除后无法恢复。';
+  final cloudConsequence =
+      controller.cloudDeletionPolicyEnabled == true &&
+          controller.settings?.cloudFolderId.isNotEmpty == true &&
+          p.isWithin(controller.settings!.downloadDirectory, track.path)
+      ? '\n\n下次云盘同步时，也会删除云端及其他设备上的相同歌曲。'
+      : '';
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
       title: const Text('确认删除歌曲'),
-      content: Text('$consequence\n\n歌曲：${track.title}'),
+      content: Text('$consequence$cloudConsequence\n\n歌曲：${track.title}'),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context, false),
@@ -552,7 +477,7 @@ class _LibraryMoreActions extends StatelessWidget {
   Widget build(BuildContext context) {
     final isDeleting = controller.isDeletingDownloadedTrack(track);
     final isMatching = controller.isMatchingAlbumForTrack(track);
-    final isBusy = isDeleting || isMatching;
+    final isBusy = isDeleting || isMatching || controller.isLibraryBatchRunning;
     return SizedBox.square(
       dimension: 38,
       child: PopupMenuButton<_LibraryTrackAction>(

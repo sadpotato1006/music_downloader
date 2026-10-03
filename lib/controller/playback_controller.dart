@@ -116,6 +116,9 @@ extension AppControllerPlaybackActions on AppController {
           !_metadataReadInProgress(_trackPathKey(localPath))) {
         unawaited(_captureCurrentTrackDuration());
       }
+      if (didOpen) {
+        _scheduleMetadataTagWrites();
+      }
     }
   }
 
@@ -133,7 +136,14 @@ extension AppControllerPlaybackActions on AppController {
       } catch (_) {
         // A failed open must not prevent a later stop or selection.
       }
-      if (!_isDisposed) await action();
+      if (!_isDisposed) {
+        try {
+          await action();
+        } finally {
+          _scheduleDeferredAlbumWrites();
+          _scheduleMetadataTagWrites();
+        }
+      }
     }();
     _playbackMutationQueue = operation;
     return operation;
@@ -294,6 +304,7 @@ extension AppControllerPlaybackActions on AppController {
     }
     settings = settings!.copyWith(volume: normalized);
     _debouncedSaveSettings();
+    unawaited(_syncAndroidMediaControls(force: true));
     _notify();
   }
 
@@ -309,6 +320,7 @@ extension AppControllerPlaybackActions on AppController {
 
   void toggleShuffleMode() {
     shuffleEnabled = !shuffleEnabled;
+    unawaited(_syncAndroidMediaControls(force: true));
     unawaited(_saveQueueState());
     _notify();
   }
@@ -321,6 +333,7 @@ extension AppControllerPlaybackActions on AppController {
     } else {
       repeatMode = RepeatMode.one;
     }
+    unawaited(_syncAndroidMediaControls(force: true));
     _notify();
   }
 
@@ -569,6 +582,18 @@ extension AppControllerPlaybackActions on AppController {
     final file = File(localPath);
     if (!await file.exists()) {
       return item;
+    }
+    final libraryTrack = _downloadedTrackByPath(localPath);
+    if (libraryTrack?.metadataLyrics != null) {
+      return item.copyWith(
+        title: libraryTrack!.title,
+        artist: libraryTrack.artist,
+        album: libraryTrack.album,
+        lyrics: libraryTrack.metadataLyrics,
+        coverFilePath: libraryTrack.coverFilePath,
+        clearCoverFilePath: libraryTrack.coverFilePath == null,
+        clearCoverUrl: libraryTrack.coverUrl == null,
+      );
     }
     Id3Metadata metadata = const Id3Metadata();
     try {

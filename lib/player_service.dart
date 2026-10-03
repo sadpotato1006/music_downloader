@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'models.dart';
+import 'app_log.dart';
 
 abstract interface class PlaybackService {
   VoidCallback? get onChanged;
@@ -65,6 +67,7 @@ class PlayerService implements PlaybackService {
   }
 
   final Player player = Player();
+  late final Future<void> _linuxAudioConfiguration = _configureLinuxAudio();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final ValueNotifier<Duration> _positionListenable = ValueNotifier(
     Duration.zero,
@@ -121,6 +124,8 @@ class PlayerService implements PlaybackService {
   Future<void> _open(PlayerItem item, String itemKey, int generation) async {
     errorMessage = null;
     _openedItemKey = null;
+    await _linuxAudioConfiguration;
+    if (generation != _openGeneration) return;
     await player.open(
       Media(
         item.uri,
@@ -131,6 +136,21 @@ class PlayerService implements PlaybackService {
     );
     if (generation == _openGeneration) {
       _openedItemKey = itemKey;
+    }
+  }
+
+  Future<void> _configureLinuxAudio() async {
+    if (!Platform.isLinux) return;
+    final native = player.platform;
+    if (native is! NativePlayer) return;
+    try {
+      // Prefer PulseAudio (also provided by pipewire-pulse) so the route
+      // monitor can follow this process's stream. Keep mpv's fallback drivers
+      // available for systems without a PulseAudio-compatible server.
+      await native.setProperty('ao', 'pulse,');
+      await native.setProperty('audio-client-name', '青听');
+    } catch (error) {
+      AppLog.instance.warning('linux', '无法设置音频输出，使用播放器默认配置', detail: error);
     }
   }
 
@@ -151,10 +171,16 @@ class PlayerService implements PlaybackService {
   Future<void> setVolume(double value) => player.setVolume(value);
 
   @override
-  Future<void> stop() => player.stop();
+  Future<void> stop() async {
+    ++_openGeneration;
+    _openedItemKey = null;
+    await player.stop();
+  }
 
   @override
   Future<void> dispose() async {
+    ++_openGeneration;
+    _openedItemKey = null;
     for (final subscription in _subscriptions) {
       await subscription.cancel();
     }

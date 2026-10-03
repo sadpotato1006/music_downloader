@@ -5,5 +5,6 @@
 #include <gtk/gtk.h>
 
 void register_desktop_integration(FlView* view, GtkWindow* window);
+void restore_desktop_window(GtkWindow* window);
 
 #endif  // QINGTING_DESKTOP_INTEGRATION_H_

@@ -4,11 +4,11 @@
   <img src="assets/logo.jpg" alt="青听 Logo" width="120">
 </p>
 
-青听是一款使用 Flutter 开发的个人音乐工具，支持在 Android、Windows 和 Linux 上搜索、播放、下载及管理音乐。Linux 当前提供基础桌面版。
+青听是一款使用 Flutter 开发的个人音乐工具，支持在 Android、Windows 和 Linux 上搜索、播放、下载及管理音乐。
 
-当前版本：`v1.5.0+32`
+当前版本：`v1.6.0+33`
 
-> 本项目仅解析公开可访问的网页内容，不处理登录、付费、验证码、DRM 或其他访问限制。
+> 在线音乐来源仅解析公开可访问的网页内容，不处理登录、付费、验证码、DRM 或其他访问限制。北科云盘同步使用单独的学校授权登录。
 
 ## 功能
 
@@ -36,6 +36,7 @@
 - MY FREE MP3 缺少内置歌词时会通过 LRCLIB 匹配歌词，再写入下载文件
 - MY FREE MP3 的生成任务会合并同一歌曲的并发请求；生成地址仅短时缓存并限制数量，过期后自动重新获取
 - 下载完成后默认通过 Apple iTunes Search API 校验专辑名称，Apple 无可靠结果时再使用 MusicBrainz，均失败时保留音乐网站原值
+- 歌曲入库后仍缺少专辑名时，自动对这首新歌执行专辑扫描，默认选择得分最高的专辑并写入；自动扫描与云盘同步依次执行，避免上传期间修改文件
 
 ### 播放与歌词
 
@@ -52,6 +53,9 @@
 
 ### 本地音乐
 
+- “全部”“我喜欢”“最近”和歌单内支持多选：点击工具栏的多选按钮或长按歌曲，点击歌曲切换选中状态，并可全选当前列表；切换列表会清空选择。
+- 多选后通过“操作”批量添加或取消喜欢、加入歌单、修改或清空专辑、删除记录或删除歌曲；歌单内还可批量移出。删除前统一确认并说明回收站、永久删除及云盘同步删除的影响；失败歌曲保留选中，可再次操作。
+- 批量专辑修改保留歌名、歌手、歌词、封面和其他标签。MP3 更新文件标签，正在播放的 MP3 切歌后写入；其他格式仅更新青听内的信息，并沿用已有歌曲信息同步机制。
 - 扫描下载目录，将已有歌曲导入本地曲库
 - 按歌名、歌手、专辑、歌词、拼音或拼音首字母搜索
 - 本地歌词搜索以受控并发读取文件并分批刷新结果；切换关键词会停止旧查询的后续读取，歌词缓存设有条目数和文本大小上限，缓存淘汰不会丢失当前查询已找到的歌曲
@@ -59,17 +63,35 @@
 - 手动选择本地封面时，读取前检查 5 MiB 大小限制，并限制实际读取字节数，避免大文件占用过多内存
 - 通过歌曲的“更多”菜单收藏或取消收藏，创建自定义歌单并查看最近播放
 - 打开歌曲文件或所在目录
-- 可选择删除歌曲文件本身，或仅删除曲库记录；Windows 会将歌曲移入回收站，Android 和 Linux 会直接永久删除，删除前都会明确说明影响并要求确认
+- 可选择删除歌曲文件本身，或仅删除曲库记录；Windows 和 Linux 会将歌曲移入回收站，Android 会直接永久删除，删除前都会明确说明影响并要求确认。Linux 回收站不可用时保留歌曲并提示失败
 - 删除歌曲文件时会同步移除播放队列中的同路径项目；若正在播放该歌曲，会先停止并在成功删除后接续播放下一首
 - 文件删除成功后，队列、曲库和“我的音乐”会独立保存；其中一项保存或接续播放失败时不会阻断其他清理步骤，并会给出明确提示
 - 启动时以受控并发补全本地歌曲元数据，复用路径索引并集中合并结果，避免逐首遍历和复制整个曲库；补全过程中的编辑、删除和重新导入优先保留
 - 扫描封面使用完整文件路径和哈希缓存键，不同子目录中的同名歌曲及长文件名不会共用封面；继续兼容已有缓存并自动回收不再使用的旧封面
 - 启动时并行恢复曲库、歌单、播放队列和下载任务，减少数据较多时的等待
 - 下载目录递归扫描使用受控并发读取新歌曲元数据，并按规范化路径避免重复导入
-- 安全批量补全缺失专辑：显示逐首进度和结果统计，支持停止任务；低置信度候选会原子保存，可稍后或重启后集中审阅
-- 专辑匹配综合歌名、歌手、时长、中英日韩版本词、候选分差及 Apple/MusicBrainz 跨来源证据，避免误写现场版、伴奏、混音版或精选集
+- 批量补全缺失专辑：显示逐首进度和结果统计，支持停止任务；批量扫描、下载后自动扫描和单曲获取专辑都默认选取得分最高的候选，MP3 写入文件标签。播放器已加载的 MP3 保存选定候选，切歌释放文件后自动写入；重启后继续处理，歌曲信息已变化时跳过旧候选
+- 专辑候选评分综合歌名、歌手、时长、中英日韩版本词及 Apple/MusicBrainz 跨来源证据
 - 设置、曲库、歌单、播放队列、下载任务和待确认专辑采用原子写入并保留上一代备份，文件异常时自动恢复
 - 曲库、歌单、播放队列和任务的密集保存请求会合并为最新待保存快照，使用紧凑 JSON 减少转换与写盘开销；退出前会等待待处理数据保存完成
+
+### 北科云盘同步
+
+- Android、Windows 和 Linux 版可在“设置 → 北科云盘歌曲同步(仅限USTBer)”中打开学校登录页，用微信扫码授权，再选择个人云盘中的歌曲文件夹
+- 记住选定的云盘文件夹；“打开青听时自动同步”可独立开关，也可点击“立即同步”
+- 在选定文件夹内自动创建 `青听歌曲/` 和 `青听数据/`；只同步 `青听歌曲/` 中的歌曲，选定文件夹根目录和 `青听数据/` 中的其他文件不进入曲库
+- 递归同步 MP3、FLAC、M4A、AAC、WAV、OGG 文件；每次成功同步后自动扫描当前下载目录，将新歌曲导入本地曲库
+- 最多同时传输两首歌曲，未变化的歌曲不重复保存本地同步记录；显示目录读取、比较、哈希、传输和入库阶段，以及每首歌曲的百分比、字节数和平均速度
+- 单首上传、下载或删除失败不会中断其他歌曲；失败清单显示对应阶段，点击“一键重试失败歌曲”只处理上次失败的路径
+- 下载完成的歌曲可在本次运行中立即同步；正在下载、暂停或尚未清理的任务文件会跳过
+- 在 `青听数据/QingTing-sync-index.json` 记录歌曲版本、大小、SHA-256、原下载时间和删除同步设置；另一台设备遇到同名且哈希相同的歌曲时可跳过整首下载比较，导入后按原下载时间排序。索引损坏或消失时暂停同步，避免误传已删除的歌曲
+- 在青听中修改标题、歌手、专辑、歌词或封面后，同步会更新对应云端记录，其他设备下次同步更新已有歌曲、播放队列和缓存，保留原下载时间、歌曲身份、收藏、歌单和最近播放。修改标题不会重命名歌曲文件
+- 歌曲信息保存在 `青听数据/歌曲信息/<syncId>.json`，封面按内容哈希保存在 `青听数据/封面/`；两台设备修改不同字段时合并，同一字段以最后成功提交到云端的修改为准。清空字段和移除封面也会同步；自动专辑补全不会覆盖手动清空的专辑
+- MP3 的歌曲信息同时写入云端和本地文件标签，音频内容单独比较，标签修改不会产生冲突副本。播放器加载的 MP3 先更新界面，切歌释放文件后写入标签，待写入和待同步记录可在重启后继续处理。其他格式目前同步青听内的信息，音频文件的内嵌标签保持原样
+- 可在希望作为排序来源的设备上点击“以本机下载顺序为准”，将该设备曲库中的下载时间写入云盘；之后其他设备同步时沿用该顺序，换一台设备再次点击即可重新指定
+- 首次遇到同名但音频内容不同的歌曲会保留两份；两端同时修改音频内容时，保留带“本地冲突”后缀的本地版本
+- 所选云盘文件夹的“同步删除歌曲”默认关闭，并在已更新的设备间共用；启用后，删除本地下载目录内已同步的歌曲，或删除对应云端文件，会在云端确认文件已消失后写入删除记录，再删除另一端内容相同的歌曲。关闭后不产生新的删除记录，已有记录仍生效。若云盘返回待审核或仍列出该文件，界面会显示等待状态，不提前删除另一台设备上的副本。只移除青听中的歌曲记录不会触发云端删除；本地歌曲内容已经修改时不会按旧删除记录误删
+- 登录凭据保存在系统安全存储中，同步记录保存在应用数据目录。Linux 使用青听自己的 WebKitGTK 扫码窗口，依赖桌面 Secret Service 保存授权
 
 ### 平台体验
 
@@ -77,13 +99,14 @@
 | --- | :---: | :---: | :---: |
 | 在线搜索、播放与下载 | 支持 | 支持 | 支持 |
 | 本地曲库、应用内歌词 | 支持 | 支持 | 支持 |
-| 系统媒体控制 | 通知栏、锁屏 | 应用内 | 应用内 |
-| 蓝牙断开或切换自动暂停 | 支持 | 支持 | 暂不支持 |
+| 系统媒体控制 | 通知栏、锁屏 | 应用内 | MPRIS、媒体快捷键 |
+| 蓝牙断开或切换自动暂停 | 支持 | 支持 | PulseAudio / PipeWire Pulse |
 | 桌面歌词 | 系统悬浮窗 | 置顶独立窗口 | 暂不支持 |
 | 下载目录设置 | 手动输入路径 | 文件夹选择器 | 原生文件夹选择器 |
-| 后台运行 | 系统媒体通知 | 关闭后最小化到托盘 | 最小化可播放，关闭即退出 |
+| 北科云盘扫码与歌曲同步 | 支持 | 支持 | 支持 |
+| 后台运行 | 系统媒体通知 | 关闭后最小化到托盘 | 托盘后台运行，可关闭 |
 
-Linux 支持调用默认应用打开歌曲、所在目录和网页。退出前会等待待处理的数据保存；暂不提供托盘、窗口尺寸记忆及桌面悬浮歌词。Linux 删除歌曲文件为永久删除。
+Linux 支持系统回收站、文件管理器定位歌曲、单实例启动、窗口尺寸与最大化状态记忆。托盘菜单可打开窗口、播放/暂停、切歌和退出；“设置 → Linux 桌面”可切换关闭窗口后的行为或直接退出。未检测到托盘时关窗会退出；托盘在后台消失时会重新显示主窗口。退出时暂停下载、完成正在传输的歌曲并保存同步索引，随后停止其余同步任务。桌面悬浮歌词暂不加入 Linux。
 
 ### 诊断与日志
 
@@ -162,14 +185,15 @@ flutter test
 
 ## Linux 构建与安装
 
-需要在 Linux 主机内构建；Windows 可以使用 WSL Ubuntu，不能直接用 Windows Flutter SDK 交叉编译。建议先以 **Ubuntu 24.04 x86_64** 为目标。使用 Flutter **3.44.2 / Dart 3.12.2**，或满足 `pubspec.yaml` 的兼容版本。
+需要在 Linux 主机内构建；Windows 可以使用 WSL Ubuntu，不能直接用 Windows Flutter SDK 交叉编译。主要适配 **Arch Linux x86_64**，同时提供 Ubuntu 24.04 构建脚本。使用 Flutter **3.44.2 / Dart 3.12.2**，或满足 `pubspec.yaml` 的兼容版本。
 
 Ubuntu 24.04 构建依赖：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev \
-  libstdc++-12-dev libmpv-dev libmimalloc-dev liblzma-dev dpkg-dev xdg-user-dirs fonts-noto-cjk
+  libstdc++-12-dev libmpv-dev libmimalloc-dev liblzma-dev dpkg-dev libsecret-1-dev \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libpulse-dev xdg-user-dirs fonts-noto-cjk
 flutter config --enable-linux-desktop
 flutter doctor -v
 flutter pub get --enforce-lockfile
@@ -186,12 +210,12 @@ flutter run -d linux
 bash tools/linux/build-linux.sh --deb
 ```
 
-仅生成便携包时省略 `--deb`。Flutter 不在 PATH 时可设置 `FLUTTER_BIN=/path/to/flutter/bin/flutter`。输出位于 `dist/`，名称如 `QingTing-v1.5.0+32-linux-x64.tar.gz` 和同名 `.deb`；原始可运行目录位于 `build/linux/x64/release/bundle/`。
+仅生成便携包时省略 `--deb`。Flutter 不在 PATH 时可设置 `FLUTTER_BIN=/path/to/flutter/bin/flutter`。输出位于 `dist/`，名称如 `QingTing-v1.6.0+33-linux-x64.tar.gz` 和同名 `.deb`；原始可运行目录位于 `build/linux/x64/release/bundle/`。
 
 安装并启动：
 
 ```bash
-sudo apt install ./dist/QingTing-v1.5.0+32-linux-x64.deb
+sudo apt install ./dist/QingTing-v1.6.0+33-linux-x64.deb
 qingting
 ```
 
@@ -209,17 +233,24 @@ WSL 开发时建议在 Linux 文件系统中的独立源码副本构建，避免
 
 ```bash
 sudo pacman -Syu
-sudo pacman -U ./qingting-1.5.0+32-1-x86_64.pkg.tar.zst
+sudo pacman -U ./qingting-1.6.0+33-1-x86_64.pkg.tar.zst
 qingting
 ```
 
-pacman 会处理 GTK 3、mpv、mimalloc 等依赖。需要中文字体时可安装 `noto-fonts-cjk`。安装包包含应用菜单图标，支持用 `sudo pacman -R qingting` 卸载；用户曲库和设置保留在 XDG 用户数据目录。
+pacman 会处理 GTK 3、mpv、mimalloc、WebKitGTK 4.1、Ayatana AppIndicator、libpulse 和 libsecret 依赖。需要中文字体时可安装 `noto-fonts-cjk`。安装包包含应用菜单图标，支持用 `sudo pacman -R qingting` 卸载；用户曲库和设置保留在 XDG 用户数据目录。
+
+- **扫码登录与记住授权**：桌面需运行并解锁支持 `org.freedesktop.secrets` 的密钥环（例如 `gnome-keyring`）。只有 libsecret 库而没有 Secret Service，无法保存云盘授权。KDE 用户也需要可用的 Secret Service 提供者。
+- **托盘**：KDE 原生提供状态通知托盘；GNOME 需启用 AppIndicator 扩展。无托盘时关窗直接退出，不会让程序隐藏后无法恢复。
+- **系统媒体控制**：通过 [MPRIS](https://specifications.freedesktop.org/mpris/latest/) 发布歌曲、封面、状态和进度，支持播放、暂停、停止、上下曲、跳转、音量、随机与循环；可用 `playerctl -p qingting` 控制，具体媒体键映射由桌面负责。
+- **蓝牙自动暂停**：监听青听进程的音频流和输出设备；播放器优先使用 PulseAudio 接口，使用 PipeWire 时需启用 `pipewire-pulse`。PulseAudio 不可用时仍允许其他音频后端播放，但无法监听这些后端的蓝牙切换。其他程序使用的蓝牙设备断开不触发暂停。
+- **窗口记忆**：支持 X11 / Wayland 的尺寸和最大化状态；不恢复 Wayland 窗口坐标。设置保存在 `$XDG_CONFIG_HOME/qingting/desktop.ini`（未配置时为 `~/.config/qingting/desktop.ini`）。
 
 从当前源码构建（在 Arch 中以普通用户运行）：
 
 ```bash
 sudo pacman -Syu --needed base-devel clang cmake ninja pkgconf gtk3 mpv \
-  mimalloc xdg-user-dirs git curl unzip xz
+  mimalloc libsecret webkit2gtk-4.1 libayatana-appindicator libpulse \
+  xdg-user-dirs git curl unzip xz
 # 安装 Linux Flutter 3.44.2 / Dart 3.12.2，并将 flutter 加入 PATH
 flutter config --enable-linux-desktop
 bash tools/arch/build-arch.sh
@@ -230,6 +261,14 @@ bash tools/arch/build-arch.sh
 Arch 与 Ubuntu 的系统库版本可能不同（例如 mimalloc 的 ABI 主版本），因此不要将 Ubuntu 便携包直接重打包后用于 Arch。Arch 脚本会记录当前链接的 mimalloc ABI，并在安装包中约束对应版本；将来系统库发生 ABI 升级时应重新构建。Arch 和 Ubuntu 构建也应使用各自的源码副本及构建缓存。
 
 手动触发的 GitHub Actions 工作流 **Build Arch Linux** 使用官方 Arch 容器构建，产物包含 `.pkg.tar.zst` 安装包及校验文件。该流程不会发布到 AUR。
+
+### Linux 原生集成检查
+
+Release 构建后可运行 `bash tools/linux/test-native.sh`。除构建依赖外，Ubuntu 需 `python3-gi xdotool xvfb dbus-x11 gnome-keyring openssl`，Arch 需 `python-gobject xdotool xorg-server-xvfb dbus mesa gnome-keyring openssl`。检查在临时数据目录启动并解锁独立密钥环，避免新会话缺少 PAM 解锁而阻塞启动时读取授权；使用独立 D-Bus 和 Xvfb，覆盖 OAuth 回调边界、MPRIS 属性及控制、重复启动、无托盘关窗退出、托盘隐藏和恢复、托盘消失后恢复窗口，以及退出保存。扫码检查使用本地 HTTPS 模拟学校二维码轮询和 SSO 重定向，由真实 WebKitGTK 验证二维码页切换到主页面、学校会话 Cookie 保留、授权回调被拦截，以及取消时清理待执行的导航；不使用学校账号或真实授权凭据。
+
+微信实际扫码和物理蓝牙设备切换还需要在用户桌面上验证；此检查不连接用户账号。
+
+如果测试环境有 `pulseaudio` 和 `pactl`，还会启动私有静音音频服务，验证实际文件播放、MPRIS 进度与停止后重播、进程音频流识别，以及模拟蓝牙路由切换和无关设备隔离。CI 安装这些测试依赖；日常使用 PipeWire 的桌面无需为运行青听改装 PulseAudio。
 
 ## Android 构建
 
@@ -260,6 +299,8 @@ APK 默认输出到 `build\app\outputs\flutter-apk\`，构建后可另存为 `di
 
 ## Windows 构建
 
+内置云盘登录页需要 `nuget.exe` 命令行工具；按 [NuGet 官方安装说明](https://learn.microsoft.com/nuget/reference/nuget-exe-cli-reference) 下载并加入 `PATH` 后构建。
+
 生成 Release：
 
 ```powershell
@@ -273,7 +314,7 @@ flutter build windows --release
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File tools\windows_installer\build-windows-installer.ps1 `
-  -Version 1.5.0
+  -Version 1.6.0
 ```
 
 安装程序输出到 `dist\QingTingSetup-v1_5_0.exe`，默认安装位置为 `%LOCALAPPDATA%\Programs\QingTing`，并创建桌面和开始菜单快捷方式。升级采用临时目录验证和原子替换；含有个人文件且不属于青听的非空目录不会被清理。

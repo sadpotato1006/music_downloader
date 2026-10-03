@@ -23,8 +23,8 @@ esac
 for tool in cmake ninja clang++ pkg-config tar; do
   command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }
 done
-pkg-config --exists gtk+-3.0 mpv || {
-  echo 'Install libgtk-3-dev and libmpv-dev before building.' >&2
+pkg-config --exists gtk+-3.0 mpv libsecret-1 webkit2gtk-4.1 ayatana-appindicator3-0.1 libpulse-mainloop-glib || {
+  echo 'Install GTK 3, mpv, libsecret, WebKitGTK 4.1, Ayatana AppIndicator 3 and libpulse development packages.' >&2
   exit 1
 }
 if $make_deb; then
@@ -81,7 +81,7 @@ Priority: optional
 Architecture: $deb_arch
 Maintainer: QingTing contributors <qingting@users.noreply.github.com>
 Depends: $dependencies, $mpv_package, xdg-user-dirs
-Recommends: fonts-noto-cjk
+Recommends: fonts-noto-cjk, gnome-keyring
 Installed-Size: $(du -sk "$deb_root/opt" | cut -f1)
 Homepage: https://github.com/sadpotato1006/music_downloader
 Description: QingTing music search, playback and download manager

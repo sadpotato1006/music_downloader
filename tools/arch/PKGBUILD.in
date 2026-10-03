@@ -9,9 +9,15 @@ depends=(
   'gtk3' 'mpv' 'glibc' 'gcc-libs' 'glib2' 'cairo' 'pango'
   'libepoxy' 'fontconfig' 'gdk-pixbuf2' 'harfbuzz' 'zlib'
   'mimalloc>=@MIMALLOC_ABI@' 'mimalloc<@MIMALLOC_NEXT_ABI@'
-  'xdg-user-dirs' 'hicolor-icon-theme'
+  'xdg-user-dirs' 'hicolor-icon-theme' 'libsecret'
+  'webkit2gtk-4.1' 'libayatana-appindicator' 'libpulse'
 )
-optdepends=('noto-fonts-cjk: Chinese, Japanese and Korean text rendering')
+optdepends=(
+  'noto-fonts-cjk: Chinese, Japanese and Korean text rendering'
+  'gnome-keyring: Secret Service for securely remembering cloud login (or another Secret Service provider)'
+  'pipewire-pulse: PulseAudio compatibility for Bluetooth route monitoring with PipeWire'
+  'gnome-shell-extension-appindicator: Tray support on GNOME; KDE has native support'
+)
 # Flutter already builds release binaries; keep its AOT and native assets intact.
 options=('!strip' '!debug')
 source=("qingting-${pkgver}-arch-x86_64-bundle.tar.gz")

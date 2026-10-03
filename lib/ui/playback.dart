@@ -265,6 +265,8 @@ class TrackTile extends StatelessWidget {
     required this.subtitle,
     required this.trailing,
     this.onTap,
+    this.onLongPress,
+    this.selected = false,
     this.tertiary,
     this.coverUrl,
     this.coverFilePath,
@@ -281,6 +283,8 @@ class TrackTile extends StatelessWidget {
   final String? tertiary;
   final List<Widget> trailing;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+  final bool selected;
   final String? coverUrl;
   final String? coverFilePath;
   final bool showArtwork;
@@ -296,11 +300,17 @@ class TrackTile extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onLongPress,
         borderRadius: BorderRadius.circular(16),
         splashColor: _accent.withValues(alpha: 0.18),
         highlightColor: _accent.withValues(alpha: 0.10),
         child: Ink(
-          decoration: _tileDecoration(),
+          decoration: selected
+              ? _tileDecoration().copyWith(
+                  color: _accent.withValues(alpha: 0.16),
+                  border: Border.all(color: _accentStrong),
+                )
+              : _tileDecoration(),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(

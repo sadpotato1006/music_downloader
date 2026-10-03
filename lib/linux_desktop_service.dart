@@ -23,8 +23,65 @@ class LinuxDesktopService {
   static Future<bool> openFile(String path) =>
       _openUri(File(path).absolute.uri);
 
-  static Future<bool> revealFile(String path) =>
-      _openUri(File(path).absolute.parent.uri);
+  static Future<bool> revealFile(String path) async {
+    try {
+      return await _channel.invokeMethod<bool>('revealFile', {
+            'uri': File(path).absolute.uri.toString(),
+          }) ??
+          false;
+    } on PlatformException {
+      return _openUri(File(path).absolute.parent.uri);
+    } on MissingPluginException {
+      return _openUri(File(path).absolute.parent.uri);
+    }
+  }
+
+  static Future<Uri?> login(Uri url, Uri callback) async {
+    if (url.scheme != 'https' ||
+        url.host.isEmpty ||
+        callback.scheme != 'https' ||
+        callback.host != '127.0.0.1' ||
+        callback.path != '/callback' ||
+        callback.hasQuery ||
+        callback.hasFragment) {
+      throw ArgumentError('无效的云盘登录地址');
+    }
+    final result = await _channel.invokeMethod<String>('login', {
+      'url': url.toString(),
+      'callbackUrl': callback.toString(),
+    });
+    if (result == null) return null;
+    final uri = Uri.parse(result);
+    if (uri.scheme != callback.scheme ||
+        uri.host != callback.host ||
+        uri.port != callback.port ||
+        uri.path != callback.path ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment) {
+      throw const FormatException('云盘登录返回了无效的回调地址');
+    }
+    return uri;
+  }
+
+  static Future<void> cancelLogin() async {
+    try {
+      await _channel.invokeMethod<void>('cancelLogin');
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  static Future<Map<String, bool>> desktopSettings() async {
+    final result = await _channel.invokeMapMethod<String, bool>('getSettings');
+    return result ?? const {};
+  }
+
+  static Future<void> setCloseToTray(bool enabled) =>
+      _channel.invokeMethod<void>('setCloseToTray', {'enabled': enabled});
+
+  static Future<void> quit() => _channel.invokeMethod<void>('quit');
 
   static Future<bool> openUrl(String url) async {
     final uri = Uri.tryParse(url);

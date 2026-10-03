@@ -15,14 +15,15 @@ jobs:
       - name: Install Arch build dependencies
         run: |
           pacman -Syu --noconfirm --needed base-devel clang cmake ninja pkgconf \
-            gtk3 mpv mimalloc xdg-user-dirs git curl unzip xz
+            gtk3 mpv mimalloc libsecret webkit2gtk-4.1 libayatana-appindicator libpulse \
+            xdg-user-dirs git curl unzip xz python-gobject xdotool xorg-server-xvfb dbus mesa pulseaudio gnome-keyring openssl
       - uses: actions/checkout@v4
       - name: Prepare a normal build user and Flutter
         run: |
           useradd -m builder
           git clone --depth 1 --branch 3.44.2 https://github.com/flutter/flutter.git /opt/flutter
           mkdir -p /home/builder/qingting
-          tar -cf - lib test linux tools assets pubspec.yaml pubspec.lock analysis_options.yaml .metadata \
+          tar -cf - lib test linux tools assets third_party pubspec.yaml pubspec.lock analysis_options.yaml .metadata \
             | tar -xf - -C /home/builder/qingting
           chown -R builder:builder /home/builder/qingting /opt/flutter
       - name: Analyze, test and build
@@ -36,6 +37,7 @@ jobs:
             flutter analyze --no-pub
             flutter test --no-pub
             bash tools/arch/build-arch.sh
+            bash tools/linux/test-native.sh
           '
           mkdir -p dist
           cp /home/builder/qingting/dist/*.pkg.tar.zst* dist/

@@ -14,7 +14,7 @@ class PlatformFileDeletionService implements FileDeletionService {
   );
 
   @override
-  bool get movesFilesToRecycleBin => Platform.isWindows;
+  bool get movesFilesToRecycleBin => Platform.isWindows || Platform.isLinux;
 
   @override
   Future<bool> deleteFile(String path) async {
@@ -22,7 +22,7 @@ class PlatformFileDeletionService implements FileDeletionService {
     if (!await file.exists()) {
       return false;
     }
-    if (Platform.isWindows) {
+    if (movesFilesToRecycleBin) {
       final moved = await _channel.invokeMethod<bool>('moveToRecycleBin', {
         'path': path,
       });

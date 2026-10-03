@@ -7,23 +7,31 @@ import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:path/path.dart' as p;
 
 import 'album_metadata_service.dart';
+import 'anyshare_auth.dart';
+import 'anyshare_client.dart';
 import 'app_info.dart';
 import 'app_controller.dart';
 import 'app_log.dart';
 import 'desktop_lyrics_service.dart';
 import 'gequbao_source.dart';
 import 'lyric_parser.dart';
+import 'linux_desktop_service.dart';
 import 'models.dart';
 import 'my_free_mp3_source.dart';
 import 'pending_album_match.dart';
 
 part 'ui/search_download.dart';
 part 'ui/library.dart';
+part 'ui/library_batch.dart';
 part 'ui/lyrics_settings.dart';
 part 'ui/settings.dart';
+part 'ui/linux_desktop_settings.dart';
+part 'ui/cloud_sync.dart';
 part 'ui/playback.dart';
 part 'ui/dialogs.dart';
 part 'ui/diagnostics.dart';
@@ -144,7 +152,11 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
     if (call.method != 'prepareToExit') {
       throw MissingPluginException('Unknown lifecycle method: ${call.method}');
     }
-    await controller.flushPendingWrites();
+    if (Platform.isLinux) {
+      await controller.prepareForExit();
+    } else {
+      await controller.flushPendingWrites();
+    }
     return true;
   }
 

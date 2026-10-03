@@ -90,6 +90,31 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 12),
           _SettingPanel(
+            title: '北科云盘歌曲同步(仅限USTBer)',
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(
+                Icons.cloud_sync_outlined,
+                color: _accentStrong,
+              ),
+              title: Text(
+                settings.cloudFolderName.isEmpty
+                    ? '连接北科云盘'
+                    : '同步文件夹：${settings.cloudFolderName}',
+              ),
+              subtitle: Text(
+                controller.isCloudSyncing ? '正在同步歌曲…' : '启动时自动同步，也可手动同步',
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => CloudSyncPage(controller: controller),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingPanel(
             title: '本地歌曲',
             child: Column(
               children: [
@@ -184,6 +209,10 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
           const SizedBox(height: 12),
+          if (Platform.isLinux) ...[
+            const _LinuxDesktopSettings(),
+            const SizedBox(height: 12),
+          ],
           _SettingPanel(
             title: '诊断',
             child: ListTile(
@@ -327,7 +356,7 @@ class _SettingsPageState extends State<SettingsPage> {
           title: const Text('开始批量匹配专辑？'),
           content: Text(
             '将处理 $count 首歌曲。元数据服务需要限速访问，可能持续数分钟；'
-            '过程中可以安全停止，低置信度结果会留待人工确认。',
+            '每首歌曲默认选择得分最高的专辑并写入，过程中可以停止。',
           ),
           actions: [
             TextButton(

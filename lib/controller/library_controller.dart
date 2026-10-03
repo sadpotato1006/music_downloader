@@ -1,9 +1,10 @@
 part of '../app_controller.dart';
 
 extension AppControllerLibraryActions on AppController {
-  bool _tryBeginMetadataRead(String path) {
+  bool _tryBeginMetadataRead(String path, {bool completedDownload = false}) {
     final pathKey = _trackPathKey(path);
-    if (_deletingTrackKeys.contains(pathKey) ||
+    if ((_cloudSyncOwnsFiles && !completedDownload) ||
+        _deletingTrackKeys.contains(pathKey) ||
         _metadataWriteKeys.contains(pathKey)) {
       return false;
     }
@@ -39,7 +40,8 @@ extension AppControllerLibraryActions on AppController {
       (_metadataReadCounts[pathKey] ?? 0) > 0;
 
   bool _tryBeginMetadataWrite(String pathKey) {
-    if (_deletingTrackKeys.contains(pathKey) ||
+    if (_cloudSyncOwnsFiles ||
+        _deletingTrackKeys.contains(pathKey) ||
         _metadataReadInProgress(pathKey)) {
       return false;
     }
@@ -295,7 +297,15 @@ extension AppControllerLibraryActions on AppController {
   bool isDeletingDownloadedTrack(DownloadedTrack track) =>
       _deletingTrackKeys.contains(_trackPathKey(track.path));
 
-  Future<bool> deleteDownloadedTrack(DownloadedTrack track) async {
+  Future<bool> deleteDownloadedTrack(
+    DownloadedTrack track, {
+    bool resumePlayback = true,
+  }) async {
+    if (isCloudSyncing) {
+      globalMessage = '云盘正在同步，请同步完成后再删除歌曲。';
+      _notify();
+      return false;
+    }
     final trackPathKey = _trackPathKey(track.path);
     if (_metadataWriteKeys.contains(trackPathKey) ||
         _metadataReadInProgress(trackPathKey)) {
@@ -310,7 +320,11 @@ extension AppControllerLibraryActions on AppController {
     }
     _notify();
     try {
-      return await _deleteDownloadedTrack(track, trackPathKey);
+      return await _deleteDownloadedTrack(
+        track,
+        trackPathKey,
+        resumePlayback: resumePlayback,
+      );
     } finally {
       _deletingTrackKeys.remove(trackPathKey);
       _notify();
@@ -319,8 +333,9 @@ extension AppControllerLibraryActions on AppController {
 
   Future<bool> _deleteDownloadedTrack(
     DownloadedTrack track,
-    String trackPathKey,
-  ) async {
+    String trackPathKey, {
+    required bool resumePlayback,
+  }) async {
     final activeItem = currentItem;
     final deletingCurrentItem =
         activeItem?.localPath != null &&
@@ -353,7 +368,10 @@ extension AppControllerLibraryActions on AppController {
     );
     await _deleteUnusedCachedCover(track.coverFilePath);
     var playbackFailed = false;
-    if (queueUpdate.removedCurrent && currentWasPlaying && queue.isNotEmpty) {
+    if (resumePlayback &&
+        queueUpdate.removedCurrent &&
+        currentWasPlaying &&
+        queue.isNotEmpty) {
       try {
         playbackFailed = !await _openCurrentItemForPlayback();
       } catch (error, stackTrace) {
@@ -482,7 +500,6 @@ extension AppControllerLibraryActions on AppController {
   Set<String> _unfinishedDownloadPaths() => {
     for (final task in downloadTasks)
       if (task.status != DownloadStatus.completed ||
-          _runningDownloadIds.contains(task.id) ||
           _pendingDownloadCleanupIds.contains(task.id))
         _trackPathKey(task.savePath),
     for (final path in _reservedDownloadSavePaths) _trackPathKey(path),
@@ -595,6 +612,7 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<String?> readDownloadedLyrics(DownloadedTrack track) async {
+    if (track.metadataLyrics != null) return track.metadataLyrics;
     if (!await _beginMetadataReadWhenAvailable(track.path)) {
       return null;
     }
@@ -626,6 +644,7 @@ extension AppControllerLibraryActions on AppController {
     required String album,
     required String lyrics,
     required String coverInput,
+    bool removeCover = false,
   }) async {
     final trackPathKey = _trackPathKey(track.path);
     if (!_tryBeginMetadataWrite(trackPathKey)) {
@@ -641,6 +660,7 @@ extension AppControllerLibraryActions on AppController {
         album: album,
         lyrics: lyrics,
         coverInput: coverInput,
+        removeCover: removeCover,
       );
     } finally {
       _metadataWriteKeys.remove(trackPathKey);
@@ -654,7 +674,21 @@ extension AppControllerLibraryActions on AppController {
     required String album,
     required String lyrics,
     required String coverInput,
+    bool removeCover = false,
   }) async {
+    final latest = _downloadedTrackByPath(track.path);
+    if (latest == null ||
+        latest.id != track.id ||
+        latest.title != track.title ||
+        latest.artist != track.artist ||
+        latest.album != track.album ||
+        latest.metadataLyrics != track.metadataLyrics ||
+        latest.metadataEditSequence != track.metadataEditSequence) {
+      globalMessage = '歌曲信息已经变化，请重新打开编辑窗口。';
+      _notify();
+      return false;
+    }
+    track = latest;
     final trimmedTitle = title.trim().isEmpty ? track.title : title.trim();
     final trimmedArtist = artist.trim();
     final trimmedAlbum = album.trim();
@@ -667,7 +701,7 @@ extension AppControllerLibraryActions on AppController {
     }
 
     Id3CoverImage? manualCover;
-    if (coverInput.trim().isNotEmpty) {
+    if (!removeCover && coverInput.trim().isNotEmpty) {
       manualCover = await _loadCoverFromManualInput(coverInput.trim());
       if (manualCover == null) {
         globalMessage = '封面图片不可用，请检查图片路径或网址。';
@@ -677,10 +711,20 @@ extension AppControllerLibraryActions on AppController {
     }
 
     String? coverFilePath = track.coverFilePath;
-    if (track.format.toLowerCase() == 'mp3') {
+    final oldLyrics =
+        track.metadataLyrics ??
+        (track.format.toLowerCase() == 'mp3'
+            ? await Id3LyricsEmbedder.extractLyrics(file)
+            : await _readSidecarLyrics(file)) ??
+        '';
+    final deferTags =
+        track.format.toLowerCase() == 'mp3' &&
+        _isTrackLoadedInPlayer(track.path);
+    if (track.format.toLowerCase() == 'mp3' && !deferTags) {
       try {
-        final existingCover =
-            manualCover ?? await Id3LyricsEmbedder.extractCover(file);
+        final existingCover = removeCover
+            ? null
+            : manualCover ?? await Id3LyricsEmbedder.extractCover(file);
         await Id3LyricsEmbedder.embedMetadata(
           file,
           title: trimmedTitle,
@@ -688,6 +732,7 @@ extension AppControllerLibraryActions on AppController {
           album: trimmedAlbum,
           lyrics: trimmedLyrics,
           cover: existingCover,
+          removeCover: removeCover,
         );
         coverFilePath = await storage.cacheEmbeddedCover(
           file,
@@ -704,12 +749,27 @@ extension AppControllerLibraryActions on AppController {
         cacheKey: '${track.id}-${DateTime.now().microsecondsSinceEpoch}',
       );
     }
+    if (removeCover) coverFilePath = null;
 
-    final updated = track.copyWith(
-      title: trimmedTitle,
-      artist: trimmedArtist,
-      album: trimmedAlbum,
-      coverFilePath: coverFilePath,
+    final updated = _markMetadataEdit(
+      track,
+      track.copyWith(
+        title: trimmedTitle,
+        artist: trimmedArtist,
+        album: trimmedAlbum,
+        coverFilePath: coverFilePath,
+        clearCoverFilePath: removeCover,
+        clearCoverUrl: removeCover,
+        metadataLyrics: trimmedLyrics,
+        metadataPendingFileWrite: deferTags,
+      ),
+      {
+        if (trimmedTitle != track.title) 'title',
+        if (trimmedArtist != track.artist) 'artist',
+        if (trimmedAlbum != track.album) 'album',
+        if (trimmedLyrics != oldLyrics.trim()) 'lyrics',
+        if (manualCover != null || removeCover) 'cover',
+      },
     );
     if (trimmedAlbum.isNotEmpty ||
         trimmedTitle != track.title ||
@@ -732,6 +792,8 @@ extension AppControllerLibraryActions on AppController {
                 album: trimmedAlbum,
                 coverFilePath: coverFilePath,
                 lyrics: trimmedLyrics,
+                clearCoverFilePath: removeCover,
+                clearCoverUrl: removeCover,
               )
             : item,
     ];
@@ -756,6 +818,9 @@ extension AppControllerLibraryActions on AppController {
       return const [];
     }
 
+    final completion = Completer<void>();
+    final completionFuture = completion.future;
+    _albumMatchCompletion = completionFuture;
     isMatchingLocalAlbums = true;
     matchingAlbumTrackPath = track.path;
     matchingAlbumTrackTitle = track.artist.trim().isEmpty
@@ -811,6 +876,10 @@ extension AppControllerLibraryActions on AppController {
       isMatchingLocalAlbums = false;
       matchingAlbumTrackPath = null;
       matchingAlbumTrackTitle = null;
+      if (identical(_albumMatchCompletion, completionFuture)) {
+        _albumMatchCompletion = null;
+      }
+      completion.complete();
       _notify();
     }
   }
@@ -837,7 +906,7 @@ extension AppControllerLibraryActions on AppController {
       final track = tracksByPath[pathKey];
       if (track != null &&
           seenPaths.add(pathKey) &&
-          track.album.trim().isEmpty &&
+          track.album == pending.originalAlbum &&
           track.title == pending.title &&
           track.artist == pending.artist &&
           pending.candidates.isNotEmpty) {
@@ -850,18 +919,7 @@ extension AppControllerLibraryActions on AppController {
   int get missingAlbumCount =>
       downloadedTracks.where((track) => track.album.trim().isEmpty).length;
 
-  int get eligibleAlbumMatchCount {
-    final pendingPaths = {
-      for (final item in pendingAlbumMatches) _trackPathKey(item.trackPath),
-    };
-    return downloadedTracks
-        .where(
-          (track) =>
-              track.album.trim().isEmpty &&
-              !pendingPaths.contains(_trackPathKey(track.path)),
-        )
-        .length;
-  }
+  int get eligibleAlbumMatchCount => missingAlbumCount;
 
   void cancelAlbumMatching() {
     if (!isMatchingLocalAlbums || _albumMatchCancelRequested) {
@@ -915,7 +973,7 @@ extension AppControllerLibraryActions on AppController {
       _notify();
       return false;
     }
-    if (current.album.trim().isNotEmpty) {
+    if (current.album != pending.originalAlbum) {
       skipPendingAlbumMatch(pending);
       globalMessage = '这首歌曲已经有专辑名称，已跳过旧候选。';
       _notify();
@@ -931,7 +989,8 @@ extension AppControllerLibraryActions on AppController {
       current,
       candidate.album,
       notify: false,
-      requireAlbumMissing: true,
+      requireAlbumMissing: pending.originalAlbum.isEmpty,
+      expectedAlbum: pending.originalAlbum,
       expectedTitle: pending.title,
       expectedArtist: pending.artist,
     );
@@ -968,7 +1027,90 @@ extension AppControllerLibraryActions on AppController {
     return true;
   }
 
-  Future<int> matchMissingDownloadedAlbums() async {
+  bool hasDeferredAlbumWrite(DownloadedTrack track) => pendingAlbumMatches.any(
+    (item) =>
+        item.automaticWrite &&
+        _trackPathKey(item.trackPath) == _trackPathKey(track.path),
+  );
+
+  Future<bool> applyDownloadedAlbumMatch(
+    DownloadedTrack track,
+    AlbumMetadataMatch candidate,
+  ) async {
+    final current = _downloadedTrackByPath(track.path);
+    if (current == null ||
+        current.title != track.title ||
+        current.artist != track.artist ||
+        current.album != track.album) {
+      globalMessage = '歌曲信息已经变化，请重新获取专辑候选。';
+      _notify();
+      return false;
+    }
+    if (current.format.toLowerCase() == 'mp3' &&
+        _isTrackLoadedInPlayer(current.path)) {
+      _upsertPendingAlbumMatch(current, [candidate], automaticWrite: true);
+      await _savePendingAlbumMatches();
+      _notify();
+      return true;
+    }
+    return applyDownloadedAlbumName(current, candidate.album);
+  }
+
+  void _scheduleDeferredAlbumWrites() {
+    if (_isDisposed ||
+        _preparingToExit ||
+        _deferredAlbumWritesScheduled ||
+        !pendingAlbumMatches.any(
+          (item) =>
+              item.automaticWrite && !_isTrackLoadedInPlayer(item.trackPath),
+        )) {
+      return;
+    }
+    _deferredAlbumWritesScheduled = true;
+    _automaticAlbumMatchQueue = _automaticAlbumMatchQueue
+        .then((_) async {
+          await _playbackMutationQueue;
+          await _runAutomaticAlbumWork(() async {
+            for (final pending in pendingAlbumMatches.toList()) {
+              if (_isDisposed) break;
+              if (!pending.automaticWrite ||
+                  _isTrackLoadedInPlayer(pending.trackPath)) {
+                continue;
+              }
+              final key = _trackPathKey(pending.trackPath);
+              while (!_isDisposed &&
+                  !_isTrackLoadedInPlayer(pending.trackPath) &&
+                  (_metadataReadInProgress(key) ||
+                      _metadataWriteKeys.contains(key))) {
+                await Future<void>.delayed(const Duration(milliseconds: 50));
+              }
+              if (_isDisposed || _isTrackLoadedInPlayer(pending.trackPath)) {
+                continue;
+              }
+              final selected = AlbumMetadataService.selectHighestScoreMatch(
+                pending.candidates,
+              );
+              if (selected == null || !pendingAlbumMatches.contains(pending)) {
+                continue;
+              }
+              if (await applyPendingAlbumMatch(pending, selected)) {
+                await _savePendingAlbumMatches();
+              }
+            }
+          });
+        })
+        .catchError((Object error, StackTrace stackTrace) {
+          AppLog.instance.error(
+            'album',
+            '切歌后自动写入专辑失败',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        })
+        .whenComplete(() => _deferredAlbumWritesScheduled = false);
+  }
+
+  Future<int> matchMissingDownloadedAlbums({Set<String>? onlyPaths}) async {
     if (isMatchingLocalAlbums) {
       return 0;
     }
@@ -976,14 +1118,17 @@ extension AppControllerLibraryActions on AppController {
     final completionFuture = completion.future;
     _albumMatchCompletion = completionFuture;
 
-    final pendingPaths = {
-      for (final item in pendingAlbumMatches) _trackPathKey(item.trackPath),
-    };
+    final selectedPaths = onlyPaths?.map(_trackPathKey).toSet();
     final targets = downloadedTracks
         .where(
           (track) =>
               track.album.trim().isEmpty &&
-              !pendingPaths.contains(_trackPathKey(track.path)),
+              track.syncedMetadata?.manualFields.contains('album') != true &&
+              !track.metadataDirtyFields
+                  .difference(track.metadataFillOnlyFields)
+                  .contains('album') &&
+              (selectedPaths == null ||
+                  selectedPaths.contains(_trackPathKey(track.path))),
         )
         .toList(growable: false);
     isMatchingLocalAlbums = true;
@@ -1037,25 +1182,24 @@ extension AppControllerLibraryActions on AppController {
               latest.artist != current.artist) {
             continue;
           }
-          if (candidates.isEmpty) {
+          final selected = AlbumMetadataService.selectHighestScoreMatch(
+            candidates,
+          );
+          if (selected == null) {
             albumMatchNotFound += 1;
           } else {
-            final automatic = AlbumMetadataService.selectAutomaticMatch(
-              candidates,
-              hasArtist: current.artist.trim().isNotEmpty,
-              hasDuration: current.durationMs != null,
-            );
-            if (automatic == null) {
-              _upsertPendingAlbumMatch(latest, candidates);
-              unsavedChanges += 1;
-            } else if (latest.format.toLowerCase() == 'mp3' &&
+            if (latest.format.toLowerCase() == 'mp3' &&
                 _isTrackLoadedInPlayer(latest.path)) {
-              _upsertPendingAlbumMatch(latest, candidates);
+              _upsertPendingAlbumMatch(
+                latest,
+                candidates,
+                automaticWrite: true,
+              );
               unsavedChanges += 1;
             } else {
               final didUpdate = await _applyAlbumToDownloadedTrack(
                 latest,
-                automatic.album,
+                selected.album,
                 notify: false,
                 persist: false,
                 requireAlbumMissing: true,
@@ -1063,6 +1207,7 @@ extension AppControllerLibraryActions on AppController {
                 expectedArtist: latest.artist,
               );
               if (didUpdate) {
+                _removePendingAlbumMatchForPath(latest.path);
                 albumMatchUpdated += 1;
                 unsavedChanges += 1;
               } else {
@@ -1123,8 +1268,9 @@ extension AppControllerLibraryActions on AppController {
 
   void _upsertPendingAlbumMatch(
     DownloadedTrack track,
-    List<AlbumMetadataMatch> candidates,
-  ) {
+    List<AlbumMetadataMatch> candidates, {
+    bool automaticWrite = false,
+  }) {
     final pathKey = _trackPathKey(track.path);
     final pending = PendingAlbumMatch(
       trackId: track.id,
@@ -1132,12 +1278,15 @@ extension AppControllerLibraryActions on AppController {
       title: track.title,
       artist: track.artist,
       candidates: List<AlbumMetadataMatch>.unmodifiable(candidates),
+      automaticWrite: automaticWrite,
+      originalAlbum: track.album,
     );
     pendingAlbumMatches = [
       for (final item in pendingAlbumMatches)
         if (_trackPathKey(item.trackPath) != pathKey) item,
       pending,
     ];
+    _scheduleDeferredAlbumWrites();
   }
 
   DownloadedTrack? _downloadedTrackByPath(String path) {
@@ -1196,13 +1345,19 @@ extension AppControllerLibraryActions on AppController {
           metadata = const Id3Metadata();
         }
       }
-      var lyrics = includeLyrics ? metadata.lyrics : null;
-      if (includeLyrics && (lyrics == null || lyrics.trim().isEmpty)) {
+      var lyrics = includeLyrics
+          ? track.metadataLyrics ?? metadata.lyrics
+          : null;
+      if (includeLyrics &&
+          track.metadataLyrics == null &&
+          (lyrics == null || lyrics.trim().isEmpty)) {
         lyrics = await _readSidecarLyrics(file);
       }
       var album = track.album;
       final embeddedAlbum = metadata.album?.trim();
       if (album.trim().isEmpty &&
+          track.syncedMetadata == null &&
+          !track.metadataDirtyFields.contains('album') &&
           embeddedAlbum != null &&
           embeddedAlbum.isNotEmpty) {
         album = embeddedAlbum;
@@ -1330,6 +1485,7 @@ extension AppControllerLibraryActions on AppController {
         album,
         notify: notify,
         persist: persist,
+        fillOnly: requireAlbumMissing,
       );
     } finally {
       _metadataWriteKeys.remove(trackPathKey);
@@ -1341,7 +1497,14 @@ extension AppControllerLibraryActions on AppController {
     String album, {
     required bool notify,
     required bool persist,
+    bool fillOnly = false,
   }) async {
+    if (fillOnly &&
+        (track.syncedMetadata?.manualFields.contains('album') == true ||
+            (track.metadataDirtyFields.contains('album') &&
+                !track.metadataFillOnlyFields.contains('album')))) {
+      return false;
+    }
     final trimmedAlbum = album.trim();
     final file = File(track.path);
     if (!await file.exists()) {
@@ -1373,7 +1536,12 @@ extension AppControllerLibraryActions on AppController {
       }
     }
 
-    final updated = track.copyWith(album: trimmedAlbum);
+    final updated = _markMetadataEdit(
+      track,
+      track.copyWith(album: trimmedAlbum),
+      {'album'},
+      fillOnly: fillOnly,
+    );
     downloadedTracks = [
       for (final item in downloadedTracks)
         item.id == track.id && item.path == track.path ? updated : item,
@@ -1508,6 +1676,7 @@ extension AppControllerLibraryActions on AppController {
       downloadedAt: DateTime.now(),
       sourceUrl: task.track.detailUrl,
       album: task.album,
+      metadataLyrics: task.lyrics,
       coverUrl: task.track.coverUrl,
       coverFilePath: coverFilePath,
       durationMs: _parseTrackDuration(task.track.duration)?.inMilliseconds,
@@ -1648,7 +1817,9 @@ extension AppControllerLibraryActions on AppController {
     final current = _downloadedTrackByPath(snapshot.path);
     if (!identical(current, snapshot) ||
         current == null ||
-        current.format.toLowerCase() != 'mp3') {
+        current.format.toLowerCase() != 'mp3' ||
+        current.syncedMetadata != null ||
+        current.metadataPendingFileWrite) {
       return null;
     }
 
@@ -1666,7 +1837,9 @@ extension AppControllerLibraryActions on AppController {
         File(current.path),
       );
       String? hydratedCoverPath;
-      if (!hasCover && metadata.cover != null) {
+      if (!hasCover &&
+          metadata.cover != null &&
+          !current.metadataDirtyFields.contains('cover')) {
         hydratedCoverPath = await storage.cacheCoverImage(
           metadata.cover!,
           cacheKey: 'startup-${_trackPathKey(p.absolute(current.path))}',
@@ -1686,6 +1859,7 @@ extension AppControllerLibraryActions on AppController {
         changed = true;
       }
       if (updated.album.trim().isEmpty &&
+          !current.metadataDirtyFields.contains('album') &&
           hydratedAlbum != null &&
           hydratedAlbum.isNotEmpty) {
         updated = updated.copyWith(album: hydratedAlbum);

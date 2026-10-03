@@ -9,7 +9,8 @@ class AudioRouteService {
   static BluetoothAudioRouteChangedHandler? _handler;
   static bool _methodHandlerRegistered = false;
 
-  static bool get isSupported => Platform.isAndroid || Platform.isWindows;
+  static bool get isSupported =>
+      Platform.isAndroid || Platform.isWindows || Platform.isLinux;
 
   static void setBluetoothRouteChangedHandler(
     BluetoothAudioRouteChangedHandler? handler,

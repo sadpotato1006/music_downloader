@@ -6,22 +6,24 @@ class Id3LyricsEmbedder {
   const Id3LyricsEmbedder._();
 
   /// Updates the supplied fields while preserving other ID3 frames.
-  /// Null album, lyrics or cover preserves that field; empty text clears it.
+  /// Null fields preserve their existing frames; empty text clears them.
   static Future<bool> embedMetadata(
     File file, {
-    required String title,
-    required String artist,
+    String? title,
+    String? artist,
     String? album,
     String? lyrics,
     Id3CoverImage? cover,
+    bool removeCover = false,
   }) async {
     final cleanedAlbum = album?.trim();
     final cleanedLyrics = lyrics?.trim();
-    if (title.trim().isEmpty &&
-        artist.trim().isEmpty &&
-        (cleanedAlbum == null || cleanedAlbum.isEmpty) &&
-        (cleanedLyrics == null || cleanedLyrics.isEmpty) &&
-        cover == null) {
+    if (title == null &&
+        artist == null &&
+        cleanedAlbum == null &&
+        cleanedLyrics == null &&
+        cover == null &&
+        !removeCover) {
       return false;
     }
 
@@ -33,6 +35,7 @@ class Id3LyricsEmbedder {
       album: cleanedAlbum,
       lyrics: cleanedLyrics,
       cover: cover,
+      removeCover: removeCover,
     );
     final sourceOffset = existingTag.length;
     final temporaryFile = File(
@@ -225,11 +228,12 @@ class Id3LyricsEmbedder {
 
   static Uint8List embedMetadataBytes(
     List<int> bytes, {
-    required String title,
-    required String artist,
+    String? title,
+    String? artist,
     String? album,
     String? lyrics,
     Id3CoverImage? cover,
+    bool removeCover = false,
   }) {
     final source = Uint8List.fromList(bytes);
     final tag = _readTagForEditing(source);
@@ -238,12 +242,12 @@ class Id3LyricsEmbedder {
     final cleanedLyrics = lyrics?.trim();
     final body = BytesBuilder(copy: false);
 
-    if (title.trim().isNotEmpty) {
+    if (title != null && title.trim().isNotEmpty) {
       body.add(
         _textFrame('TIT2', title.trim(), majorVersion: tag.majorVersion),
       );
     }
-    if (artist.trim().isNotEmpty) {
+    if (artist != null && artist.trim().isNotEmpty) {
       body.add(
         _textFrame('TPE1', artist.trim(), majorVersion: tag.majorVersion),
       );
@@ -271,9 +275,11 @@ class Id3LyricsEmbedder {
       if (_replacesFrame(
         frame,
         tag.majorVersion,
+        title: title != null,
+        artist: artist != null,
         album: album != null,
         lyrics: lyrics != null,
-        cover: cover != null,
+        cover: cover != null || removeCover,
       )) {
         continue;
       }
@@ -448,11 +454,14 @@ class Id3LyricsEmbedder {
   static bool _replacesFrame(
     _RawId3Frame frame,
     int version, {
+    required bool title,
+    required bool artist,
     required bool album,
     required bool lyrics,
     required bool cover,
   }) {
-    if (const ['TIT2', 'TT2', 'TPE1', 'TP1'].contains(frame.id)) return true;
+    if (title && const ['TIT2', 'TT2'].contains(frame.id)) return true;
+    if (artist && const ['TPE1', 'TP1'].contains(frame.id)) return true;
     if (album && const ['TALB', 'TAL'].contains(frame.id)) return true;
     if (cover && const ['APIC', 'PIC'].contains(frame.id)) return true;
     if (!lyrics) return false;

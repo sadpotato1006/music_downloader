@@ -72,28 +72,13 @@ class _LibraryPageState extends State<LibraryPage> {
             onSelected: (value) => setState(() => section = value),
           ),
           const SizedBox(height: 10),
-          switch (section) {
-            _LibrarySection.all => _LibraryToolbar(
-              controller: controller,
-              onSearch: _showLibrarySearch,
-            ),
-            _LibrarySection.favorites => _LibraryCollectionToolbar(
-              controller: controller,
-              tracks: tracks,
-              label: '我喜欢 · ${tracks.length} 首',
-            ),
-            _LibrarySection.recent => _LibraryCollectionToolbar(
-              controller: controller,
-              tracks: tracks,
-              label: '最近播放 · ${tracks.length} 首',
-              onClear: tracks.isEmpty ? null : controller.clearRecentPlaybacks,
-            ),
-            _LibrarySection.playlists => _PlaylistToolbar(
+          if (section == _LibrarySection.playlists) ...[
+            _PlaylistToolbar(
               count: controller.myMusic.playlists.length,
               onCreate: _createPlaylist,
             ),
-          },
-          const SizedBox(height: 8),
+            const SizedBox(height: 8),
+          ],
           Expanded(
             child: section == _LibrarySection.playlists
                 ? _PlaylistOverview(
@@ -101,10 +86,31 @@ class _LibraryPageState extends State<LibraryPage> {
                     onCreate: _createPlaylist,
                   )
                 : _LibraryTrackList(
+                    key: ValueKey(section),
                     controller: controller,
                     tracks: tracks,
                     emptyIcon: emptyIcon,
                     emptyText: emptyText,
+                    toolbar: switch (section) {
+                      _LibrarySection.all => _LibraryToolbar(
+                        controller: controller,
+                        onSearch: _showLibrarySearch,
+                      ),
+                      _LibrarySection.favorites => _LibraryCollectionToolbar(
+                        controller: controller,
+                        tracks: tracks,
+                        label: '我喜欢 · ${tracks.length} 首',
+                      ),
+                      _LibrarySection.recent => _LibraryCollectionToolbar(
+                        controller: controller,
+                        tracks: tracks,
+                        label: '最近播放 · ${tracks.length} 首',
+                        onClear: tracks.isEmpty
+                            ? null
+                            : controller.clearRecentPlaybacks,
+                      ),
+                      _LibrarySection.playlists => const SizedBox.shrink(),
+                    },
                   ),
           ),
         ],
@@ -147,58 +153,6 @@ class _LibrarySectionPicker extends StatelessWidget {
           );
         },
       ),
-    );
-  }
-}
-
-class _LibraryTrackList extends StatelessWidget {
-  const _LibraryTrackList({
-    required this.controller,
-    required this.tracks,
-    required this.emptyIcon,
-    required this.emptyText,
-  });
-
-  final AppController controller;
-  final List<DownloadedTrack> tracks;
-  final IconData emptyIcon;
-  final String emptyText;
-
-  @override
-  Widget build(BuildContext context) {
-    if (tracks.isEmpty) {
-      return _EmptyState(icon: emptyIcon, text: emptyText);
-    }
-    return _ResponsiveTrackList(
-      itemCount: tracks.length,
-      itemBuilder: (context, index) {
-        final track = tracks[index];
-        final artist = track.artist.isEmpty ? '未知歌手' : track.artist;
-        final album = track.album.trim().isEmpty ? '未知专辑' : track.album.trim();
-        return TrackTile(
-          title: track.title,
-          subtitle: '$artist  ·  $album',
-          coverFilePath: track.coverFilePath,
-          artworkSize: 48,
-          titleWeight: FontWeight.w400,
-          titleSize: 15.5,
-          subtitleSize: 13.2,
-          onTap: () => controller.playDownloaded(track),
-          trailing: [
-            _IconAction(
-              tooltip: '下一首播放',
-              icon: controller.preparingQueueNextId == track.id
-                  ? Icons.more_horiz
-                  : Icons.playlist_add,
-              onPressed: controller.preparingQueueNextId == track.id
-                  ? null
-                  : () => controller.queueDownloadedNext(track),
-              size: 28,
-            ),
-            _LibraryMoreActions(controller: controller, track: track),
-          ],
-        );
-      },
     );
   }
 }
@@ -336,7 +290,7 @@ Future<String?> _showPlaylistNameDialog(
 }) async {
   final textController = TextEditingController(text: initialValue);
   try {
-    return await showDialog<String>(
+    final route = DialogRoute<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),
@@ -373,6 +327,9 @@ Future<String?> _showPlaylistNameDialog(
         ],
       ),
     );
+    final result = await Navigator.of(context).push(route);
+    await route.completed;
+    return result;
   } finally {
     textController.dispose();
   }
@@ -540,67 +497,19 @@ class _PlaylistSheetState extends State<_PlaylistSheet> {
               ],
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: tracks.isEmpty
-                        ? null
-                        : () => widget.controller.playDownloadedCollection(
-                            tracks,
-                          ),
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('播放全部'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton.icon(
-                  onPressed: tracks.isEmpty
-                      ? null
-                      : () => widget.controller.playDownloadedCollection(
-                          tracks,
-                          shuffle: true,
-                        ),
-                  icon: const Icon(Icons.shuffle),
-                  label: const Text('随机'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
             Expanded(
-              child: tracks.isEmpty
-                  ? const _EmptyState(
-                      icon: Icons.playlist_add,
-                      text: '从本地歌曲菜单中加入歌曲',
-                    )
-                  : ListView.separated(
-                      itemCount: tracks.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 8),
-                      itemBuilder: (context, index) {
-                        final track = tracks[index];
-                        final artist = track.artist.trim().isEmpty
-                            ? '未知歌手'
-                            : track.artist.trim();
-                        return TrackTile(
-                          title: track.title,
-                          subtitle: artist,
-                          coverFilePath: track.coverFilePath,
-                          onTap: () => widget.controller.playDownloaded(track),
-                          trailing: [
-                            _IconAction(
-                              tooltip: '从歌单移除',
-                              icon: Icons.remove_circle_outline,
-                              onPressed: () =>
-                                  widget.controller.setTrackInPlaylist(
-                                    playlist.id,
-                                    track,
-                                    included: false,
-                                  ),
-                            ),
-                          ],
-                        );
-                      },
-                    ),
+              child: _LibraryTrackList(
+                controller: widget.controller,
+                tracks: tracks,
+                playlistId: playlist.id,
+                emptyIcon: Icons.playlist_add,
+                emptyText: '从本地歌曲菜单中加入歌曲',
+                toolbar: _LibraryCollectionToolbar(
+                  controller: widget.controller,
+                  tracks: tracks,
+                  label: '播放全部',
+                ),
+              ),
             ),
           ],
         ),

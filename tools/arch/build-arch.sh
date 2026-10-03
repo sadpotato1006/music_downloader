@@ -21,8 +21,8 @@ flutter_bin=${FLUTTER_BIN:-flutter}
 for tool in clang++ cmake ninja pkg-config readelf sha256sum zstd fakeroot; do
   command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }
 done
-pkg-config --exists gtk+-3.0 mpv || {
-  echo 'Install gtk3 and mpv before building.' >&2; exit 1;
+pkg-config --exists gtk+-3.0 mpv libsecret-1 webkit2gtk-4.1 ayatana-appindicator3-0.1 libpulse-mainloop-glib || {
+  echo 'Install gtk3, mpv, libsecret, webkit2gtk-4.1, libayatana-appindicator and libpulse before building.' >&2; exit 1;
 }
 pacman -Q mimalloc >/dev/null || { echo 'Install mimalloc before building.' >&2; exit 1; }
 

@@ -6,6 +6,36 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/album_metadata_service.dart';
 
 void main() {
+  test(
+    'score selection ignores blank albums and accepts close lower scores',
+    () {
+      const lower = AlbumMetadataMatch(
+        album: 'Lower',
+        recordingTitle: 'Song',
+        recordingArtist: '',
+        score: 70,
+      );
+      const best = AlbumMetadataMatch(
+        album: 'Best',
+        recordingTitle: 'Song',
+        recordingArtist: '',
+        score: 72,
+      );
+      const blank = AlbumMetadataMatch(
+        album: '  ',
+        recordingTitle: 'Song',
+        recordingArtist: '',
+        score: 100,
+      );
+      expect(
+        AlbumMetadataService.selectHighestScoreMatch([lower, blank, best]),
+        same(best),
+      );
+      expect(AlbumMetadataService.selectHighestScoreMatch([blank]), isNull);
+      expect(AlbumMetadataService.selectHighestScoreMatch([]), isNull);
+    },
+  );
+
   test('uses Apple as the default source and caches the result', () async {
     final adapter = _AppleAlbumAdapter();
     final dio = Dio()..httpClientAdapter = adapter;

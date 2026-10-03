@@ -10,6 +10,9 @@ add_executable(${BINARY_NAME}
   "main.cc"
   "my_application.cc"
   "desktop_integration.cc"
+  "cloud_login.cc"
+  "media_controls.cc"
+  "audio_route_monitor.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
 )
 
@@ -23,5 +26,10 @@ add_definitions(-DAPPLICATION_ID="${APPLICATION_ID}")
 # Add dependency libraries. Add any application-specific dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
+pkg_check_modules(WEBKIT REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
+pkg_check_modules(INDICATOR REQUIRED IMPORTED_TARGET ayatana-appindicator3-0.1)
+pkg_check_modules(PULSE REQUIRED IMPORTED_TARGET libpulse-mainloop-glib)
+target_link_libraries(${BINARY_NAME} PRIVATE
+  PkgConfig::WEBKIT PkgConfig::INDICATOR PkgConfig::PULSE)
 
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")

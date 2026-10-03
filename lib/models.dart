@@ -1,3 +1,5 @@
+import 'song_metadata.dart';
+
 enum DownloadStatus { queued, downloading, paused, completed, failed, canceled }
 
 enum RepeatMode { none, one, all }
@@ -258,6 +260,17 @@ class DownloadedTrack {
     this.coverUrl,
     this.coverFilePath,
     this.durationMs,
+    this.syncId = '',
+    this.metadataLyrics,
+    this.syncedMetadata,
+    this.syncedMetadataRev = '',
+    this.metadataEditId = '',
+    this.metadataFieldEditIds = const {},
+    this.metadataDeviceId = '',
+    this.metadataEditSequence = 0,
+    this.metadataDirtyFields = const {},
+    this.metadataFillOnlyFields = const {},
+    this.metadataPendingFileWrite = false,
   });
 
   final String id;
@@ -271,6 +284,14 @@ class DownloadedTrack {
   final String? coverUrl;
   final String? coverFilePath;
   final int? durationMs;
+  final String syncId, syncedMetadataRev, metadataEditId;
+  final Map<String, String> metadataFieldEditIds;
+  final String metadataDeviceId;
+  final int metadataEditSequence;
+  final String? metadataLyrics;
+  final SongMetadataDocument? syncedMetadata;
+  final Set<String> metadataDirtyFields, metadataFillOnlyFields;
+  final bool metadataPendingFileWrite;
 
   DownloadedTrack copyWith({
     String? id,
@@ -284,6 +305,19 @@ class DownloadedTrack {
     String? coverUrl,
     String? coverFilePath,
     int? durationMs,
+    String? syncId,
+    String? metadataLyrics,
+    SongMetadataDocument? syncedMetadata,
+    String? syncedMetadataRev,
+    String? metadataEditId,
+    Map<String, String>? metadataFieldEditIds,
+    String? metadataDeviceId,
+    int? metadataEditSequence,
+    Set<String>? metadataDirtyFields,
+    Set<String>? metadataFillOnlyFields,
+    bool? metadataPendingFileWrite,
+    bool clearCoverFilePath = false,
+    bool clearCoverUrl = false,
   }) {
     return DownloadedTrack(
       id: id ?? this.id,
@@ -294,9 +328,24 @@ class DownloadedTrack {
       downloadedAt: downloadedAt ?? this.downloadedAt,
       sourceUrl: sourceUrl ?? this.sourceUrl,
       album: album ?? this.album,
-      coverUrl: coverUrl ?? this.coverUrl,
-      coverFilePath: coverFilePath ?? this.coverFilePath,
+      coverUrl: clearCoverUrl ? null : coverUrl ?? this.coverUrl,
+      coverFilePath: clearCoverFilePath
+          ? null
+          : coverFilePath ?? this.coverFilePath,
       durationMs: durationMs ?? this.durationMs,
+      syncId: syncId ?? this.syncId,
+      metadataLyrics: metadataLyrics ?? this.metadataLyrics,
+      syncedMetadata: syncedMetadata ?? this.syncedMetadata,
+      syncedMetadataRev: syncedMetadataRev ?? this.syncedMetadataRev,
+      metadataEditId: metadataEditId ?? this.metadataEditId,
+      metadataFieldEditIds: metadataFieldEditIds ?? this.metadataFieldEditIds,
+      metadataDeviceId: metadataDeviceId ?? this.metadataDeviceId,
+      metadataEditSequence: metadataEditSequence ?? this.metadataEditSequence,
+      metadataDirtyFields: metadataDirtyFields ?? this.metadataDirtyFields,
+      metadataFillOnlyFields:
+          metadataFillOnlyFields ?? this.metadataFillOnlyFields,
+      metadataPendingFileWrite:
+          metadataPendingFileWrite ?? this.metadataPendingFileWrite,
     );
   }
 
@@ -324,6 +373,17 @@ class DownloadedTrack {
     'coverUrl': coverUrl,
     'coverFilePath': coverFilePath,
     'durationMs': durationMs,
+    'syncId': syncId,
+    'metadataLyrics': metadataLyrics,
+    'syncedMetadata': syncedMetadata?.toJson(),
+    'syncedMetadataRev': syncedMetadataRev,
+    'metadataEditId': metadataEditId,
+    'metadataFieldEditIds': metadataFieldEditIds,
+    'metadataDeviceId': metadataDeviceId,
+    'metadataEditSequence': metadataEditSequence,
+    'metadataDirtyFields': metadataDirtyFields.toList(),
+    'metadataFillOnlyFields': metadataFillOnlyFields.toList(),
+    'metadataPendingFileWrite': metadataPendingFileWrite,
   };
 
   factory DownloadedTrack.fromJson(Map<String, dynamic> json) {
@@ -341,6 +401,26 @@ class DownloadedTrack {
       coverUrl: json['coverUrl'] as String?,
       coverFilePath: json['coverFilePath'] as String?,
       durationMs: (json['durationMs'] as num?)?.toInt(),
+      syncId: json['syncId'] as String? ?? '',
+      metadataLyrics: json['metadataLyrics'] as String?,
+      syncedMetadata: json['syncedMetadata'] is Map
+          ? SongMetadataDocument.fromJson(json['syncedMetadata'] as Map)
+          : null,
+      syncedMetadataRev: json['syncedMetadataRev'] as String? ?? '',
+      metadataEditId: json['metadataEditId'] as String? ?? '',
+      metadataDeviceId: json['metadataDeviceId'] as String? ?? '',
+      metadataEditSequence: json['metadataEditSequence'] as int? ?? 0,
+      metadataFieldEditIds: Map<String, String>.from(
+        json['metadataFieldEditIds'] as Map? ?? const {},
+      ),
+      metadataDirtyFields: Set<String>.from(
+        json['metadataDirtyFields'] as List? ?? const [],
+      ),
+      metadataFillOnlyFields: Set<String>.from(
+        json['metadataFillOnlyFields'] as List? ?? const [],
+      ),
+      metadataPendingFileWrite:
+          json['metadataPendingFileWrite'] as bool? ?? false,
     );
   }
 }
@@ -487,6 +567,9 @@ class AppSettings {
     this.desktopLyrics = defaultDesktopLyricsSettings,
     this.sourceSearchHistory = const [],
     this.librarySearchHistory = const [],
+    this.cloudFolderId = '',
+    this.cloudFolderName = '',
+    this.cloudSyncEnabled = false,
   });
 
   final String downloadDirectory;
@@ -499,6 +582,9 @@ class AppSettings {
   final DesktopLyricsSettings desktopLyrics;
   final List<String> sourceSearchHistory;
   final List<String> librarySearchHistory;
+  final String cloudFolderId;
+  final String cloudFolderName;
+  final bool cloudSyncEnabled;
 
   AppSettings copyWith({
     String? downloadDirectory,
@@ -511,6 +597,9 @@ class AppSettings {
     DesktopLyricsSettings? desktopLyrics,
     List<String>? sourceSearchHistory,
     List<String>? librarySearchHistory,
+    String? cloudFolderId,
+    String? cloudFolderName,
+    bool? cloudSyncEnabled,
   }) {
     return AppSettings(
       downloadDirectory: downloadDirectory ?? this.downloadDirectory,
@@ -528,6 +617,9 @@ class AppSettings {
       librarySearchHistory: normalizeSearchHistory(
         librarySearchHistory ?? this.librarySearchHistory,
       ),
+      cloudFolderId: cloudFolderId ?? this.cloudFolderId,
+      cloudFolderName: cloudFolderName ?? this.cloudFolderName,
+      cloudSyncEnabled: cloudSyncEnabled ?? this.cloudSyncEnabled,
     );
   }
 
@@ -542,6 +634,9 @@ class AppSettings {
     'desktopLyrics': desktopLyrics.toJson(),
     'sourceSearchHistory': sourceSearchHistory,
     'librarySearchHistory': librarySearchHistory,
+    'cloudFolderId': cloudFolderId,
+    'cloudFolderName': cloudFolderName,
+    'cloudSyncEnabled': cloudSyncEnabled,
   };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
@@ -566,6 +661,9 @@ class AppSettings {
       librarySearchHistory: normalizeSearchHistory(
         (json['librarySearchHistory'] as List?)?.cast<Object?>(),
       ),
+      cloudFolderId: json['cloudFolderId'] as String? ?? '',
+      cloudFolderName: json['cloudFolderName'] as String? ?? '',
+      cloudSyncEnabled: json['cloudSyncEnabled'] as bool? ?? false,
     );
   }
 }
@@ -767,6 +865,8 @@ class PlayerItem {
     String? coverFilePath,
     String? lyrics,
     String? album,
+    bool clearCoverFilePath = false,
+    bool clearCoverUrl = false,
   }) {
     return PlayerItem(
       id: id ?? this.id,
@@ -775,8 +875,10 @@ class PlayerItem {
       uri: uri ?? this.uri,
       headers: headers ?? this.headers,
       localPath: localPath ?? this.localPath,
-      coverUrl: coverUrl ?? this.coverUrl,
-      coverFilePath: coverFilePath ?? this.coverFilePath,
+      coverUrl: clearCoverUrl ? null : coverUrl ?? this.coverUrl,
+      coverFilePath: clearCoverFilePath
+          ? null
+          : coverFilePath ?? this.coverFilePath,
       lyrics: lyrics ?? this.lyrics,
       album: album ?? this.album,
     );

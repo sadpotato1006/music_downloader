@@ -80,6 +80,9 @@ extension AppControllerDownloadActions on AppController {
         _reservedDownloadSavePaths.remove(savePath);
         rethrow;
       }
+      // The task itself now reserves this path. Keep the temporary
+      // reservation only while the task is being created and persisted.
+      _reservedDownloadSavePaths.remove(savePath);
       _scheduleDownloads();
       return const DownloadStartResult.started();
     } on MusicSourceException catch (error) {
@@ -392,7 +395,7 @@ extension AppControllerDownloadActions on AppController {
   }
 
   void _scheduleDownloads() {
-    if (_isDisposed) {
+    if (_isDisposed || _preparingToExit) {
       return;
     }
     final limit = settings?.concurrentDownloads ?? 1;
@@ -587,8 +590,11 @@ extension AppControllerDownloadActions on AppController {
   Future<void> _runDownloadImport(DownloadTask task) async {
     _replaceTask(task.id, (current) => current.copyWith(error: null));
     var readHeld = false;
+    var needsAlbumMatch = false;
     try {
-      readHeld = _tryBeginMetadataRead(task.savePath);
+      // Import only reads the finished download. Its album writer waits for
+      // the running sync, so importing a new song does not require its lock.
+      readHeld = _tryBeginMetadataRead(task.savePath, completedDownload: true);
       if (!readHeld) {
         throw const FileSystemException('歌曲正在编辑或删除，请稍后重试保存。');
       }
@@ -605,6 +611,8 @@ extension AppControllerDownloadActions on AppController {
         return;
       }
       await _addDownloadedTrack(task);
+      needsAlbumMatch =
+          _downloadedTrackByPath(task.savePath)?.album.trim().isEmpty == true;
       _replaceTask(
         task.id,
         (current) => current.copyWith(libraryPending: false),
@@ -624,6 +632,53 @@ extension AppControllerDownloadActions on AppController {
       if (readHeld) _endMetadataRead(task.savePath);
     }
     await _persistDownloadTasksBestEffort();
+    if (needsAlbumMatch) _queueAutomaticAlbumMatch(task.savePath);
+  }
+
+  void _queueAutomaticAlbumMatch(String path) {
+    final key = _trackPathKey(path);
+    if (!_queuedAutomaticAlbumPaths.add(key)) return;
+    _automaticAlbumMatchQueue = _automaticAlbumMatchQueue
+        .then((_) async {
+          await _runAutomaticAlbumWork(() async {
+            await matchMissingDownloadedAlbums(onlyPaths: {path});
+          });
+        })
+        .catchError((Object error, StackTrace stackTrace) {
+          AppLog.instance.error(
+            'album',
+            '下载后自动匹配专辑失败',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        })
+        .whenComplete(() => _queuedAutomaticAlbumPaths.remove(key));
+  }
+
+  Future<void> _runAutomaticAlbumWork(Future<void> Function() action) async {
+    // Queued work waits for sync; sync waits only for work already active.
+    while (!_isDisposed && !_preparingToExit) {
+      final runningSync = _cloudSyncOperation;
+      if (runningSync != null) {
+        await runningSync;
+        continue;
+      }
+      final active = _albumMatchCompletion;
+      if (active != null) {
+        await active;
+        continue;
+      }
+      break;
+    }
+    if (_isDisposed || _preparingToExit) return;
+    final completion = Completer<void>();
+    _activeAutomaticAlbumMatch = completion.future;
+    try {
+      await action();
+    } finally {
+      _activeAutomaticAlbumMatch = null;
+      completion.complete();
+    }
   }
 
   Future<void> _downloadTaskFile(

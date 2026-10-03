@@ -10,11 +10,14 @@ import 'package:path/path.dart' as p;
 import 'android_storage_access.dart';
 import 'android_media_controls_service.dart';
 import 'album_metadata_service.dart';
+import 'anyshare_auth.dart';
+import 'anyshare_client.dart';
 import 'app_info.dart';
 import 'app_log.dart';
 import 'async_utils.dart';
 import 'audio_route_service.dart';
 import 'coalescing_write_queue.dart';
+import 'cloud_sync_service.dart';
 import 'file_deletion_service.dart';
 import 'id3_lyrics_embedder.dart';
 import 'library_search.dart';
@@ -25,13 +28,17 @@ import 'models.dart';
 import 'music_source.dart';
 import 'player_service.dart';
 import 'pending_album_match.dart';
+import 'song_metadata.dart';
 import 'storage_service.dart';
 
 part 'controller/search_controller.dart';
 part 'controller/library_controller.dart';
+part 'controller/library_batch_controller.dart';
 part 'controller/playback_controller.dart';
 part 'controller/download_controller.dart';
 part 'controller/settings_controller.dart';
+part 'controller/cloud_sync_controller.dart';
+part 'controller/song_metadata_controller.dart';
 
 enum AppBootstrapStatus { loading, ready, error }
 
@@ -45,6 +52,7 @@ class AppController extends ChangeNotifier {
     AlbumMetadataService? albumMetadata,
     LyricsService? lyricsService,
     FileDeletionService? fileDeletionService,
+    CloudSyncService? cloudSyncService,
   }) : sources = List<MusicSource>.unmodifiable(sources ?? [source]),
        storage = storage ?? StorageService(),
        player = player ?? PlayerService(),
@@ -52,6 +60,7 @@ class AppController extends ChangeNotifier {
        lyricsService = lyricsService ?? LyricsService(),
        fileDeletionService =
            fileDeletionService ?? PlatformFileDeletionService(),
+       _cloudSyncServiceOverride = cloudSyncService,
        _ownsDownloadDio = downloadDio == null,
        _downloadDio =
            downloadDio ??
@@ -66,6 +75,7 @@ class AppController extends ChangeNotifier {
     this.player.positionListenable.addListener(_handlePlayerPositionChanged);
     this.player.onCompleted = _handlePlaybackCompleted;
     AndroidMediaControlsService.setHandler(_handleAndroidMediaControl);
+    AndroidMediaControlsService.setPropertyHandler(_handleMediaProperty);
     AudioRouteService.setBluetoothRouteChangedHandler(
       handleBluetoothAudioRouteChanged,
     );
@@ -78,6 +88,7 @@ class AppController extends ChangeNotifier {
   final AlbumMetadataService albumMetadata;
   final LyricsService lyricsService;
   final FileDeletionService fileDeletionService;
+  final CloudSyncService? _cloudSyncServiceOverride;
   final bool _ownsDownloadDio;
   final Dio _downloadDio;
   final Random _shuffleRandom = Random();
@@ -85,6 +96,9 @@ class AppController extends ChangeNotifier {
   final Set<String> _runningDownloadIds = {};
   final Set<String> _pendingDownloadCleanupIds = {};
   final Set<String> _preparingDownloadKeys = {};
+  bool _preparingToExit = false;
+  bool _cloudSyncOwnsFiles = false;
+  Future<void>? _metadataTagWriteOperation;
   final Set<String> _deletingTrackKeys = {};
   final Set<String> _metadataWriteKeys = {};
   final Map<String, int> _metadataReadCounts = {};
@@ -109,6 +123,20 @@ class AppController extends ChangeNotifier {
   Future<void> _downloadPathReservationQueue = Future<void>.value();
   final Set<String> _reservedDownloadSavePaths = {};
   final _pendingAlbumMatchesSaveQueue = CoalescingWriteQueue();
+  late final AnyShareAuth cloudAuth = AnyShareAuth();
+  late final AnyShareClient cloudClient = AnyShareClient(auth: cloudAuth);
+  late final CloudSyncService cloudSyncService =
+      _cloudSyncServiceOverride ?? CloudSyncService(client: cloudClient);
+  bool cloudConnected = false;
+  bool isCloudSyncing = false;
+  CloudSyncProgress? cloudSyncProgress;
+  String? cloudSyncError;
+  String? cloudSyncNotice;
+  List<CloudSyncFailure> cloudSyncFailures = const [];
+  bool? cloudDeletionPolicyEnabled;
+  bool isCloudPolicyLoading = false;
+  DateTime? lastCloudSyncAt;
+  Future<CloudSyncResult?>? _cloudSyncOperation;
   Future<void>? _playNextOperation;
   int _playbackRequestGeneration = 0;
   int _queueNextRequestGeneration = 0;
@@ -117,6 +145,10 @@ class AppController extends ChangeNotifier {
   Future<void>? _durationCaptureOperation;
   bool _durationCaptureRetryRequested = false;
   Future<void>? _albumMatchCompletion;
+  Future<void> _automaticAlbumMatchQueue = Future<void>.value();
+  Future<void>? _activeAutomaticAlbumMatch;
+  final Set<String> _queuedAutomaticAlbumPaths = {};
+  bool _deferredAlbumWritesScheduled = false;
   final Map<String, Future<void>> _downloadImportOperations = {};
 
   String searchQuery = '';
@@ -146,6 +178,10 @@ class AppController extends ChangeNotifier {
 
   bool lastDirectoryNeedsAllFilesAccess = false;
   bool isScanningDownloadDirectory = false;
+  bool isLibraryBatchRunning = false;
+  int libraryBatchCompleted = 0;
+  int libraryBatchTotal = 0;
+  Future<LibraryBatchResult>? _libraryBatchOperation;
   bool isMatchingLocalAlbums = false;
   String? matchingAlbumTrackPath;
   String? matchingAlbumTrackTitle;
@@ -385,8 +421,12 @@ class AppController extends ChangeNotifier {
         unawaited(_savePendingAlbumMatchesBestEffort());
       }
       unawaited(_syncAndroidMediaControls(force: true));
+      if (_preparingToExit) return;
       unawaited(_hydrateDownloadedTracksInBackground());
       _scheduleDownloads();
+      _scheduleDeferredAlbumWrites();
+      _scheduleMetadataTagWrites();
+      unawaited(_restoreCloudAndSync());
       for (final task in downloadTasks) {
         if (task.status == DownloadStatus.completed && task.libraryPending) {
           unawaited(_importCompletedDownload(task.id));
@@ -411,7 +451,24 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<void> prepareForExit() async {
+    _preparingToExit = true;
+    _albumMatchCancelRequested = true;
+    await player.pause();
+    await _bootstrapOperation;
+    for (final task in downloadTasks.toList()) {
+      if (task.status == DownloadStatus.downloading ||
+          task.status == DownloadStatus.queued) {
+        pauseDownload(task.id);
+      }
+    }
+    await _cloudSyncOperation;
+    await flushPendingWrites();
+  }
+
   Future<void> flushPendingWrites() async {
+    final batch = _libraryBatchOperation;
+    if (batch != null) await batch;
     await Future.wait(_downloadImportOperations.values.toList());
     final albumMatchCompletion = _albumMatchCompletion;
     if (albumMatchCompletion != null) {
@@ -427,6 +484,11 @@ class AppController extends ChangeNotifier {
         );
       }
     }
+    if (_isDisposed) {
+      await _automaticAlbumMatchQueue;
+    }
+    final automaticAlbumWork = _activeAutomaticAlbumMatch;
+    if (automaticAlbumWork != null) await automaticAlbumWork;
     try {
       await _flushPendingSettings();
     } catch (error, stackTrace) {
@@ -439,6 +501,7 @@ class AppController extends ChangeNotifier {
     }
 
     final pendingWrites = <Future<void>>[
+      ?_metadataTagWriteOperation,
       _downloadedTracksSaveQueue.flush(),
       _myMusicSaveQueue.flush(),
       _downloadTasksSaveQueue.flush(),
@@ -477,6 +540,8 @@ class AppController extends ChangeNotifier {
     unawaited(_captureCurrentTrackDuration());
     unawaited(_syncAndroidMediaControls());
     _notify();
+    _scheduleDeferredAlbumWrites();
+    _scheduleMetadataTagWrites();
   }
 
   void _handlePlayerPositionChanged() {
@@ -487,12 +552,18 @@ class AppController extends ChangeNotifier {
     String action,
     Duration? position,
   ) async {
+    if (_isDisposed || _preparingToExit) return;
+    await bootstrap();
+    if (_isDisposed || _preparingToExit || !isReady) return;
     switch (action) {
       case 'play':
         await _playCurrentItem();
         break;
       case 'pause':
         await player.pause();
+        break;
+      case 'stop':
+        await _stopPlayback();
         break;
       case 'toggle':
         await togglePlayPause();
@@ -522,6 +593,29 @@ class AppController extends ChangeNotifier {
     await player.pause();
   }
 
+  Future<void> _handleMediaProperty(String property, Object value) async {
+    if (_isDisposed || _preparingToExit) return;
+    await bootstrap();
+    if (_isDisposed || _preparingToExit || !isReady) return;
+    switch (property) {
+      case 'Volume':
+        await setVolume((value as num).toDouble() * 100);
+        break;
+      case 'Shuffle':
+        if (shuffleEnabled != value) toggleShuffleMode();
+        break;
+      case 'LoopStatus':
+        repeatMode = switch (value) {
+          'Track' => RepeatMode.one,
+          'Playlist' => RepeatMode.all,
+          _ => RepeatMode.none,
+        };
+        _notify();
+        break;
+    }
+    await _syncAndroidMediaControls(force: true);
+  }
+
   Future<void> _syncAndroidMediaControls({bool force = false}) async {
     if (_isDisposed || !AndroidMediaControlsService.isSupported) {
       return;
@@ -532,6 +626,15 @@ class AppController extends ChangeNotifier {
         _lastMediaControlsSignature = 'hidden';
         await AndroidMediaControlsService.hide();
       }
+      await AndroidMediaControlsService.updateState(
+        volume: settings?.volume ?? 100,
+        shuffle: shuffleEnabled,
+        loopStatus: switch (repeatMode) {
+          RepeatMode.one => 'Track',
+          RepeatMode.all => 'Playlist',
+          RepeatMode.none => 'None',
+        },
+      );
       return;
     }
 
@@ -553,6 +656,10 @@ class AppController extends ChangeNotifier {
       positionBucket,
       canPlayPrevious,
       canPlayNext,
+      settings?.volume ?? 100,
+      shuffleEnabled,
+      repeatMode,
+      player.isOpened(item),
     ].join('|');
     if (!force && signature == _lastMediaControlsSignature) {
       return;
@@ -565,6 +672,14 @@ class AppController extends ChangeNotifier {
       duration: player.duration,
       canPlayPrevious: canPlayPrevious,
       canPlayNext: canPlayNext,
+      volume: settings?.volume ?? 100,
+      shuffle: shuffleEnabled,
+      loopStatus: switch (repeatMode) {
+        RepeatMode.one => 'Track',
+        RepeatMode.all => 'Playlist',
+        RepeatMode.none => 'None',
+      },
+      isOpened: player.isOpened(item),
     );
   }
 
@@ -579,6 +694,7 @@ class AppController extends ChangeNotifier {
       token.cancel('disposed');
     }
     AndroidMediaControlsService.setHandler(null);
+    AndroidMediaControlsService.setPropertyHandler(null);
     AudioRouteService.setBluetoothRouteChangedHandler(null);
     unawaited(AndroidMediaControlsService.hide());
     _settingsSaveDebounce?.cancel();
