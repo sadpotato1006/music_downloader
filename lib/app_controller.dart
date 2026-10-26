@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:open_filex/open_filex.dart';
@@ -12,13 +11,18 @@ import 'android_media_controls_service.dart';
 import 'album_metadata_service.dart';
 import 'anyshare_auth.dart';
 import 'anyshare_client.dart';
-import 'app_info.dart';
+import 'artwork_service.dart';
 import 'app_log.dart';
 import 'async_utils.dart';
 import 'audio_route_service.dart';
 import 'coalescing_write_queue.dart';
 import 'cloud_sync_service.dart';
 import 'file_deletion_service.dart';
+import 'download_controller.dart';
+import 'download_transfer_service.dart';
+import 'music_search_controller.dart';
+import 'settings_persistence.dart';
+import 'source_request_queue.dart';
 import 'id3_lyrics_embedder.dart';
 import 'library_search.dart';
 import 'library_lyrics_search.dart';
@@ -28,12 +32,15 @@ import 'models.dart';
 import 'music_source.dart';
 import 'player_service.dart';
 import 'pending_album_match.dart';
+import 'playlist_transfer_service.dart';
 import 'song_metadata.dart';
 import 'storage_service.dart';
+import 'windows_update_controller.dart';
 
 part 'controller/search_controller.dart';
 part 'controller/library_controller.dart';
 part 'controller/library_batch_controller.dart';
+part 'controller/playlist_transfer_controller.dart';
 part 'controller/playback_controller.dart';
 part 'controller/download_controller.dart';
 part 'controller/settings_controller.dart';
@@ -53,6 +60,7 @@ class AppController extends ChangeNotifier {
     LyricsService? lyricsService,
     FileDeletionService? fileDeletionService,
     CloudSyncService? cloudSyncService,
+    this.updates,
   }) : sources = List<MusicSource>.unmodifiable(sources ?? [source]),
        storage = storage ?? StorageService(),
        player = player ?? PlayerService(),
@@ -71,6 +79,8 @@ class AppController extends ChangeNotifier {
                receiveTimeout: const Duration(seconds: 30),
              ),
            ) {
+    downloads.addListener(_notify);
+    onlineSearch.addListener(_notify);
     this.player.onChanged = _handlePlayerChanged;
     this.player.positionListenable.addListener(_handlePlayerPositionChanged);
     this.player.onCompleted = _handlePlaybackCompleted;
@@ -84,6 +94,7 @@ class AppController extends ChangeNotifier {
   final List<MusicSource> sources;
   MusicSource source;
   final StorageService storage;
+  final WindowsUpdateController? updates;
   final PlaybackService player;
   final AlbumMetadataService albumMetadata;
   final LyricsService lyricsService;
@@ -92,9 +103,6 @@ class AppController extends ChangeNotifier {
   final bool _ownsDownloadDio;
   final Dio _downloadDio;
   final Random _shuffleRandom = Random();
-  final Map<String, CancelToken> _cancelTokens = {};
-  final Set<String> _runningDownloadIds = {};
-  final Set<String> _pendingDownloadCleanupIds = {};
   final Set<String> _preparingDownloadKeys = {};
   bool _preparingToExit = false;
   bool _cloudSyncOwnsFiles = false;
@@ -102,26 +110,17 @@ class AppController extends ChangeNotifier {
   final Set<String> _deletingTrackKeys = {};
   final Set<String> _metadataWriteKeys = {};
   final Map<String, int> _metadataReadCounts = {};
-  static const _sourceRequestGap = Duration(seconds: 2);
 
   AppSettings? settings = const AppSettings(downloadDirectory: '');
   AppBootstrapStatus bootstrapStatus = AppBootstrapStatus.loading;
   String? bootstrapError;
   int selectedIndex = 0;
-  Future<void> _sourceRequestQueue = Future<void>.value();
-  DateTime? _lastSourceRequestAt;
-  Timer? _settingsSaveDebounce;
-  bool _settingsSavePending = false;
   Future<void>? _bootstrapOperation;
   String? _lastMediaControlsSignature;
   bool _isDisposed = false;
-  int _sourceSearchGeneration = 0;
   final _downloadedTracksSaveQueue = CoalescingWriteQueue();
   final _myMusicSaveQueue = CoalescingWriteQueue();
-  final _downloadTasksSaveQueue = CoalescingWriteQueue();
   final _playerQueueSaveQueue = CoalescingWriteQueue();
-  Future<void> _downloadPathReservationQueue = Future<void>.value();
-  final Set<String> _reservedDownloadSavePaths = {};
   final _pendingAlbumMatchesSaveQueue = CoalescingWriteQueue();
   late final AnyShareAuth cloudAuth = AnyShareAuth();
   late final AnyShareClient cloudClient = AnyShareClient(auth: cloudAuth);
@@ -129,7 +128,8 @@ class AppController extends ChangeNotifier {
       _cloudSyncServiceOverride ?? CloudSyncService(client: cloudClient);
   bool cloudConnected = false;
   bool isCloudSyncing = false;
-  CloudSyncProgress? cloudSyncProgress;
+  final ValueNotifier<CloudSyncProgress?> _cloudSyncProgressListenable =
+      ValueNotifier(null);
   String? cloudSyncError;
   String? cloudSyncNotice;
   List<CloudSyncFailure> cloudSyncFailures = const [];
@@ -151,22 +151,44 @@ class AppController extends ChangeNotifier {
   bool _deferredAlbumWritesScheduled = false;
   final Map<String, Future<void>> _downloadImportOperations = {};
 
-  String searchQuery = '';
-  bool isSearching = false;
-  String? searchError;
-  List<TrackSearchResult> searchResults = [];
+  final _sourceRequests = SourceRequestQueue();
+  late final onlineSearch = MusicSearchController(
+    request: (source, keyword, current) => _runSourceRequest(
+      '搜索',
+      () => source.search(keyword),
+      shouldRun: current,
+    ),
+    describeError: _friendlyUnexpectedError,
+  );
+  late final _settingsPersistence = SettingsPersistence(
+    current: () => settings,
+    save: storage.saveSettings,
+  );
+  String get searchQuery => onlineSearch.query;
+  set searchQuery(String value) => onlineSearch.query = value;
+  bool get isSearching => onlineSearch.isSearching;
+  set isSearching(bool value) => onlineSearch.isSearching = value;
+  String? get searchError => onlineSearch.error;
+  set searchError(String? value) => onlineSearch.error = value;
+  List<TrackSearchResult> get searchResults => onlineSearch.results;
+  set searchResults(List<TrackSearchResult> value) =>
+      onlineSearch.results = List.unmodifiable(value);
 
   String? resolvingPlayId;
   String? preparingDownloadId;
   String? preparingQueueNextId;
   String? globalMessage;
 
-  List<DownloadTask> downloadTasks = [];
-  int _activeDownloads = 0;
-  final ValueNotifier<int> _downloadProgressListenable = ValueNotifier(0);
-  final Map<String, int> _lastDownloadProgressUpdateMillis = {};
-  static const _downloadProgressUpdateInterval = Duration(milliseconds: 100);
-  static const _maxEmbeddedCoverBytes = 5 * 1024 * 1024;
+  late final DownloadController downloads = DownloadController(
+    storage: storage,
+    transferService: DownloadTransferService(_downloadDio),
+    runTask: _runDownload,
+    concurrency: () => settings?.concurrentDownloads ?? 1,
+    canStart: () => !_isDisposed && !_preparingToExit,
+  );
+  List<DownloadTask> get downloadTasks => downloads.tasks;
+  set downloadTasks(List<DownloadTask> value) => downloads.tasks = value;
+  late final _artwork = ArtworkService(_downloadDio);
 
   List<DownloadedTrack> downloadedTracks = [];
   MyMusicData myMusic = const MyMusicData();
@@ -178,6 +200,7 @@ class AppController extends ChangeNotifier {
 
   bool lastDirectoryNeedsAllFilesAccess = false;
   bool isScanningDownloadDirectory = false;
+  Future<int>? _libraryScanOperation;
   bool isLibraryBatchRunning = false;
   int libraryBatchCompleted = 0;
   int libraryBatchTotal = 0;
@@ -215,6 +238,9 @@ class AppController extends ChangeNotifier {
   String _visibleDownloadedTracksQuery = '';
   LibrarySortMode? _visibleDownloadedTracksSortMode;
   List<DownloadedTrack> _visibleDownloadedTracksCache = const [];
+  List<DownloadedTrack>? _sortedDownloadedTracksSource;
+  LibrarySortMode? _sortedDownloadedTracksSortMode;
+  List<DownloadedTrack> _sortedDownloadedTracksCache = const [];
 
   List<PlayerItem> queue = [];
   int currentQueueIndex = -1;
@@ -222,7 +248,17 @@ class AppController extends ChangeNotifier {
   bool shuffleEnabled = true;
 
   ValueListenable<int> get downloadProgressListenable =>
-      _downloadProgressListenable;
+      downloads.progressListenable;
+
+  ValueListenable<CloudSyncProgress?> get cloudSyncProgressListenable =>
+      _cloudSyncProgressListenable;
+
+  CloudSyncProgress? get cloudSyncProgress =>
+      _cloudSyncProgressListenable.value;
+
+  set cloudSyncProgress(CloudSyncProgress? value) {
+    if (!_isDisposed) _cloudSyncProgressListenable.value = value;
+  }
 
   bool get isReady => bootstrapStatus == AppBootstrapStatus.ready;
 
@@ -249,16 +285,35 @@ class AppController extends ChangeNotifier {
       return _visibleDownloadedTracksCache;
     }
 
+    final sorted = _sortedDownloadedTracks;
     final filtered = normalizedQuery.isEmpty
-        ? List<DownloadedTrack>.from(downloadedTracks)
-        : downloadedTracks.where((track) {
-            return _librarySearchIndexFor(
-                  track,
-                ).matchesNormalizedQuery(normalizedQuery) ||
-                _libraryLyricsSearch.matches(track, normalizedQuery);
-          }).toList();
+        ? sorted
+        : List<DownloadedTrack>.unmodifiable(
+            sorted.where((track) {
+              return _librarySearchIndexFor(
+                    track,
+                  ).matchesNormalizedQuery(normalizedQuery) ||
+                  _libraryLyricsSearch.matches(track, normalizedQuery);
+            }),
+          );
 
-    filtered.sort((a, b) {
+    _visibleDownloadedTracksSource = downloadedTracks;
+    _visibleDownloadedTracksQuery = normalizedQuery;
+    _visibleDownloadedTracksSortMode = librarySortMode;
+    _visibleDownloadedTracksCache = filtered;
+    return filtered;
+  }
+
+  List<DownloadedTrack> get _sortedDownloadedTracks {
+    // Query changes and incremental lyric matches do not change ordering.
+    // Library edits replace the source list and invalidate both caches.
+    if (identical(_sortedDownloadedTracksSource, downloadedTracks) &&
+        _sortedDownloadedTracksSortMode == librarySortMode) {
+      return _sortedDownloadedTracksCache;
+    }
+
+    final sorted = List<DownloadedTrack>.of(downloadedTracks);
+    sorted.sort((a, b) {
       return switch (librarySortMode) {
         LibrarySortMode.downloadedAtDesc => b.downloadedAt.compareTo(
           a.downloadedAt,
@@ -271,13 +326,10 @@ class AppController extends ChangeNotifier {
       };
     });
 
-    _visibleDownloadedTracksSource = downloadedTracks;
-    _visibleDownloadedTracksQuery = normalizedQuery;
-    _visibleDownloadedTracksSortMode = librarySortMode;
-    _visibleDownloadedTracksCache = List<DownloadedTrack>.unmodifiable(
-      filtered,
-    );
-    return _visibleDownloadedTracksCache;
+    _sortedDownloadedTracksSource = downloadedTracks;
+    _sortedDownloadedTracksSortMode = librarySortMode;
+    _sortedDownloadedTracksCache = List<DownloadedTrack>.unmodifiable(sorted);
+    return _sortedDownloadedTracksCache;
   }
 
   List<DownloadedTrack> get favoriteTracks =>
@@ -390,6 +442,7 @@ class AppController extends ChangeNotifier {
       }
       myMusic = restoredData[0] as MyMusicData;
       downloadedTracks = restoredData[1] as List<DownloadedTrack>;
+      if (_resolvePendingPlaylistTracks()) await _saveMyMusic();
       downloadTasks = restoredData[2] as List<DownloadTask>;
       final savedQueue = restoredData[3] as SavedPlayerQueue;
       final restoredPendingMatches = restoredData[4] as List<PendingAlbumMatch>;
@@ -440,7 +493,9 @@ class AppController extends ChangeNotifier {
         return;
       }
       bootstrapStatus = AppBootstrapStatus.error;
-      bootstrapError = '应用数据加载失败，请检查存储权限后重试。';
+      bootstrapError = error is StorageRecoveryException
+          ? error.message
+          : '应用数据加载失败，请检查存储权限后重试。';
       AppLog.instance.error(
         'bootstrap',
         '应用初始化失败',
@@ -451,7 +506,7 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> prepareForExit() async {
+  Future<void> prepareForExit({bool strict = false}) async {
     _preparingToExit = true;
     _albumMatchCancelRequested = true;
     await player.pause();
@@ -462,11 +517,19 @@ class AppController extends ChangeNotifier {
         pauseDownload(task.id);
       }
     }
+    await downloads.waitForIdle();
     await _cloudSyncOperation;
-    await flushPendingWrites();
+    await flushPendingWrites(strict: strict);
   }
 
-  Future<void> flushPendingWrites() async {
+  void cancelUpdateExit() {
+    _preparingToExit = false;
+  }
+
+  Future<void> flushPendingWrites({bool strict = false}) async {
+    Object? firstError;
+    final scan = _libraryScanOperation;
+    if (scan != null) await scan;
     final batch = _libraryBatchOperation;
     if (batch != null) await batch;
     await Future.wait(_downloadImportOperations.values.toList());
@@ -492,6 +555,7 @@ class AppController extends ChangeNotifier {
     try {
       await _flushPendingSettings();
     } catch (error, stackTrace) {
+      firstError ??= error;
       AppLog.instance.error(
         'storage',
         '退出前保存设置失败',
@@ -504,7 +568,7 @@ class AppController extends ChangeNotifier {
       ?_metadataTagWriteOperation,
       _downloadedTracksSaveQueue.flush(),
       _myMusicSaveQueue.flush(),
-      _downloadTasksSaveQueue.flush(),
+      downloads.flush(),
       _pendingAlbumMatchesSaveQueue.flush(),
       _playerQueueSaveQueue.flush(),
     ];
@@ -513,6 +577,7 @@ class AppController extends ChangeNotifier {
         try {
           await write;
         } catch (error, stackTrace) {
+          firstError ??= error;
           AppLog.instance.error(
             'storage',
             '等待待处理数据写入失败',
@@ -525,7 +590,21 @@ class AppController extends ChangeNotifier {
     try {
       // Also wait for direct settings saves already running in StorageService.
       await storage.flushPendingWrites();
+      if (strict) {
+        // Retry complete snapshots: an earlier background save may already have
+        // failed and drained its queue before the user requested an upgrade.
+        await Future.wait([
+          if (settings != null) storage.saveSettings(settings!),
+          _saveDownloadedTracks(),
+          _saveMyMusic(),
+          _saveDownloadTasks(),
+          _savePendingAlbumMatches(),
+          _saveQueueState(),
+        ]);
+        await storage.flushPendingWrites();
+      }
     } catch (error, stackTrace) {
+      firstError ??= error;
       AppLog.instance.error(
         'storage',
         '等待存储写入失败',
@@ -534,6 +613,9 @@ class AppController extends ChangeNotifier {
       );
     }
     await AppLog.instance.flush();
+    if (strict && firstError != null) {
+      throw const FormatException('保存数据失败，已取消升级，请检查磁盘或存储权限后重试');
+    }
   }
 
   void _handlePlayerChanged() {
@@ -685,23 +767,29 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
-    unawaited(_persistDownloadTasksBestEffort());
+    updates?.dispose();
+    // A failed bootstrap never committed the restored tasks to memory.
+    if (_bootstrapOperation == null &&
+        bootstrapStatus != AppBootstrapStatus.error) {
+      unawaited(_persistDownloadTasksBestEffort());
+    }
     unawaited(flushPendingWrites());
     _isDisposed = true;
     _libraryLyricsSearch.dispose();
     _albumMatchCancelRequested = true;
-    for (final token in _cancelTokens.values) {
-      token.cancel('disposed');
-    }
+    downloads.removeListener(_notify);
+    downloads.dispose();
     AndroidMediaControlsService.setHandler(null);
     AndroidMediaControlsService.setPropertyHandler(null);
     AudioRouteService.setBluetoothRouteChangedHandler(null);
     unawaited(AndroidMediaControlsService.hide());
-    _settingsSaveDebounce?.cancel();
+    _settingsPersistence.cancelTimer();
+    onlineSearch.removeListener(_notify);
+    onlineSearch.dispose();
     player.onChanged = null;
     player.positionListenable.removeListener(_handlePlayerPositionChanged);
     player.onCompleted = null;
-    _downloadProgressListenable.dispose();
+    _cloudSyncProgressListenable.dispose();
     if (_ownsDownloadDio) {
       _downloadDio.close(force: true);
     }

@@ -13,6 +13,7 @@ import 'package:qingting/anyshare_client.dart';
 import 'package:qingting/app_controller.dart';
 import 'package:qingting/app_info.dart';
 import 'package:qingting/app_log.dart';
+import 'package:qingting/app_update_service.dart';
 import 'package:qingting/cloud_sync_service.dart';
 import 'package:qingting/file_deletion_service.dart';
 import 'package:qingting/id3_lyrics_embedder.dart';
@@ -24,9 +25,250 @@ import 'package:qingting/player_service.dart';
 import 'package:qingting/pending_album_match.dart';
 import 'package:qingting/storage_service.dart';
 import 'package:qingting/song_metadata.dart';
+import 'package:qingting/windows_update_controller.dart';
 
 void main() {
+  for (final persisted in [false, true]) {
+    test(
+      'expired download link is refreshed once (persisted=$persisted)',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'qingting-refresh-test-',
+        );
+        final path = '${root.path}/song.m4a';
+        final source = _RefreshableDownloadSource();
+        final adapter = _RefreshingDownloadAdapter();
+        final dio = Dio()..httpClientAdapter = adapter;
+        final controller = AppController(
+          source: source,
+          storage: _DownloadStorageService(path),
+          player: _FakePlaybackService(),
+          downloadDio: dio,
+          albumMetadata: _RecordingAlbumMetadataService(),
+          lyricsService: _FakeLyricsService(),
+        );
+        var task = DownloadTask(
+          id: 'refresh',
+          track: source.result,
+          candidate: const AudioCandidate(
+            url: 'https://example.test/expired.m4a',
+            format: 'm4a',
+          ),
+          status: DownloadStatus.paused,
+          progress: 0,
+          savePath: path,
+          lyrics: 'known',
+          album: 'Album',
+        );
+        if (persisted) {
+          task = DownloadTask.fromJson(
+            jsonDecode(jsonEncode(task.toJson())) as Map<String, dynamic>,
+          );
+        }
+        controller.downloadTasks = [task];
+        try {
+          controller.retryDownload('refresh');
+          await controller.downloads.waitForIdle();
+          expect(
+            controller.downloadTasks.single.status,
+            DownloadStatus.completed,
+            reason: controller.downloadTasks.single.error,
+          );
+          expect(source.refreshCalls, 1);
+          expect(adapter.paths, ['/expired.m4a', '/fresh.m4a']);
+          expect(controller.downloadedTracks, hasLength(1));
+          expect(
+            controller.downloadTasks.single.candidate.url,
+            endsWith('/fresh.m4a'),
+          );
+        } finally {
+          controller.dispose();
+          await controller.flushPendingWrites();
+          dio.close(force: true);
+          await root.delete(recursive: true);
+        }
+      },
+    );
+  }
+  test(
+    'a rejected refreshed URL does not create an infinite retry loop',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'qingting-refresh-reject-',
+      );
+      final path = '${root.path}/song.m4a';
+      final source = _RefreshableDownloadSource();
+      final adapter = _RefreshingDownloadAdapter(alwaysReject: true);
+      final dio = Dio()..httpClientAdapter = adapter;
+      final controller = AppController(
+        source: source,
+        storage: _DownloadStorageService(path),
+        player: _FakePlaybackService(),
+        downloadDio: dio,
+        albumMetadata: _RecordingAlbumMetadataService(),
+        lyricsService: _FakeLyricsService(),
+      );
+      controller.downloadTasks = [
+        DownloadTask(
+          id: 'refresh',
+          track: source.result,
+          candidate: const AudioCandidate(
+            url: 'https://example.test/expired.m4a',
+            format: 'm4a',
+          ),
+          status: DownloadStatus.paused,
+          progress: 0,
+          savePath: path,
+          lyrics: 'known',
+        ),
+      ];
+      try {
+        controller.retryDownload('refresh');
+        await controller.downloads.waitForIdle();
+        expect(controller.downloadTasks.single.status, DownloadStatus.failed);
+        expect(source.refreshCalls, 1);
+        expect(adapter.paths, hasLength(2));
+        expect(controller.downloadedTracks, isEmpty);
+      } finally {
+        controller.dispose();
+        await controller.flushPendingWrites();
+        dio.close(force: true);
+        await root.delete(recursive: true);
+      }
+    },
+  );
+  test('canceling during link refresh does not restart the transfer', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'qingting-refresh-cancel-',
+    );
+    final path = '${root.path}/song.m4a';
+    final source = _RefreshableDownloadSource(blockRefresh: true);
+    final adapter = _RefreshingDownloadAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final controller = AppController(
+      source: source,
+      storage: _DownloadStorageService(path),
+      player: _FakePlaybackService(),
+      downloadDio: dio,
+      albumMetadata: _RecordingAlbumMetadataService(),
+      lyricsService: _FakeLyricsService(),
+    );
+    controller.downloadTasks = [
+      DownloadTask(
+        id: 'refresh',
+        track: source.result,
+        candidate: const AudioCandidate(
+          url: 'https://example.test/expired.m4a',
+          format: 'm4a',
+        ),
+        status: DownloadStatus.paused,
+        progress: 0,
+        savePath: path,
+        lyrics: 'known',
+      ),
+    ];
+    try {
+      controller.retryDownload('refresh');
+      await source.started.future;
+      controller.cancelDownload('refresh');
+      source.release.complete();
+      await controller.downloads.waitForIdle();
+      expect(controller.downloadTasks.single.status, DownloadStatus.canceled);
+      expect(adapter.paths, ['/expired.m4a']);
+      expect(controller.downloadedTracks, isEmpty);
+    } finally {
+      controller.dispose();
+      await controller.flushPendingWrites();
+      dio.close(force: true);
+      await root.delete(recursive: true);
+    }
+  });
   TestWidgetsFlutterBinding.ensureInitialized();
+  testWidgets(
+    'Windows update panel lets users opt out, download, and defer restart',
+    (tester) async {
+      final updates = WindowsUpdateController(source: _UpdatePanelSource());
+      updates.error = '更新版本号无效';
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+        updates: updates,
+      );
+      controller.settings = AppSettings(downloadDirectory: 'music');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: app.SettingsPage(controller: controller)),
+        ),
+      );
+      expect(find.text('软件更新'), findsOneWidget);
+      expect(find.text('发现新版时提示'), findsOneWidget);
+      expect(find.textContaining('下载和重启由你决定'), findsNothing);
+      final versionBounds = tester.getRect(find.text('当前版本：$appVersion'));
+      final errorBounds = tester.getRect(find.text('更新版本号无效'));
+      expect(errorBounds.top, versionBounds.top);
+      expect(errorBounds.left, greaterThan(versionBounds.right));
+      expect(find.text('检查更新'), findsOneWidget);
+      final checkBounds = tester.getRect(
+        find.widgetWithText(OutlinedButton, '检查更新'),
+      );
+      expect(checkBounds.left, greaterThan(errorBounds.right));
+      expect(checkBounds.center.dy, closeTo(versionBounds.center.dy, 1));
+      await tester.tap(find.text('启动时检查更新'));
+      await tester.pumpAndSettle();
+      expect(controller.settings!.checkUpdatesOnStartup, isFalse);
+      expect(updates.automaticCheckEnabled, isFalse);
+      await tester.tap(find.text('检查更新'));
+      await tester.pumpAndSettle();
+      expect(find.text('测试更新说明'), findsOneWidget);
+      expect(find.text('下载更新'), findsOneWidget);
+      await tester.tap(find.text('下载更新'));
+      await tester.pumpAndSettle();
+      expect(updates.status, AppUpdateStatus.ready);
+      await tester.tap(find.text('重启并更新'));
+      await tester.pumpAndSettle();
+      expect(find.text('重启并更新青听？'), findsOneWidget);
+      await tester.tap(find.text('稍后'));
+      await tester.pumpAndSettle();
+      expect(updates.status, AppUpdateStatus.ready);
+      await tester.scrollUntilVisible(
+        find.text('联系作者'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      final releaseBounds = tester.getRect(find.text('打开发布页'));
+      expect(
+        releaseBounds.top,
+        greaterThan(tester.getRect(find.text('源代码')).bottom),
+      );
+      expect(
+        releaseBounds.bottom,
+        lessThan(tester.getRect(find.text('联系作者')).top),
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+  test(
+    'upgrade requires a fresh successful snapshot even after a save failure drained its queue',
+    () async {
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FailingQueueStorageService(),
+        player: _FakePlaybackService(),
+      );
+      controller.settings = AppSettings(downloadDirectory: 'music');
+      addTearDown(controller.dispose);
+      // Nothing remains in a queue, but the latest state still must be persisted.
+      await controller.flushPendingWrites();
+      await expectLater(
+        controller.prepareForExit(strict: true),
+        throwsFormatException,
+      );
+      controller.cancelUpdateExit();
+    },
+  );
   for (final format in ['mp3', 'flac']) {
     test(
       'cloud metadata refreshes existing library and queue without reordering ($format)',
@@ -1343,6 +1585,76 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'corrupt bootstrap shows recovery details and shutdown preserves restored files',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-bootstrap-corrupt-',
+      );
+      final storage = StorageService(supportDirectory: directory);
+      await storage.saveSettings(
+        AppSettings(downloadDirectory: directory.path),
+      );
+      await storage.saveDownloadTasks([]);
+      final taskFile = File('${directory.path}/download_tasks.json');
+      final taskModified = (await taskFile.stat()).modified;
+      final primary = File('${directory.path}/downloads.json');
+      final backup = File('${primary.path}.bak');
+      await primary.writeAsString('{broken-primary');
+      await backup.writeAsString('{broken-backup');
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: _FakePlaybackService(),
+      );
+      try {
+        await controller.bootstrap();
+        expect(controller.bootstrapStatus, AppBootstrapStatus.error);
+        expect(controller.bootstrapError, contains('已保留原文件并暂停保存'));
+        expect(controller.bootstrapError, contains(directory.path));
+        expect(controller.bootstrapError, contains('downloads.json'));
+        controller.dispose();
+        await controller.flushPendingWrites();
+        expect(await primary.readAsString(), '{broken-primary');
+        expect(await backup.readAsString(), '{broken-backup');
+        expect((await taskFile.stat()).modified, taskModified);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test('bootstrap can retry after repairing damaged library data', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-bootstrap-repair-',
+    );
+    final storage = StorageService(supportDirectory: directory);
+    await storage.saveSettings(AppSettings(downloadDirectory: directory.path));
+    final primary = File('${directory.path}/downloads.json');
+    await primary.writeAsString('{broken');
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: storage,
+      player: _FakePlaybackService(),
+    );
+    try {
+      await controller.bootstrap();
+      expect(controller.bootstrapStatus, AppBootstrapStatus.error);
+      await primary.writeAsString('[]');
+      await controller.bootstrap();
+      expect(controller.bootstrapStatus, AppBootstrapStatus.ready);
+      expect(controller.bootstrapError, isNull);
+      await storage.saveMyMusic(
+        const MyMusicData(favoriteTrackPaths: ['song.mp3']),
+      );
+      expect((await storage.loadMyMusic()).favoriteTrackPaths, ['song.mp3']);
+    } finally {
+      controller.dispose();
+      await controller.flushPendingWrites();
+      await directory.delete(recursive: true);
+    }
+  });
+
   test('flushPendingWrites saves the latest debounced settings once', () async {
     final storage = _RecordingSettingsStorageService();
     final controller = AppController(
@@ -1416,7 +1728,7 @@ void main() {
       'qingting-range-download-',
     );
     final savePath = '${directory.path}${Platform.pathSeparator}resume.m4a';
-    await File(savePath).writeAsBytes(const [1, 2, 3]);
+    await File(savePath).writeAsBytes(const [255, 251, 3]);
     final source = _AlbumDownloadMusicSource();
     final adapter = _RangeAudioDownloadAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
@@ -1457,7 +1769,7 @@ void main() {
       final task = controller.downloadTasks.single;
       expect(task.status, DownloadStatus.completed, reason: task.error);
       expect(adapter.rangeHeader, 'bytes=3-');
-      expect(await File(savePath).readAsBytes(), const [1, 2, 3, 4, 5, 6]);
+      expect(await File(savePath).readAsBytes(), const [255, 251, 3, 4, 5, 6]);
       expect(task.resumeValidator, '"range-etag"');
     } finally {
       controller.dispose();
@@ -1470,11 +1782,11 @@ void main() {
       'qingting-range-fallback-',
     );
     final savePath = '${directory.path}${Platform.pathSeparator}fallback.m4a';
-    await File(savePath).writeAsBytes(const [1, 2, 3]);
+    await File(savePath).writeAsBytes(const [255, 251, 3]);
     final source = _AlbumDownloadMusicSource();
     final adapter = _RangeAudioDownloadAdapter(
       statusCode: 200,
-      payload: const [7, 8],
+      payload: const [255, 251, 7, 8],
       contentRange: null,
     );
     final controller = AppController(
@@ -1514,7 +1826,7 @@ void main() {
       final task = controller.downloadTasks.single;
       expect(task.status, DownloadStatus.completed, reason: task.error);
       expect(adapter.rangeHeader, 'bytes=3-');
-      expect(await File(savePath).readAsBytes(), const [7, 8]);
+      expect(await File(savePath).readAsBytes(), const [255, 251, 7, 8]);
     } finally {
       controller.dispose();
       await directory.delete(recursive: true);
@@ -1526,7 +1838,7 @@ void main() {
       'qingting-range-validator-',
     );
     final savePath = '${directory.path}${Platform.pathSeparator}validator.m4a';
-    await File(savePath).writeAsBytes(const [1, 2, 3]);
+    await File(savePath).writeAsBytes(const [255, 251, 3]);
     final source = _AlbumDownloadMusicSource();
     final adapter = _ChangedValidatorDownloadAdapter();
     final controller = AppController(
@@ -1568,7 +1880,7 @@ void main() {
       expect(task.status, DownloadStatus.completed, reason: task.error);
       expect(adapter.calls, 2);
       expect(adapter.firstRangeHeader, 'bytes=3-');
-      expect(await File(savePath).readAsBytes(), const [9, 8, 7, 6, 5, 4]);
+      expect(await File(savePath).readAsBytes(), const [255, 251, 7, 6, 5, 4]);
       expect(task.resumeValidator, '"new-etag"');
     } finally {
       controller.dispose();
@@ -1625,7 +1937,14 @@ void main() {
         expect(task.status, DownloadStatus.completed, reason: task.error);
         expect(adapter.calls, 2);
         expect(adapter.firstRangeHeader, 'bytes=8-');
-        expect(await File(savePath).readAsBytes(), const [9, 8, 7, 6, 5, 4]);
+        expect(await File(savePath).readAsBytes(), const [
+          255,
+          251,
+          7,
+          6,
+          5,
+          4,
+        ]);
       } finally {
         controller.dispose();
         await directory.delete(recursive: true);
@@ -3048,6 +3367,71 @@ void main() {
     );
   });
 
+  testWidgets(
+    'active local search toggles off without opening the search sheet',
+    (tester) async {
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      controller.settings = const AppSettings(
+        downloadDirectory: 'music',
+        librarySearchHistory: ['目标'],
+      );
+      controller.librarySortMode = LibrarySortMode.titleAsc;
+      controller.downloadedTracks = [
+        for (final title in ['目标歌曲', '其他歌曲'])
+          DownloadedTrack(
+            id: title,
+            title: title,
+            artist: 'Artist',
+            path: '$title.mp3',
+            format: 'mp3',
+            downloadedAt: DateTime(2026),
+            sourceUrl: '',
+            metadataLyrics: '',
+          ),
+      ];
+      addTearDown(controller.dispose);
+      controller.setLibraryQuery('目标');
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: app.LibraryPage(controller: controller)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('目标歌曲'), findsOneWidget);
+      expect(find.text('其他歌曲'), findsNothing);
+
+      await tester.tap(find.byTooltip('清除搜索'));
+      await tester.pumpAndSettle();
+      expect(controller.libraryQuery, isEmpty);
+      expect(controller.settings!.librarySearchHistory, ['目标']);
+      expect(controller.librarySortMode, LibrarySortMode.titleAsc);
+      expect(find.text('目标歌曲'), findsOneWidget);
+      expect(find.text('其他歌曲'), findsOneWidget);
+      expect(find.text('本地搜索'), findsNothing);
+      expect(find.byTooltip('搜索'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('搜索'));
+      await tester.pumpAndSettle();
+      expect(find.text('本地搜索'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '其他');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pumpAndSettle();
+      expect(controller.libraryQuery, '其他');
+      expect(find.text('目标歌曲'), findsNothing);
+      expect(find.text('其他歌曲'), findsOneWidget);
+      await tester.tap(find.byTooltip('清除搜索'));
+      await tester.pumpAndSettle();
+      expect(controller.libraryQuery, isEmpty);
+      expect(find.text('目标歌曲'), findsOneWidget);
+      expect(find.text('其他歌曲'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('deleting a library record keeps the song file', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1000, 1000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -3338,6 +3722,63 @@ void main() {
     expect(controller.pendingAlbumMatches, isEmpty);
   });
 
+  test(
+    'cloud transfer progress does not notify unrelated controller listeners',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-cloud-progress-',
+      );
+      final service = _RecordingRetryCloudService()
+        ..resultGate = Completer<CloudSyncResult>();
+      final controller =
+          AppController(
+              source: _FakeMusicSource(),
+              storage: _FakeStorageService(),
+              player: _FakePlaybackService(),
+              cloudSyncService: service,
+            )
+            ..settings = AppSettings(
+              downloadDirectory: directory.path,
+              cloudFolderId: 'root',
+            )
+            ..cloudConnected = true;
+      var globalNotifications = 0;
+      var progressNotifications = 0;
+      controller.addListener(() => globalNotifications++);
+      controller.cloudSyncProgressListenable.addListener(
+        () => progressNotifications++,
+      );
+      final operation = controller.syncCloud();
+      try {
+        await _waitForCondition(() => service.reportProgress != null);
+        final previousGlobal = globalNotifications;
+        final previousProgress = progressNotifications;
+        for (var i = 1; i <= 20; i++) {
+          service.reportProgress!(
+            CloudSyncProgress(
+              completed: i,
+              total: 20,
+              uploaded: i,
+              downloaded: 0,
+              current: 'song-$i.mp3',
+            ),
+          );
+        }
+        expect(globalNotifications, previousGlobal);
+        expect(progressNotifications, previousProgress + 20);
+        expect(controller.cloudSyncProgress?.completed, 20);
+      } finally {
+        service.resultGate!.complete(
+          const CloudSyncResult(uploaded: 0, downloaded: 0, skipped: 1),
+        );
+        await operation;
+        controller.dispose();
+        await controller.flushPendingWrites();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
   testWidgets(
     'cloud page shows mobile progress and retries only failed songs',
     (tester) async {
@@ -3401,6 +3842,31 @@ void main() {
       await tester.pump();
       expect(find.text('同步歌曲'), findsOneWidget);
       expect(tester.takeException(), isNull);
+      final syncButton = find.widgetWithText(FilledButton, '同步中…');
+      final originalButton = tester.widget<FilledButton>(syncButton);
+      controller.cloudSyncProgress = const CloudSyncProgress(
+        completed: 2,
+        total: 3,
+        uploaded: 1,
+        downloaded: 1,
+        current: '继续传输.mp3',
+        stage: CloudSyncStage.transferring,
+        transfers: [
+          CloudSyncTransferProgress(
+            path: '继续传输.mp3',
+            stage: CloudSyncStage.downloading,
+            bytes: 1536 * 1024,
+            totalBytes: 2 * 1024 * 1024,
+            bytesPerSecond: 512 * 1024,
+          ),
+        ],
+      );
+      await tester.pump();
+      expect(find.text('75% · 1.5 MB / 2.0 MB · 512.0 KB/s'), findsOneWidget);
+      expect(
+        identical(tester.widget<FilledButton>(syncButton), originalButton),
+        isTrue,
+      );
       final retry = find.widgetWithText(OutlinedButton, '一键重试失败歌曲');
       expect(tester.widget<OutlinedButton>(retry).onPressed, isNull);
       controller.isCloudSyncing = false;
@@ -3661,6 +4127,27 @@ class _FakePlaybackService implements PlaybackService {
   Future<void> dispose() async {
     _positionListenable.dispose();
   }
+}
+
+class _UpdatePanelSource extends AppUpdateSource {
+  @override
+  Future<AppUpdateRelease?> check(
+    UpdateVersion current,
+    CancelToken cancel,
+  ) async => AppUpdateRelease(
+    version: UpdateVersion.parse('99.0.0+99'),
+    notes: '测试更新说明',
+    assetName: 'test.exe',
+    url: Uri.https('github.com', '/test.exe'),
+    size: 1024,
+    sha256Hex: 'test',
+  );
+  @override
+  Future<File> download(
+    AppUpdateRelease release,
+    CancelToken cancel,
+    void Function(int, int) progress,
+  ) async => File('unused-test-installer.exe');
 }
 
 class _FakeStorageService extends StorageService {
@@ -4069,6 +4556,8 @@ class _PostDownloadAlbumMetadataService extends AlbumMetadataService {
 class _RecordingRetryCloudService extends CloudSyncService {
   _RecordingRetryCloudService() : super(client: _DownloadSyncCloudClient());
   Set<String>? retriedPaths;
+  Completer<CloudSyncResult>? resultGate;
+  void Function(CloudSyncProgress)? reportProgress;
 
   @override
   Future<bool> readDeletionPolicy(String cloudFolderId) async => false;
@@ -4088,6 +4577,8 @@ class _RecordingRetryCloudService extends CloudSyncService {
     Set<String> deferFilePaths = const {},
   }) async {
     retriedPaths = onlyPaths;
+    reportProgress = onProgress;
+    if (resultGate != null) return resultGate!.future;
     return const CloudSyncResult(uploaded: 0, downloaded: 0, skipped: 1);
   }
 }
@@ -4368,7 +4859,7 @@ class _Range416ThenFullDownloadAdapter implements HttpClientAdapter {
       );
     }
     return ResponseBody.fromBytes(
-      Uint8List.fromList(const [9, 8, 7, 6, 5, 4]),
+      Uint8List.fromList(const [255, 251, 7, 6, 5, 4]),
       200,
       headers: {
         Headers.contentLengthHeader: ['6'],
@@ -4406,7 +4897,7 @@ class _ChangedValidatorDownloadAdapter implements HttpClientAdapter {
       );
     }
     return ResponseBody.fromBytes(
-      Uint8List.fromList(const [9, 8, 7, 6, 5, 4]),
+      Uint8List.fromList(const [255, 251, 7, 6, 5, 4]),
       200,
       headers: {
         HttpHeaders.contentLengthHeader: ['6'],
@@ -4853,4 +5344,54 @@ class _FakeLyricsService extends LyricsService {
     expect(duration, const Duration(minutes: 3, seconds: 20));
     return '[00:01.00]测试歌词';
   }
+}
+
+class _RefreshableDownloadSource extends _AlbumDownloadMusicSource
+    implements RefreshableDownloadMusicSource {
+  _RefreshableDownloadSource({this.blockRefresh = false});
+  final bool blockRefresh;
+  int refreshCalls = 0;
+  final started = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Future<AudioCandidate> refreshDownloadCandidate(
+    TrackSearchResult track,
+    AudioCandidate previous,
+  ) async {
+    refreshCalls++;
+    if (!started.isCompleted) started.complete();
+    if (blockRefresh) await release.future;
+    return const AudioCandidate(
+      url: 'https://example.test/fresh.m4a',
+      format: 'm4a',
+    );
+  }
+}
+
+class _RefreshingDownloadAdapter implements HttpClientAdapter {
+  _RefreshingDownloadAdapter({this.alwaysReject = false});
+  final bool alwaysReject;
+  final paths = <String>[];
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    paths.add(options.uri.path);
+    if (alwaysReject || options.uri.path.contains('expired')) {
+      return ResponseBody.fromString('expired', 403);
+    }
+    return ResponseBody.fromBytes(
+      [0, 0, 0, 16, 102, 116, 121, 112, 77, 52, 65, 32, 0, 0, 0, 0],
+      200,
+      headers: {
+        'content-type': ['audio/mp4'],
+        'content-length': ['16'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
 }

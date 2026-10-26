@@ -8,6 +8,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/my_free_mp3_source.dart';
 
 void main() {
+  test(
+    'explicit refresh discards the cached temporary URL before its TTL',
+    () async {
+      final adapter = _FakeMyFreeMp3Adapter();
+      final dio = Dio(
+        BaseOptions(
+          responseType: ResponseType.plain,
+          validateStatus: (_) => true,
+        ),
+      )..httpClientAdapter = adapter;
+      addTearDown(() => dio.close(force: true));
+      final source = MyFreeMp3Source(
+        dio: dio,
+        preparedCandidateTtl: const Duration(hours: 1),
+      );
+      final track = (await source.search('测试')).single;
+      final detail = await source.loadDetail(track);
+      final old = (await source.resolveCandidates(detail)).single;
+      expect(adapter.startCalls, 1);
+      await source.refreshDownloadCandidate(track, old);
+      expect(adapter.startCalls, 2);
+      await source.resolveCandidates(detail);
+      expect(adapter.startCalls, 2);
+    },
+  );
   final siteUri = Uri.parse('https://myfreemp3.ink/');
 
   test('parses public search tracks with stream and artwork', () {

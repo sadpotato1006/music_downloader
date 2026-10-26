@@ -11,6 +11,7 @@ depends=(
   'mimalloc>=@MIMALLOC_ABI@' 'mimalloc<@MIMALLOC_NEXT_ABI@'
   'xdg-user-dirs' 'hicolor-icon-theme' 'libsecret'
   'webkit2gtk-4.1' 'libayatana-appindicator' 'libpulse'
+  'xdg-desktop-portal' 'xdg-desktop-portal-gtk'
 )
 optdepends=(
   'noto-fonts-cjk: Chinese, Japanese and Korean text rendering'

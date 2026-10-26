@@ -1,4 +1,5 @@
 import 'song_metadata.dart';
+import 'playlist_track_reference.dart';
 
 enum DownloadStatus { queued, downloading, paused, completed, failed, canceled }
 
@@ -182,7 +183,9 @@ class DownloadTask {
     String? error,
     int? receivedBytes,
     int? totalBytes,
+    bool clearTotalBytes = false,
     String? resumeValidator,
+    bool clearResumeValidator = false,
     String? lyrics,
     String? album,
     bool? libraryPending,
@@ -196,8 +199,10 @@ class DownloadTask {
       savePath: savePath ?? this.savePath,
       error: error,
       receivedBytes: receivedBytes ?? this.receivedBytes,
-      totalBytes: totalBytes ?? this.totalBytes,
-      resumeValidator: resumeValidator ?? this.resumeValidator,
+      totalBytes: clearTotalBytes ? null : totalBytes ?? this.totalBytes,
+      resumeValidator: clearResumeValidator
+          ? null
+          : resumeValidator ?? this.resumeValidator,
       lyrics: lyrics ?? this.lyrics,
       album: album ?? this.album,
       libraryPending: libraryPending ?? this.libraryPending,
@@ -431,6 +436,7 @@ class MusicPlaylist {
     required this.name,
     required this.trackPaths,
     required this.createdAt,
+    this.pendingTracks = const [],
   });
 
   final String id;
@@ -438,18 +444,43 @@ class MusicPlaylist {
   final List<String> trackPaths;
   final DateTime createdAt;
 
+  /// Zero-based positions include both available and pending songs.
+  final List<PlaylistTrackReference> pendingTracks;
+
   MusicPlaylist copyWith({
     String? id,
     String? name,
     List<String>? trackPaths,
     DateTime? createdAt,
+    List<PlaylistTrackReference>? pendingTracks,
   }) {
     return MusicPlaylist(
       id: id ?? this.id,
       name: name ?? this.name,
       trackPaths: trackPaths ?? this.trackPaths,
       createdAt: createdAt ?? this.createdAt,
+      pendingTracks: pendingTracks ?? _pendingAfterPathChange(trackPaths),
     );
+  }
+
+  List<PlaylistTrackReference> _pendingAfterPathChange(List<String>? paths) {
+    if (paths == null || pendingTracks.isEmpty) return pendingTracks;
+    final remaining = paths.toSet();
+    final removedBefore = List<int>.filled(trackPaths.length + 1, 0);
+    for (var i = 0; i < trackPaths.length; i++) {
+      removedBefore[i + 1] =
+          removedBefore[i] + (remaining.contains(trackPaths[i]) ? 0 : 1);
+    }
+    return [
+      for (var i = 0; i < pendingTracks.length; i++)
+        pendingTracks[i].atPosition(
+          pendingTracks[i].position -
+              removedBefore[(pendingTracks[i].position - i).clamp(
+                0,
+                trackPaths.length,
+              )],
+        ),
+    ];
   }
 
   Map<String, dynamic> toJson() => {
@@ -457,6 +488,8 @@ class MusicPlaylist {
     'name': name,
     'trackPaths': trackPaths,
     'createdAt': createdAt.toIso8601String(),
+    if (pendingTracks.isNotEmpty)
+      'pendingTracks': pendingTracks.map((track) => track.toJson()).toList(),
   };
 
   factory MusicPlaylist.fromJson(Map<String, dynamic> json) {
@@ -470,6 +503,12 @@ class MusicPlaylist {
       createdAt:
           DateTime.tryParse(json['createdAt'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
+      pendingTracks: [
+        for (final item in json['pendingTracks'] as List? ?? const [])
+          PlaylistTrackReference.fromJson(
+            Map<String, dynamic>.from(item as Map),
+          ),
+      ]..sort((a, b) => a.position.compareTo(b.position)),
     );
   }
 }
@@ -563,6 +602,7 @@ class AppSettings {
     this.theme = 'lightGreen',
     this.volume = 100,
     this.autoPlayOnStartup = false,
+    this.checkUpdatesOnStartup = true,
     this.defaultStartupPageIndex = 0,
     this.desktopLyrics = defaultDesktopLyricsSettings,
     this.sourceSearchHistory = const [],
@@ -578,6 +618,7 @@ class AppSettings {
   final String theme;
   final double volume;
   final bool autoPlayOnStartup;
+  final bool checkUpdatesOnStartup;
   final int defaultStartupPageIndex;
   final DesktopLyricsSettings desktopLyrics;
   final List<String> sourceSearchHistory;
@@ -593,6 +634,7 @@ class AppSettings {
     String? theme,
     double? volume,
     bool? autoPlayOnStartup,
+    bool? checkUpdatesOnStartup,
     int? defaultStartupPageIndex,
     DesktopLyricsSettings? desktopLyrics,
     List<String>? sourceSearchHistory,
@@ -608,6 +650,8 @@ class AppSettings {
       theme: theme ?? this.theme,
       volume: volume ?? this.volume,
       autoPlayOnStartup: autoPlayOnStartup ?? this.autoPlayOnStartup,
+      checkUpdatesOnStartup:
+          checkUpdatesOnStartup ?? this.checkUpdatesOnStartup,
       defaultStartupPageIndex:
           defaultStartupPageIndex ?? this.defaultStartupPageIndex,
       desktopLyrics: desktopLyrics ?? this.desktopLyrics,
@@ -630,6 +674,7 @@ class AppSettings {
     'theme': theme,
     'volume': volume,
     'autoPlayOnStartup': autoPlayOnStartup,
+    'checkUpdatesOnStartup': checkUpdatesOnStartup,
     'defaultStartupPageIndex': defaultStartupPageIndex,
     'desktopLyrics': desktopLyrics.toJson(),
     'sourceSearchHistory': sourceSearchHistory,
@@ -649,6 +694,7 @@ class AppSettings {
       theme: json['theme'] as String? ?? 'lightGreen',
       volume: (json['volume'] as num?)?.toDouble() ?? 100,
       autoPlayOnStartup: json['autoPlayOnStartup'] as bool? ?? false,
+      checkUpdatesOnStartup: json['checkUpdatesOnStartup'] as bool? ?? true,
       defaultStartupPageIndex: savedDefaultPage == 2 ? 2 : 0,
       desktopLyrics: desktopLyricsJson is Map
           ? DesktopLyricsSettings.fromJson(

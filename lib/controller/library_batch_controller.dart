@@ -21,53 +21,83 @@ extension AppControllerLibraryBatchActions on AppController {
   Future<LibraryBatchResult> setFavoritesForTracks(
     Iterable<DownloadedTrack> tracks, {
     required bool favorite,
-  }) => _runLibraryBatch(
-    favorite ? '批量收藏' : '批量取消收藏',
-    tracks,
-    apply: (track) async {
-      final key = _trackPathKey(track.path);
-      if (favorite && isFavorite(track)) return;
-      final paths = myMusic.favoriteTrackPaths
-          .where((path) => _trackPathKey(path) != key)
-          .toList();
-      myMusic = myMusic.copyWith(
-        favoriteTrackPaths: favorite ? [...paths, track.path] : paths,
-      );
-    },
-    save: _saveMyMusic,
-  );
+  }) {
+    final selected = <String, DownloadedTrack>{};
+    return _runLibraryBatch(
+      favorite ? '批量收藏' : '批量取消收藏',
+      tracks,
+      apply: (track) async => selected[_trackPathKey(track.path)] = track,
+      save: () async {
+        myMusic = myMusic.copyWith(
+          favoriteTrackPaths: _mergeCollectionPaths(
+            myMusic.favoriteTrackPaths,
+            selected,
+            included: favorite,
+          ),
+        );
+        await _saveMyMusic();
+      },
+    );
+  }
 
   Future<LibraryBatchResult> setTracksInPlaylist(
     String playlistId,
     Iterable<DownloadedTrack> tracks, {
     required bool included,
-  }) => _runLibraryBatch(
-    included ? '批量加入歌单' : '批量移出歌单',
-    tracks,
-    apply: (track) async {
-      final playlist = playlistById(playlistId);
-      if (playlist == null) throw StateError('歌单已不存在');
-      final key = _trackPathKey(track.path);
-      final paths = playlist.trackPaths
-          .where((path) => _trackPathKey(path) != key)
+  }) {
+    final selected = <String, DownloadedTrack>{};
+    return _runLibraryBatch(
+      included ? '批量加入歌单' : '批量移出歌单',
+      tracks,
+      apply: (track) async {
+        if (playlistById(playlistId) == null) throw StateError('歌单已不存在');
+        selected[_trackPathKey(track.path)] = track;
+      },
+      save: () async {
+        final playlist = playlistById(playlistId);
+        if (playlist == null && selected.isNotEmpty) throw StateError('歌单已不存在');
+        if (playlist != null) {
+          final paths = _mergeCollectionPaths(
+            playlist.trackPaths,
+            selected,
+            included: included,
+          );
+          myMusic = myMusic.copyWith(
+            playlists: [
+              for (final item in myMusic.playlists)
+                item.id == playlistId ? item.copyWith(trackPaths: paths) : item,
+            ],
+          );
+        }
+        await _saveMyMusic();
+      },
+    );
+  }
+
+  List<String> _mergeCollectionPaths(
+    List<String> current,
+    Map<String, DownloadedTrack> selected, {
+    required bool included,
+  }) {
+    final valid = <String, String>{
+      for (final entry in selected.entries)
+        if (_downloadedTrackByPath(entry.value.path)?.id == entry.value.id)
+          entry.key: entry.value.path,
+    };
+    if (valid.isEmpty) return current;
+    if (!included) {
+      return current
+          .where((path) => !valid.containsKey(_trackPathKey(path)))
           .toList();
-      // Already included songs keep their position; repeated adds are idempotent.
-      final next =
-          included &&
-              playlist.trackPaths.any((path) => _trackPathKey(path) == key)
-          ? playlist.trackPaths
-          : included
-          ? [...paths, track.path]
-          : paths;
-      myMusic = myMusic.copyWith(
-        playlists: [
-          for (final item in myMusic.playlists)
-            item.id == playlistId ? item.copyWith(trackPaths: next) : item,
-        ],
-      );
-    },
-    save: _saveMyMusic,
-  );
+    }
+    // Keep existing positions and append each newly selected path only once.
+    final existing = current.map(_trackPathKey).toSet();
+    return [
+      ...current,
+      for (final entry in valid.entries)
+        if (existing.add(entry.key)) entry.value,
+    ];
+  }
 
   Future<LibraryBatchResult> setAlbumsForTracks(
     Iterable<DownloadedTrack> tracks,
@@ -273,6 +303,7 @@ extension AppControllerLibraryBatchActions on AppController {
   }) async {
     final completed = <String>[];
     final failures = <LibraryBatchFailure>[];
+    final refresh = Stopwatch()..start();
     for (final snapshot in tracks) {
       try {
         if (_isDisposed || _preparingToExit) throw StateError('应用退出，未处理此歌曲');
@@ -293,7 +324,15 @@ extension AppControllerLibraryBatchActions on AppController {
         );
       }
       libraryBatchCompleted++;
-      _notify();
+      if (libraryBatchCompleted == tracks.length ||
+          refresh.elapsedMilliseconds >= 80) {
+        _notify();
+        if (libraryBatchCompleted < tracks.length) {
+          // Let the UI paint progress and accept input during large batches.
+          await Future<void>.delayed(Duration.zero);
+        }
+        refresh.reset();
+      }
     }
     try {
       try {

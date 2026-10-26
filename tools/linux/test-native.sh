@@ -6,6 +6,10 @@ bundle=${1:-build/linux/x64/release/bundle}
 bundle=$(realpath "$bundle")
 test -f "$bundle/qingting"
 mkdir -p build/linux/native-tests
+task_runtime=$(mktemp -d)
+chmod 700 "$task_runtime"
+export XDG_RUNTIME_DIR="$task_runtime"
+trap 'rm -rf -- "$task_runtime"' EXIT
 compile_login_test() {
   clang++ -std=c++14 -Wall -Werror \
     -Ilinux/runner -Ilinux/flutter/ephemeral \
@@ -17,7 +21,7 @@ compile_login_test() {
 compile_login_test test/linux/cloud_login_callback_test.cc build/linux/native-tests/cloud-login-test
 compile_login_test test/linux/cloud_login_webview_test.cc build/linux/native-tests/cloud-login-webview-test
 build/linux/native-tests/cloud-login-test
-dbus-run-session -- xvfb-run -a python3 tools/linux/test-cloud-login.py \
+xvfb-run -a dbus-run-session -- python3 tools/linux/test-cloud-login.py \
   build/linux/native-tests/cloud-login-webview-test
 # Run only on a disposable D-Bus session and X server; never use real settings.
-dbus-run-session -- xvfb-run -a python3 tools/linux/smoke-test.py "$bundle/qingting"
+xvfb-run -a dbus-run-session -- python3 tools/linux/smoke-test.py "$bundle/qingting"

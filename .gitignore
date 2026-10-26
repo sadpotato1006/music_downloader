@@ -23,11 +23,23 @@ migrate_working_dir/
 # is commented out by default.
 #.vscode/
 
+# Local environment files (keep shareable examples)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Local browser automation output
+/.playwright-cli/
+/output/playwright/
+
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id
 .dart_tool/
 .gradle/
+android/.kotlin/
 .flutter-plugins-dependencies
 .codex_gitconfig
 .appdata/

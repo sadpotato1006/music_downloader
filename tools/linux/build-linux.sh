@@ -80,7 +80,7 @@ Section: sound
 Priority: optional
 Architecture: $deb_arch
 Maintainer: QingTing contributors <qingting@users.noreply.github.com>
-Depends: $dependencies, $mpv_package, xdg-user-dirs
+Depends: $dependencies, $mpv_package, xdg-user-dirs, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-kde
 Recommends: fonts-noto-cjk, gnome-keyring
 Installed-Size: $(du -sk "$deb_root/opt" | cut -f1)
 Homepage: https://github.com/sadpotato1006/music_downloader

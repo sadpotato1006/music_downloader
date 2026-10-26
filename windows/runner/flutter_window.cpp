@@ -23,6 +23,7 @@ constexpr const char kAudioRouteChannel[] = "qingting/audio_route";
 constexpr const char kFileOperationsChannel[] = "qingting/file_operations";
 constexpr const char kAppLifecycleChannel[] = "qingting/app_lifecycle";
 constexpr UINT kTrayMessage = WM_APP + 1;
+constexpr UINT kUpdateExitMessage = WM_APP + 2;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTrayOpenCommand = 40001;
 constexpr UINT kTrayExitCommand = 40002;
@@ -281,6 +282,18 @@ bool FlutterWindow::OnCreate() {
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           flutter_controller_->engine()->messenger(), kAppLifecycleChannel,
           &flutter::StandardMethodCodec::GetInstance());
+  app_lifecycle_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() != "exitForUpdate") {
+          result->NotImplemented();
+          return;
+        }
+        // Dart has already stopped work and strictly flushed all saved state.
+        // Post destruction so the method response can be delivered first.
+        result->Success(flutter::EncodableValue(true));
+        PostMessage(GetHandle(), kUpdateExitMessage, 0, 0);
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -324,6 +337,10 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == kUpdateExitMessage) {
+    CompleteExitFromTray();
+    return 0;
+  }
   if (message == kBluetoothAudioRouteChangedMessage) {
     if (bluetooth_audio_monitor_) {
       bluetooth_audio_monitor_->Refresh();

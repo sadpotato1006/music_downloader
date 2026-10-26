@@ -624,7 +624,7 @@ extension AppControllerPlaybackActions on AppController {
     final (detail, candidates) = await _runSourceRequest(action, () async {
       final detail = await requestSource.loadDetail(result);
       if (shouldRun != null && !shouldRun()) {
-        throw const _ObsoleteSourceRequest();
+        throw const ObsoleteSourceRequest();
       }
       final candidates = await requestSource.resolveCandidates(detail);
       return (detail, candidates);

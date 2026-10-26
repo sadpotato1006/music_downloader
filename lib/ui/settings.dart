@@ -47,6 +47,10 @@ class _SettingsPageState extends State<SettingsPage> {
     return _PageFrame(
       child: ListView(
         children: [
+          if (controller.updates != null) ...[
+            _SoftwareUpdatePanel(controller: controller),
+            const SizedBox(height: 12),
+          ],
           _SettingPanel(
             title: '下载目录',
             child: Column(
@@ -237,33 +241,48 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 12),
           _SettingPanel(
             title: '源代码',
-            child: InkWell(
-              borderRadius: BorderRadius.circular(10),
-              onTap: () => _openProjectRepository(context),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    FaIcon(FontAwesomeIcons.github, size: 22, color: _ink),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'https://github.com/sadpotato1006/music_downloader',
-                        maxLines: 2,
-                        softWrap: true,
-                        overflow: TextOverflow.clip,
-                        style: TextStyle(
-                          color: _accentStrong,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          decoration: TextDecoration.underline,
-                          decorationColor: _accentStrong,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => _openProjectRepository(context),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      children: [
+                        FaIcon(FontAwesomeIcons.github, size: 22, color: _ink),
+                        SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'https://github.com/sadpotato1006/music_downloader',
+                            maxLines: 2,
+                            softWrap: true,
+                            overflow: TextOverflow.clip,
+                            style: TextStyle(
+                              color: _accentStrong,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              decoration: TextDecoration.underline,
+                              decorationColor: _accentStrong,
+                            ),
+                          ),
                         ),
-                      ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
-              ),
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: () async {
+                    if (!await controller.openExternalUrl(appReleasePage)) {
+                      controller.showMessage('无法打开发布页');
+                    }
+                  },
+                  icon: const Icon(Icons.open_in_new, size: 18),
+                  label: const Text('打开发布页'),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 12),

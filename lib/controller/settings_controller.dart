@@ -1,6 +1,17 @@
 part of '../app_controller.dart';
 
 extension AppControllerSettingsActions on AppController {
+  Future<void> setCheckUpdatesOnStartup(bool enabled) async {
+    final previous = settings;
+    if (previous == null) return;
+    final next = previous.copyWith(checkUpdatesOnStartup: enabled);
+    await storage.saveSettings(next);
+    settings = settings!.copyWith(checkUpdatesOnStartup: enabled);
+    updates?.automaticCheckEnabled = enabled;
+    if (!enabled) updates?.dismissNotice();
+    _notify();
+  }
+
   Future<bool> setDownloadDirectory(String selected) async {
     lastDirectoryNeedsAllFilesAccess = false;
     // Backslashes, commas and trailing spaces are valid Linux directory names.

@@ -228,7 +228,17 @@ extension AppControllerLibraryActions on AppController {
     myMusic = myMusic.copyWith(
       playlists: [
         for (final item in myMusic.playlists)
-          item.id == playlistId ? item.copyWith(trackPaths: paths) : item,
+          item.id == playlistId
+              ? item.copyWith(
+                  trackPaths: paths,
+                  pendingTracks: included
+                      ? [
+                          for (final pending in item.pendingTracks)
+                            pending.atPosition(pending.position + 1),
+                        ]
+                      : null,
+                )
+              : item,
       ],
     );
     await _saveMyMusic();
@@ -497,15 +507,22 @@ extension AppControllerLibraryActions on AppController {
     return failures;
   }
 
-  Set<String> _unfinishedDownloadPaths() => {
-    for (final task in downloadTasks)
-      if (task.status != DownloadStatus.completed ||
-          _pendingDownloadCleanupIds.contains(task.id))
-        _trackPathKey(task.savePath),
-    for (final path in _reservedDownloadSavePaths) _trackPathKey(path),
-  };
+  Set<String> _unfinishedDownloadPaths() => downloads.unfinishedPaths;
 
-  Future<int> scanCurrentDownloadDirectory() async {
+  Future<int> scanCurrentDownloadDirectory() {
+    final running = _libraryScanOperation;
+    if (running != null) return running;
+    late final Future<int> operation;
+    operation = _scanCurrentDownloadDirectory().whenComplete(() {
+      if (identical(_libraryScanOperation, operation)) {
+        _libraryScanOperation = null;
+      }
+    });
+    _libraryScanOperation = operation;
+    return operation;
+  }
+
+  Future<int> _scanCurrentDownloadDirectory() async {
     final activeSettings = settings;
     if (activeSettings == null || isScanningDownloadDirectory) {
       return 0;
@@ -587,15 +604,27 @@ extension AppControllerLibraryActions on AppController {
           .where((track) => !excludedPaths.contains(_trackPathKey(track.path)))
           .toList();
 
-      if (imported.isNotEmpty) {
-        downloadedTracks = [...imported, ...downloadedTracks];
+      // Replace the list even when no songs were imported, so cached library,
+      // favorites and playlist views all observe the completed scan.
+      downloadedTracks = [...imported, ...downloadedTracks];
+      final rootKey = _trackPathKey(p.absolute(directory.path));
+      final removed = await _removeUnavailableDownloadedTracks(
+        downloadedTracks.where(
+          (track) =>
+              p.isWithin(rootKey, _trackPathKey(p.absolute(track.path))) &&
+              !unfinishedPaths.contains(_trackPathKey(track.path)),
+        ),
+      );
+      if (imported.isNotEmpty && removed == 0) {
         await _saveDownloadedTracks();
-        if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
-          unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
-        }
+      }
+      if (LibrarySearch.normalize(libraryQuery).isNotEmpty) {
+        unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
       }
 
-      globalMessage = imported.isEmpty
+      globalMessage = removed > 0
+          ? '扫描完成，已导入 ${imported.length} 首本地歌曲，清理 $removed 首文件已不存在的歌曲记录。'
+          : imported.isEmpty
           ? '扫描完成，没有发现新的本地歌曲。'
           : '扫描完成，已导入 ${imported.length} 首本地歌曲。';
       return imported.length;
@@ -609,6 +638,61 @@ extension AppControllerLibraryActions on AppController {
       isScanningDownloadDirectory = false;
       _notify();
     }
+  }
+
+  Future<int> _removeUnavailableDownloadedTracks(
+    Iterable<DownloadedTrack> tracks,
+  ) async {
+    final snapshot = tracks.toList();
+    final unfinishedPaths = _unfinishedDownloadPaths();
+    final missing = await mapWithConcurrency(snapshot, (track) async {
+      final key = _trackPathKey(track.path);
+      if (unfinishedPaths.contains(key) ||
+          _metadataWriteKeys.contains(key) ||
+          _deletingTrackKeys.contains(key)) {
+        return null;
+      }
+      try {
+        return await File(track.path).exists() ? null : track;
+      } on FileSystemException {
+        // An unreadable file is not evidence that its record should be removed.
+        return null;
+      }
+    }, maxConcurrent: 4);
+    var removed = 0;
+    var queueChanged = false;
+    for (final track in missing.whereType<DownloadedTrack>()) {
+      final key = _trackPathKey(track.path);
+      // Downloads and metadata writes can replace a file while the scan waits.
+      if (await File(track.path).exists() ||
+          !identical(_downloadedTrackByPath(track.path), track) ||
+          _unfinishedDownloadPaths().contains(key) ||
+          _metadataWriteKeys.contains(key) ||
+          _deletingTrackKeys.contains(key)) {
+        continue;
+      }
+      if (currentItem?.localPath != null &&
+          _trackPathKey(currentItem!.localPath!) == key) {
+        await _stopPlayback();
+        if (await File(track.path).exists() ||
+            !identical(_downloadedTrackByPath(track.path), track) ||
+            _unfinishedDownloadPaths().contains(key) ||
+            _metadataWriteKeys.contains(key) ||
+            _deletingTrackKeys.contains(key)) {
+          continue;
+        }
+      }
+      queueChanged =
+          _removeDeletedTrackFromQueue(track.path).changed || queueChanged;
+      _removeDownloadedRecordInMemory(track);
+      removed++;
+    }
+    if (removed > 0) {
+      await _persistDeletedTrackState(saveQueue: queueChanged);
+      unawaited(_syncAndroidMediaControls(force: true));
+      _notify();
+    }
+    return removed;
   }
 
   Future<String?> readDownloadedLyrics(DownloadedTrack track) async {
@@ -1606,12 +1690,14 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<void> _saveMyMusic() {
+    _resolvePendingPlaylistTracks();
     final snapshot = MyMusicData(
       favoriteTrackPaths: List<String>.unmodifiable(myMusic.favoriteTrackPaths),
       playlists: [
         for (final playlist in myMusic.playlists)
           playlist.copyWith(
             trackPaths: List<String>.unmodifiable(playlist.trackPaths),
+            pendingTracks: List.unmodifiable(playlist.pendingTracks),
           ),
       ],
       recentPlaybacks: List<RecentPlayback>.unmodifiable(
@@ -1621,11 +1707,15 @@ extension AppControllerLibraryActions on AppController {
     return _myMusicSaveQueue.enqueue(() => storage.saveMyMusic(snapshot));
   }
 
-  Future<void> _saveDownloadedTracks() {
+  Future<void> _saveDownloadedTracks() async {
     final snapshot = List<DownloadedTrack>.unmodifiable(downloadedTracks);
-    return _downloadedTracksSaveQueue.enqueue(
-      () => storage.saveDownloadedTracks(snapshot),
-    );
+    final resolved = _resolvePendingPlaylistTracks();
+    await Future.wait([
+      _downloadedTracksSaveQueue.enqueue(
+        () => storage.saveDownloadedTracks(snapshot),
+      ),
+      if (resolved) _saveMyMusic(),
+    ]);
   }
 
   Future<void> _savePendingAlbumMatches() {

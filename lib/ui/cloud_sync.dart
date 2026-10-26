@@ -40,7 +40,6 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
     animation: controller,
     builder: (context, _) {
       final settings = controller.settings!;
-      final progress = controller.cloudSyncProgress;
       return Scaffold(
         appBar: AppBar(
           title: const Text(
@@ -143,47 +142,8 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
                 const Text('将本机曲库的下载时间写入云盘；其他设备下次同步后按这个顺序显示。'),
               ],
             ],
-            if (controller.isCloudSyncing) ...[
-              const SizedBox(height: 16),
-              LinearProgressIndicator(
-                value: progress == null || progress.total <= 0
-                    ? null
-                    : (progress.completed / progress.total).clamp(0.0, 1.0),
-              ),
-              if (progress != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  progress.stage.label,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-                Text(
-                  '已处理 ${progress.completed}/${progress.total} · '
-                  '上传 ${progress.uploaded} · 下载 ${progress.downloaded} · 失败 ${progress.failed}',
-                ),
-                if (progress.transfers.isEmpty && progress.current.isNotEmpty)
-                  Text(
-                    progress.current,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                for (final transfer in progress.transfers) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    '${transfer.stage.label}：${transfer.path}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  LinearProgressIndicator(value: transfer.fraction),
-                  const SizedBox(height: 4),
-                  Text(
-                    '${transfer.fraction == null ? '准备传输' : '${(transfer.fraction! * 100).round()}%'} · '
-                    '${_cloudBytes(transfer.bytes)} / ${transfer.totalBytes <= 0 ? '未知' : _cloudBytes(transfer.totalBytes)} · '
-                    '${_cloudBytes(transfer.bytesPerSecond)}/s',
-                  ),
-                ],
-              ],
-            ],
+            if (controller.isCloudSyncing)
+              _CloudSyncProgress(controller: controller),
             if (controller.cloudSyncFailures.isNotEmpty) ...[
               const SizedBox(height: 16),
               Text(
@@ -232,6 +192,63 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
         ),
       );
     },
+  );
+}
+
+class _CloudSyncProgress extends StatelessWidget {
+  const _CloudSyncProgress({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(
+    BuildContext context,
+  ) => ValueListenableBuilder<CloudSyncProgress?>(
+    valueListenable: controller.cloudSyncProgressListenable,
+    builder: (context, progress, _) => Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 16),
+        LinearProgressIndicator(
+          value: progress == null || progress.total <= 0
+              ? null
+              : (progress.completed / progress.total).clamp(0.0, 1.0),
+        ),
+        if (progress != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            progress.stage.label,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          Text(
+            '已处理 ${progress.completed}/${progress.total} · '
+            '上传 ${progress.uploaded} · 下载 ${progress.downloaded} · 失败 ${progress.failed}',
+          ),
+          if (progress.transfers.isEmpty && progress.current.isNotEmpty)
+            Text(
+              progress.current,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          for (final transfer in progress.transfers) ...[
+            const SizedBox(height: 12),
+            Text(
+              '${transfer.stage.label}：${transfer.path}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 4),
+            LinearProgressIndicator(value: transfer.fraction),
+            const SizedBox(height: 4),
+            Text(
+              '${transfer.fraction == null ? '准备传输' : '${(transfer.fraction! * 100).round()}%'} · '
+              '${_cloudBytes(transfer.bytes)} / ${transfer.totalBytes <= 0 ? '未知' : _cloudBytes(transfer.totalBytes)} · '
+              '${_cloudBytes(transfer.bytesPerSecond)}/s',
+            ),
+          ],
+        ],
+      ],
+    ),
   );
 }
 

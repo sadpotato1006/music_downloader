@@ -2,7 +2,7 @@
 
 便携包：解压后在此目录运行 ./qingting，保留 lib/ 和 data/。
 Ubuntu 24.04 运行依赖：
-  sudo apt install libgtk-3-0t64 libmpv2 libmimalloc2.0 libstdc++6 libsecret-1-0 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libpulse-mainloop-glib0 xdg-user-dirs fonts-noto-cjk gnome-keyring
+  sudo apt install libgtk-3-0t64 libmpv2 libmimalloc2.0 libstdc++6 libsecret-1-0 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libpulse-mainloop-glib0 xdg-user-dirs fonts-noto-cjk gnome-keyring xdg-desktop-portal xdg-desktop-portal-gtk
 需要桌面图形会话和可用的音频设备。此包不捆绑系统音频库。
 
 deb 安装包：
@@ -17,6 +17,9 @@ pacman 会安装 GTK 3、mpv、mimalloc、WebKitGTK 4.1、Ayatana AppIndicator�
 Arch 包在 Arch 环境中编译，不要将 Ubuntu 便携包直接转换为 Arch 包。
 
 支持搜索、播放、下载、曲库、应用内歌词、原生目录选择、专辑补全和北科云盘扫码同步。
+支持歌曲多选并加入歌单；在“本地 → 歌单”导入、导出青听歌单文件，单歌单设置菜单可单独导出。
+歌单文件不包含音频；未匹配的歌曲会保留，之后入库时自动重试匹配。
+歌单系统文件窗口需要 xdg-desktop-portal 和文件选择后端；KDE 可使用 xdg-desktop-portal-kde。
 云盘记住授权需要运行并解锁 Secret Service 密钥环，例如 gnome-keyring。
 扫码窗口属于青听，关闭扫码窗口即取消；哈希比较、共享删除记录、原下载顺序和失败重试与其他平台一致。
 

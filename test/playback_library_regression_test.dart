@@ -374,6 +374,204 @@ void main() {
     });
   }
 
+  test('library searches reuse ordering until the library changes', () {
+    final controller = controllerFor();
+    final tracks = List.generate(100, _SortCountingTrack.new);
+    controller.downloadedTracks = tracks;
+    final originalOrder = controller.visibleDownloadedTracks;
+    expect(originalOrder.first.id, '99');
+    final sortReads = tracks.fold(0, (count, track) => count + track.sortReads);
+    expect(sortReads, greaterThan(0));
+
+    for (final query in ['song', 'artist', 'Song 9', 'absent', '']) {
+      controller.setLibraryQuery(query);
+      final visible = controller.visibleDownloadedTracks;
+      if (query == 'Song 9') {
+        expect(visible.map((track) => track.id), [
+          for (var index = 99; index >= 90; index--) '$index',
+          '9',
+        ]);
+      } else if (query == 'absent') {
+        expect(visible, isEmpty);
+      }
+      expect(
+        tracks.fold(0, (count, track) => count + track.sortReads),
+        sortReads,
+        reason: 'changing the filter must not repeat date comparisons',
+      );
+    }
+    expect(controller.visibleDownloadedTracks, same(originalOrder));
+    expect(() => originalOrder.clear(), throwsUnsupportedError);
+
+    final updated = tracks.last.copyWith(title: 'Edited');
+    controller.downloadedTracks = [tracks.first, updated];
+    expect(controller.visibleDownloadedTracks, [updated, tracks.first]);
+    controller.setLibrarySortMode(LibrarySortMode.titleAsc);
+    expect(controller.visibleDownloadedTracks, [updated, tracks.first]);
+    controller.downloadedTracks = [
+      updated.copyWith(title: 'ZZZ', artist: ''),
+      tracks.first.copyWith(title: 'AAA', artist: 'Alpha'),
+    ];
+    expect(controller.visibleDownloadedTracks.map((track) => track.title), [
+      'AAA',
+      'ZZZ',
+    ]);
+    controller.setLibrarySortMode(LibrarySortMode.artistAsc);
+    expect(controller.visibleDownloadedTracks.map((track) => track.artist), [
+      'Alpha',
+      '',
+    ]);
+    controller.downloadedTracks = [];
+    expect(controller.visibleDownloadedTracks, isEmpty);
+  });
+
+  test(
+    'lyric matches refresh the filtered view without sorting again',
+    () async {
+      final controller = controllerFor();
+      final tracks = List.generate(
+        20,
+        (index) => _SortCountingTrack(index, lyrics: 'needle'),
+      );
+      controller.downloadedTracks = tracks;
+      final sorted = controller.visibleDownloadedTracks;
+      final sortReads = tracks.fold(
+        0,
+        (count, track) => count + track.sortReads,
+      );
+      final completed = Completer<void>();
+      controller.addListener(() {
+        if (!completed.isCompleted &&
+            controller.visibleDownloadedTracks.length == tracks.length) {
+          completed.complete();
+        }
+      });
+      controller.setLibraryQuery('needle');
+      expect(controller.visibleDownloadedTracks, isEmpty);
+      await completed.future.timeout(const Duration(seconds: 3));
+      expect(controller.visibleDownloadedTracks, orderedEquals(sorted));
+      expect(
+        tracks.fold(0, (count, track) => count + track.sortReads),
+        sortReads,
+      );
+    },
+  );
+
+  for (final desktop in [false, true]) {
+    testWidgets('mini player only rebuilds on lyric changes ($desktop)', (
+      tester,
+    ) async {
+      tester.view.physicalSize = Size(desktop ? 1100 : 390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final controller = controllerFor();
+      const item = PlayerItem(
+        id: 'mini',
+        title: 'Timed song',
+        artist: 'Artist',
+        uri: 'https://example.test/mini.mp3',
+        lyrics: '[00:02]First line\n[00:10]Second line',
+      );
+      controller.queue = [item];
+      controller.currentQueueIndex = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: AnimatedBuilder(
+                animation: controller,
+                builder: (_, _) =>
+                    app.MiniPlayer(controller: controller, isDesktop: desktop),
+              ),
+            ),
+          ),
+        ),
+      );
+      final title = tester.widget<Text>(find.text('Timed song'));
+      await player.seek(const Duration(seconds: 1));
+      await tester.pump();
+      expect(tester.widget<Text>(find.text('Timed song')), same(title));
+      expect(find.text('Artist'), findsOneWidget);
+      await player.seek(const Duration(seconds: 3));
+      await tester.pump();
+      final firstLine = tester.widget<Text>(find.text('First line'));
+      for (var second = 4; second < 10; second++) {
+        await player.seek(Duration(seconds: second));
+        await tester.pump();
+        expect(tester.widget<Text>(find.text('First line')), same(firstLine));
+      }
+      await player.seek(const Duration(seconds: 11));
+      await tester.pump();
+      expect(find.text('Second line'), findsOneWidget);
+      await player.seek(const Duration(seconds: 4));
+      await tester.pump();
+      expect(find.text('First line'), findsOneWidget);
+
+      controller.queue = [item.copyWith(title: 'Edited', lyrics: '[00:00]New')];
+      controller.showMessage('updated');
+      await tester.pump();
+      expect(find.text('Edited'), findsOneWidget);
+      expect(find.text('New'), findsOneWidget);
+      player.isPlaying = true;
+      player.onChanged?.call();
+      await tester.pump();
+      expect(find.byTooltip('暂停'), findsOneWidget);
+
+      await controller.clearQueue();
+      await tester.pump();
+      expect(find.text('未播放'), findsOneWidget);
+      expect(find.text('New'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await player.seek(const Duration(seconds: 20));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('mini player moves its listener to the new controller', (
+    tester,
+  ) async {
+    final original = controllerFor();
+    original.queue = [_item('original').copyWith(lyrics: '[00:00]Old')];
+    original.currentQueueIndex = 0;
+    final replacementPlayer = _FakePlaybackService();
+    final replacement = AppController(
+      source: _ControlledSource(),
+      storage: storage,
+      player: replacementPlayer,
+    );
+    addTearDown(replacement.dispose);
+    replacement.queue = [
+      _item(
+        'replacement',
+      ).copyWith(lyrics: '[00:02]New first\n[00:10]New next'),
+    ];
+    replacement.currentQueueIndex = 0;
+    Widget host(AppController controller) => MaterialApp(
+      home: Scaffold(
+        body: app.MiniPlayer(controller: controller, isDesktop: true),
+      ),
+    );
+    await tester.pumpWidget(host(original));
+    expect(find.text('Old'), findsOneWidget);
+    await tester.pumpWidget(host(replacement));
+    expect(find.text('Old'), findsNothing);
+    final title = tester.widget<Text>(find.text('Song replacement'));
+    await player.seek(const Duration(seconds: 15));
+    await tester.pump();
+    expect(tester.widget<Text>(find.text('Song replacement')), same(title));
+    await replacementPlayer.seek(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.text('New first'), findsOneWidget);
+    await replacementPlayer.seek(const Duration(seconds: 11));
+    await tester.pump();
+    expect(find.text('New next'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await replacementPlayer.seek(Duration.zero);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'lyrics progress updates without rebuilding the same lyric line',
     (tester) async {
@@ -606,6 +804,28 @@ class _RegressionStorage extends StorageService {
   }) async {
     if (!cleaned.isCompleted) cleaned.complete();
     return 0;
+  }
+}
+
+class _SortCountingTrack extends DownloadedTrack {
+  _SortCountingTrack(int index, {String? lyrics})
+    : super(
+        id: '$index',
+        title: 'Song $index',
+        artist: 'Artist',
+        path: '$index.mp3',
+        format: 'mp3',
+        downloadedAt: DateTime(2026, 1, 1).add(Duration(seconds: index)),
+        sourceUrl: '',
+        metadataLyrics: lyrics,
+      );
+
+  int sortReads = 0;
+
+  @override
+  DateTime get downloadedAt {
+    sortReads++;
+    return super.downloadedAt;
   }
 }
 

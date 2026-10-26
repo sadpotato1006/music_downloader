@@ -10,7 +10,11 @@ import 'music_source.dart';
 import 'app_info.dart';
 
 class MyFreeMp3Source
-    implements MusicSource, DownloadMusicSource, DeferredDownloadMusicSource {
+    implements
+        MusicSource,
+        DownloadMusicSource,
+        DeferredDownloadMusicSource,
+        RefreshableDownloadMusicSource {
   MyFreeMp3Source({
     Dio? dio,
     Uri? siteUri,
@@ -124,6 +128,19 @@ class MyFreeMp3Source
       throw const MusicSourceException('MY FREE MP3 下载任务信息不完整。');
     }
     return _prepareCandidate(parts[0], parts[1]);
+  }
+
+  @override
+  Future<AudioCandidate> refreshDownloadCandidate(
+    TrackSearchResult track,
+    AudioCandidate previous,
+  ) async {
+    final ids = _idsFromResult(track);
+    if (ids == null) {
+      throw const MusicSourceException('MY FREE MP3 原始歌曲标识缺失，请重新搜索下载。');
+    }
+    _preparedCandidates.remove('${ids.$1}:${ids.$2}');
+    return _prepareCandidate(ids.$1, ids.$2);
   }
 
   Future<AudioCandidate> _prepareCandidate(

@@ -208,6 +208,7 @@ extension AppControllerCloudSyncActions on AppController {
       stage: CloudSyncStage.preparing,
     );
     _notify();
+    var scannedLibrary = false;
     try {
       final albumMatch = _activeAutomaticAlbumMatch;
       if (albumMatch != null) {
@@ -219,7 +220,6 @@ extension AppControllerCloudSyncActions on AppController {
           current: '等待新歌专辑处理',
           stage: CloudSyncStage.waitingForAlbums,
         );
-        _notify();
         await albumMatch;
       }
       _cloudSyncOwnsFiles = true;
@@ -256,7 +256,6 @@ extension AppControllerCloudSyncActions on AppController {
         },
         onProgress: (value) {
           cloudSyncProgress = value;
-          _notify();
         },
         onDeletionPolicyLoaded: (enabled) {
           cloudDeletionPolicyEnabled = enabled;
@@ -292,7 +291,11 @@ extension AppControllerCloudSyncActions on AppController {
         failed: result.failures.length,
       );
       _notify();
+      // A manual scan may predate the sync's downloads and deletions. Wait for
+      // it, then take a fresh directory snapshot for this completed sync.
+      await _libraryScanOperation;
       await scanCurrentDownloadDirectory();
+      scannedLibrary = true;
       await _applySyncedSongMetadata(result.metadataByPath);
       final restoredTimes = result.downloadedAtByPath.map(
         (path, time) => MapEntry(_trackPathKey(path), time),
@@ -334,6 +337,19 @@ extension AppControllerCloudSyncActions on AppController {
       _notify();
       return null;
     } finally {
+      try {
+        if (!scannedLibrary && !_isDisposed) {
+          await _libraryScanOperation;
+          await scanCurrentDownloadDirectory();
+        }
+      } catch (error, stackTrace) {
+        AppLog.instance.error(
+          'library',
+          '同步后刷新本地曲库失败',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
       _cloudSyncOwnsFiles = false;
       isCloudSyncing = false;
       _notify();
@@ -345,22 +361,11 @@ extension AppControllerCloudSyncActions on AppController {
   Future<void> _applyCloudDeletedTracks(Set<String> paths) async {
     if (paths.isEmpty) return;
     final keys = paths.map(_trackPathKey).toSet();
-    final affected = downloadedTracks
-        .where((track) => keys.contains(_trackPathKey(track.path)))
-        .toList();
-    if (affected.isEmpty) return;
-    var queueChanged = false;
-    for (final track in affected) {
-      if (currentItem?.localPath != null &&
-          _trackPathKey(currentItem!.localPath!) == _trackPathKey(track.path)) {
-        await _stopPlayback();
-      }
-      queueChanged =
-          _removeDeletedTrackFromQueue(track.path).changed || queueChanged;
-      _removeDownloadedRecordInMemory(track);
-    }
-    await _persistDeletedTrackState(saveQueue: queueChanged);
-    _notify();
+    await _removeUnavailableDownloadedTracks(
+      downloadedTracks.where(
+        (track) => keys.contains(_trackPathKey(track.path)),
+      ),
+    );
   }
 
   String _describeCloudRequestError(DioException error) {

@@ -59,7 +59,7 @@ extension AppControllerSearchActions on AppController {
     }
     final currentIndex = sources.indexWhere((item) => item.name == source.name);
     source = sources[(currentIndex + 1) % sources.length];
-    _lastSourceRequestAt = null;
+    _sourceRequests.resetDelay();
     searchResults = [];
     searchError = null;
     globalMessage = '已切换到 ${source.name}';
@@ -71,64 +71,11 @@ extension AppControllerSearchActions on AppController {
     }
   }
 
-  Future<void> search(String value) async {
-    if (_isDisposed) {
-      return;
-    }
-    final generation = ++_sourceSearchGeneration;
+  Future<void> search(String value) {
+    if (_isDisposed) return Future<void>.value();
     final keyword = value.trim();
-    searchQuery = keyword;
-    if (keyword.isEmpty) {
-      searchResults = [];
-      searchError = null;
-      isSearching = false;
-      _notify();
-      return;
-    }
-
-    _rememberSourceSearch(keyword);
-    final requestSource = source;
-    isSearching = true;
-    searchError = null;
-    _notify();
-
-    try {
-      final results = await _runSourceRequest(
-        '搜索',
-        () => requestSource.search(keyword),
-        shouldRun: () => _canCommitSourceSearch(generation),
-      );
-      if (!_canCommitSourceSearch(generation)) {
-        return;
-      }
-      searchResults = results;
-      if (results.isEmpty) {
-        searchError = '没有找到公开可解析的搜索结果。';
-      }
-    } on _ObsoleteSourceRequest {
-      return;
-    } on MusicSourceException catch (error) {
-      if (!_canCommitSourceSearch(generation)) {
-        return;
-      }
-      searchResults = [];
-      searchError = error.message;
-    } catch (error) {
-      if (!_canCommitSourceSearch(generation)) {
-        return;
-      }
-      searchResults = [];
-      searchError = '搜索失败：${_friendlyUnexpectedError(error)}';
-    } finally {
-      if (_canCommitSourceSearch(generation)) {
-        isSearching = false;
-        _notify();
-      }
-    }
-  }
-
-  bool _canCommitSourceSearch(int generation) {
-    return !_isDisposed && generation == _sourceSearchGeneration;
+    if (keyword.isNotEmpty) _rememberSourceSearch(keyword);
+    return onlineSearch.search(source, value);
   }
 
   void _rememberSourceSearch(String keyword) {
@@ -200,7 +147,7 @@ extension AppControllerSearchActions on AppController {
           playbackGeneration: generation,
         ),
       );
-    } on _ObsoleteSourceRequest {
+    } on ObsoleteSourceRequest {
       return;
     } on MusicSourceException catch (error) {
       if (!_canCommitPlaybackRequest(generation)) return;
@@ -236,7 +183,7 @@ extension AppControllerSearchActions on AppController {
       globalMessage = started
           ? '已开始播放：${item.title}'
           : '已加入下一首播放：${item.title}';
-    } on _ObsoleteSourceRequest {
+    } on ObsoleteSourceRequest {
       return;
     } on MusicSourceException catch (error) {
       if (!_canCommitQueueNext(generation)) return;

@@ -9,6 +9,24 @@ import 'id3_lyrics_embedder.dart';
 import 'app_log.dart';
 import 'models.dart';
 import 'pending_album_match.dart';
+import 'storage_json_codec.dart';
+
+class StorageRecoveryException implements Exception {
+  const StorageRecoveryException({
+    required this.path,
+    this.backupAvailable = false,
+  });
+
+  final String path;
+  final bool backupAvailable;
+
+  String get message => backupAvailable
+      ? '找到了数据备份，但无法恢复主文件。已保留原文件并暂停保存，请检查存储权限后重试。\n$path'
+      : '应用数据及其备份无法读取。已保留原文件并暂停保存，请恢复以下文件或其备份后重试。\n$path';
+
+  @override
+  String toString() => message;
+}
 
 class StorageService {
   StorageService({Directory? supportDirectory})
@@ -23,40 +41,26 @@ class StorageService {
 
   final Directory? _supportDirectoryOverride;
   final Map<String, Future<void>> _writeQueues = {};
+  final Map<String, StorageRecoveryException> _blockedJsonFiles = {};
+  static const _jsonCodec = StorageJsonCodec();
 
   Future<AppSettings> loadSettings() async {
-    final file = await _supportFile(_settingsFileName);
-    if (!await file.exists() && !await _backupFile(file).exists()) {
-      return AppSettings(downloadDirectory: await defaultDownloadDirectory());
-    }
-
     final settings = await _loadJsonWithBackup(
       _settingsFileName,
-      (json) => AppSettings.fromJson(Map<String, dynamic>.from(json as Map)),
+      _decodeSettings,
     );
     return settings ??
         AppSettings(downloadDirectory: await defaultDownloadDirectory());
   }
 
   Future<void> saveSettings(AppSettings settings) async {
-    await _saveJson(_settingsFileName, settings.toJson());
+    await _saveJson(_settingsFileName, settings);
   }
 
   Future<List<DownloadedTrack>> loadDownloadedTracks() async {
-    final file = await _supportFile(_libraryFileName);
-    if (!await file.exists() && !await _backupFile(file).exists()) {
-      return const [];
-    }
-
     return await _loadJsonWithBackup(
           _libraryFileName,
-          (json) => (json as List<dynamic>)
-              .whereType<Map>()
-              .map(
-                (item) =>
-                    DownloadedTrack.fromJson(Map<String, dynamic>.from(item)),
-              )
-              .toList(),
+          _decodeDownloadedTracks,
         ) ??
         const [];
   }
@@ -64,44 +68,54 @@ class StorageService {
   Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
     await _saveJson(
       _libraryFileName,
-      tracks.map((track) => track.toJson()).toList(),
+      List<DownloadedTrack>.unmodifiable(tracks),
+      entries: tracks.length,
+      textCodeUnits: tracks.fold<int>(
+        0,
+        (count, track) =>
+            count +
+            (track.metadataLyrics?.length ?? 0) +
+            (track.syncedMetadata?.values.lyrics.length ?? 0),
+      ),
     );
   }
 
   Future<MyMusicData> loadMyMusic() async {
-    final file = await _supportFile(_myMusicFileName);
-    if (!await file.exists() && !await _backupFile(file).exists()) {
-      return const MyMusicData();
-    }
-
-    return await _loadJsonWithBackup(
-          _myMusicFileName,
-          (json) =>
-              MyMusicData.fromJson(Map<String, dynamic>.from(json as Map)),
-        ) ??
+    return await _loadJsonWithBackup(_myMusicFileName, _decodeMyMusic) ??
         const MyMusicData();
   }
 
   Future<void> saveMyMusic(MyMusicData data) async {
-    await _saveJson(_myMusicFileName, data.toJson());
+    final snapshot = MyMusicData(
+      favoriteTrackPaths: List<String>.unmodifiable(data.favoriteTrackPaths),
+      playlists: [
+        for (final playlist in data.playlists)
+          playlist.copyWith(
+            trackPaths: List<String>.unmodifiable(playlist.trackPaths),
+            pendingTracks: List.unmodifiable(playlist.pendingTracks),
+          ),
+      ],
+      recentPlaybacks: List<RecentPlayback>.unmodifiable(data.recentPlaybacks),
+    );
+    await _saveJson(
+      _myMusicFileName,
+      snapshot,
+      entries:
+          data.favoriteTrackPaths.length +
+          data.recentPlaybacks.length +
+          data.playlists.fold<int>(
+            0,
+            (count, playlist) =>
+                count +
+                1 +
+                playlist.trackPaths.length +
+                playlist.pendingTracks.length,
+          ),
+    );
   }
 
   Future<SavedPlayerQueue> loadPlayerQueue() async {
-    final file = await _supportFile(_queueFileName);
-    if (!await file.exists() && !await _backupFile(file).exists()) {
-      return const SavedPlayerQueue(items: [], currentIndex: -1);
-    }
-
-    return await _loadJsonWithBackup(_queueFileName, (json) {
-          final saved = SavedPlayerQueue.fromJson(
-            Map<String, dynamic>.from(json as Map),
-          );
-          return SavedPlayerQueue(
-            items: saved.items,
-            currentIndex: saved.normalizedCurrentIndex,
-            shuffleEnabled: saved.shuffleEnabled,
-          );
-        }) ??
+    return await _loadJsonWithBackup(_queueFileName, _decodePlayerQueue) ??
         const SavedPlayerQueue(items: [], currentIndex: -1);
   }
 
@@ -111,29 +125,27 @@ class StorageService {
     required bool shuffleEnabled,
   }) async {
     final saved = SavedPlayerQueue(
-      items: items,
+      items: List<PlayerItem>.unmodifiable(items),
       currentIndex: items.isEmpty
           ? -1
           : currentIndex.clamp(0, items.length - 1).toInt(),
       shuffleEnabled: shuffleEnabled,
     );
-    await _saveJson(_queueFileName, saved.toJson());
+    await _saveJson(
+      _queueFileName,
+      saved,
+      entries: items.length,
+      textCodeUnits: items.fold<int>(
+        0,
+        (count, item) => count + (item.lyrics?.length ?? 0),
+      ),
+    );
   }
 
   Future<List<DownloadTask>> loadDownloadTasks() async {
-    final file = await _supportFile(_downloadTasksFileName);
-    if (!await file.exists() && !await _backupFile(file).exists()) {
-      return const [];
-    }
     return await _loadJsonWithBackup(
           _downloadTasksFileName,
-          (json) => (json as List<dynamic>)
-              .whereType<Map>()
-              .map(
-                (item) =>
-                    DownloadTask.fromJson(Map<String, dynamic>.from(item)),
-              )
-              .toList(),
+          _decodeDownloadTasks,
         ) ??
         const [];
   }
@@ -141,30 +153,19 @@ class StorageService {
   Future<void> saveDownloadTasks(List<DownloadTask> tasks) async {
     await _saveJson(
       _downloadTasksFileName,
-      tasks.map((task) => task.toJson()).toList(),
+      List<DownloadTask>.unmodifiable(tasks),
+      entries: tasks.length,
+      textCodeUnits: tasks.fold<int>(
+        0,
+        (count, task) => count + (task.lyrics?.length ?? 0),
+      ),
     );
   }
 
   Future<List<PendingAlbumMatch>> loadPendingAlbumMatches() async {
-    final file = await _supportFile(_pendingAlbumMatchesFileName);
-    if (!await file.exists() && !await _backupFile(file).exists()) {
-      return const [];
-    }
     return await _loadJsonWithBackup(
           _pendingAlbumMatchesFileName,
-          (json) => (json as List<dynamic>)
-              .whereType<Map>()
-              .map(
-                (item) =>
-                    PendingAlbumMatch.fromJson(Map<String, dynamic>.from(item)),
-              )
-              .where(
-                (item) =>
-                    item.trackPath.trim().isNotEmpty &&
-                    item.title.trim().isNotEmpty &&
-                    item.candidates.isNotEmpty,
-              )
-              .toList(),
+          _decodePendingAlbumMatches,
         ) ??
         const [];
   }
@@ -172,7 +173,11 @@ class StorageService {
   Future<void> savePendingAlbumMatches(List<PendingAlbumMatch> matches) async {
     await _saveJson(
       _pendingAlbumMatchesFileName,
-      matches.map((match) => match.toJson()).toList(),
+      List<PendingAlbumMatch>.unmodifiable(matches),
+      entries: matches.fold<int>(
+        0,
+        (count, match) => count + 1 + match.candidates.length,
+      ),
     );
   }
 
@@ -351,9 +356,21 @@ class StorageService {
     T Function(Object? json) decode,
   ) async {
     final file = await _supportFile(fileName);
-    if (await file.exists()) {
+    final backup = _backupFile(file);
+    final primaryExists = await file.exists();
+    final backupExists = await backup.exists();
+    if (!primaryExists && !backupExists) {
+      _blockedJsonFiles.remove(fileName);
+      return null;
+    }
+    if (primaryExists) {
       try {
-        return decode(jsonDecode(await file.readAsString()));
+        final value = await _jsonCodec.decode(
+          await file.readAsString(),
+          decode,
+        );
+        _blockedJsonFiles.remove(fileName);
+        return value;
       } catch (error, stackTrace) {
         AppLog.instance.warning(
           'storage',
@@ -364,16 +381,12 @@ class StorageService {
       }
     }
 
-    final backup = _backupFile(file);
-    if (!await backup.exists()) {
-      return null;
-    }
+    late final String content;
+    late final T value;
     try {
-      final content = await backup.readAsString();
-      final value = decode(jsonDecode(content));
-      await _restorePrimaryFromBackup(file, content);
-      AppLog.instance.info('storage', '$fileName 已从备份恢复');
-      return value;
+      if (!backupExists) throw const FormatException('数据备份不存在');
+      content = await backup.readAsString();
+      value = await _jsonCodec.decode(content, decode);
     } catch (error, stackTrace) {
       AppLog.instance.error(
         'storage',
@@ -381,12 +394,37 @@ class StorageService {
         error: error,
         stackTrace: stackTrace,
       );
-      return null;
+      final failure = StorageRecoveryException(path: file.path);
+      _blockedJsonFiles[fileName] = failure;
+      throw failure;
     }
+    try {
+      await _restorePrimaryFromBackup(file, content);
+    } catch (error, stackTrace) {
+      AppLog.instance.error(
+        'storage',
+        '$fileName 备份可读，但恢复主文件失败',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      final failure = StorageRecoveryException(
+        path: file.path,
+        backupAvailable: true,
+      );
+      _blockedJsonFiles[fileName] = failure;
+      throw failure;
+    }
+    _blockedJsonFiles.remove(fileName);
+    AppLog.instance.info('storage', '$fileName 已从备份恢复，损坏主文件已另存');
+    return value;
   }
 
-  Future<void> _saveJson(String fileName, Object? value) async {
-    final content = jsonEncode(value);
+  Future<void> _saveJson(
+    String fileName,
+    Object? value, {
+    int entries = 0,
+    int textCodeUnits = 0,
+  }) async {
     final previous = _writeQueues[fileName];
     late final Future<void> operation;
     operation = () async {
@@ -397,6 +435,14 @@ class StorageService {
           // A failed generation must not block a newer save.
         }
       }
+      _ensureJsonWritesAllowed();
+      final content = await _jsonCodec.encode(
+        value,
+        entries: entries,
+        textCodeUnits: textCodeUnits,
+      );
+      // A parallel bootstrap read may discover corruption during encoding.
+      _ensureJsonWritesAllowed();
       final file = await _supportFile(fileName);
       await _atomicWrite(file, content);
     }();
@@ -409,6 +455,10 @@ class StorageService {
         _writeQueues.remove(fileName);
       }
     }
+  }
+
+  void _ensureJsonWritesAllowed() {
+    if (_blockedJsonFiles.isNotEmpty) throw _blockedJsonFiles.values.first;
   }
 
   Future<void> flushPendingWrites() async {
@@ -475,12 +525,22 @@ class StorageService {
     final temporary = File(
       '${file.path}.restore-${DateTime.now().microsecondsSinceEpoch}',
     );
-    await temporary.writeAsString(content, flush: true);
+    File? preserved;
     try {
+      await temporary.writeAsString(content, flush: true);
       if (await file.exists()) {
-        await file.delete();
+        final corrupt = File(
+          '${file.path}.corrupt-${DateTime.now().microsecondsSinceEpoch}',
+        );
+        await file.rename(corrupt.path);
+        preserved = corrupt;
       }
       await temporary.rename(file.path);
+    } catch (_) {
+      if (preserved != null && !await file.exists()) {
+        await preserved.rename(file.path);
+      }
+      rethrow;
     } finally {
       if (await temporary.exists()) {
         await temporary.delete();
@@ -495,8 +555,7 @@ class StorageService {
       return false;
     }
     try {
-      jsonDecode(await file.readAsString());
-      return true;
+      return await _jsonCodec.decode(await file.readAsString(), _acceptJson);
     } catch (_) {
       return false;
     }
@@ -510,3 +569,62 @@ class StorageService {
     };
   }
 }
+
+bool _acceptJson(Object? json) => true;
+
+AppSettings _decodeSettings(Object? json) =>
+    AppSettings.fromJson(Map<String, dynamic>.from(json as Map));
+
+List<DownloadedTrack> _decodeDownloadedTracks(Object? json) =>
+    (json as List<dynamic>)
+        .map(
+          (item) =>
+              DownloadedTrack.fromJson(Map<String, dynamic>.from(item as Map)),
+        )
+        .toList();
+
+MyMusicData _decodeMyMusic(Object? json) {
+  final data = Map<String, dynamic>.from(json as Map);
+  _validateMapRecords(data['playlists']);
+  _validateMapRecords(data['recentPlaybacks']);
+  return MyMusicData.fromJson(data);
+}
+
+SavedPlayerQueue _decodePlayerQueue(Object? json) {
+  final data = Map<String, dynamic>.from(json as Map);
+  _validateMapRecords(data['items']);
+  final saved = SavedPlayerQueue.fromJson(data);
+  return SavedPlayerQueue(
+    items: saved.items,
+    currentIndex: saved.normalizedCurrentIndex,
+    shuffleEnabled: saved.shuffleEnabled,
+  );
+}
+
+void _validateMapRecords(Object? records) {
+  if (records == null) return;
+  if ((records as List).any((record) => record is! Map)) {
+    throw const FormatException('数据记录格式错误');
+  }
+}
+
+List<DownloadTask> _decodeDownloadTasks(Object? json) => (json as List<dynamic>)
+    .map(
+      (item) => DownloadTask.fromJson(Map<String, dynamic>.from(item as Map)),
+    )
+    .toList();
+
+List<PendingAlbumMatch> _decodePendingAlbumMatches(Object? json) =>
+    (json as List<dynamic>)
+        .map(
+          (item) => PendingAlbumMatch.fromJson(
+            Map<String, dynamic>.from(item as Map),
+          ),
+        )
+        .where(
+          (item) =>
+              item.trackPath.trim().isNotEmpty &&
+              item.title.trim().isNotEmpty &&
+              item.candidates.isNotEmpty,
+        )
+        .toList();

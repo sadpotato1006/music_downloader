@@ -8,6 +8,263 @@ import 'package:qingting/pending_album_match.dart';
 import 'package:qingting/storage_service.dart';
 
 void main() {
+  for (final fileName in [
+    'settings.json',
+    'downloads.json',
+    'my_music.json',
+    'queue.json',
+    'download_tasks.json',
+    'pending_album_matches.json',
+  ]) {
+    test(
+      '$fileName corruption preserves both generations and blocks writes until repaired',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'qingting-corrupt-storage-',
+        );
+        final primary = File('${directory.path}/$fileName');
+        final backup = File('${primary.path}.bak');
+        final storage = StorageService(supportDirectory: directory);
+        Future<Object> load() => switch (fileName) {
+          'settings.json' => storage.loadSettings(),
+          'downloads.json' => storage.loadDownloadedTracks(),
+          'my_music.json' => storage.loadMyMusic(),
+          'queue.json' => storage.loadPlayerQueue(),
+          'download_tasks.json' => storage.loadDownloadTasks(),
+          _ => storage.loadPendingAlbumMatches(),
+        };
+        final repaired = switch (fileName) {
+          'settings.json' => '{"downloadDirectory":"music"}',
+          'my_music.json' => '{}',
+          'queue.json' => '{"items":[],"currentIndex":-1}',
+          _ => '[]',
+        };
+        try {
+          await primary.writeAsString('{broken-primary');
+          await backup.writeAsString('{broken-backup');
+          await expectLater(load(), throwsA(isA<StorageRecoveryException>()));
+          await expectLater(
+            storage.saveDownloadedTracks([]),
+            throwsA(isA<StorageRecoveryException>()),
+          );
+          await expectLater(
+            storage.saveDownloadTasks([]),
+            throwsA(isA<StorageRecoveryException>()),
+          );
+          await expectLater(
+            storage.saveMyMusic(const MyMusicData()),
+            throwsA(isA<StorageRecoveryException>()),
+          );
+          expect(await primary.readAsString(), '{broken-primary');
+          expect(await backup.readAsString(), '{broken-backup');
+          await primary.writeAsString(repaired);
+          await load();
+          await storage.saveMyMusic(
+            const MyMusicData(favoriteTrackPaths: ['song.mp3']),
+          );
+          expect((await storage.loadMyMusic()).favoriteTrackPaths, [
+            'song.mp3',
+          ]);
+        } finally {
+          await directory.delete(recursive: true);
+        }
+      },
+    );
+  }
+
+  test(
+    'missing documents use first-run defaults, a corrupt primary without backup fails',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-first-run-storage-',
+      );
+      final storage = StorageService(supportDirectory: directory);
+      try {
+        expect(await storage.loadDownloadedTracks(), isEmpty);
+        expect((await storage.loadMyMusic()).favoriteTrackPaths, isEmpty);
+        expect((await storage.loadPlayerQueue()).items, isEmpty);
+        expect(await storage.loadDownloadTasks(), isEmpty);
+        expect(await storage.loadPendingAlbumMatches(), isEmpty);
+        final file = File('${directory.path}/downloads.json');
+        await file.writeAsString('{broken');
+        await expectLater(
+          storage.loadDownloadedTracks(),
+          throwsA(isA<StorageRecoveryException>()),
+        );
+        expect(await file.readAsString(), '{broken');
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test('invalid record shapes cannot silently reset the library', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'qingting-schema-storage-',
+    );
+    final storage = StorageService(supportDirectory: directory);
+    try {
+      await File('${directory.path}/downloads.json').writeAsString('[42]');
+      await expectLater(
+        storage.loadDownloadedTracks(),
+        throwsA(isA<StorageRecoveryException>()),
+      );
+      await File(
+        '${directory.path}/my_music.json',
+      ).writeAsString('{"playlists":[42]}');
+      await expectLater(
+        storage.loadMyMusic(),
+        throwsA(isA<StorageRecoveryException>()),
+      );
+      await File(
+        '${directory.path}/queue.json',
+      ).writeAsString('{"items":[42]}');
+      await expectLater(
+        storage.loadPlayerQueue(),
+        throwsA(isA<StorageRecoveryException>()),
+      );
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test(
+    'a readable backup remains intact when restoring the primary fails',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-restore-failure-',
+      );
+      final blocker = Directory('${directory.path}/downloads.json');
+      final backup = File('${blocker.path}.bak');
+      final storage = StorageService(supportDirectory: directory);
+      try {
+        await blocker.create();
+        await backup.writeAsString('[]');
+        await expectLater(
+          storage.loadDownloadedTracks(),
+          throwsA(
+            isA<StorageRecoveryException>().having(
+              (e) => e.backupAvailable,
+              'readable backup',
+              true,
+            ),
+          ),
+        );
+        expect(await backup.readAsString(), '[]');
+        await expectLater(
+          storage.saveDownloadedTracks([]),
+          throwsA(isA<StorageRecoveryException>()),
+        );
+        await blocker.delete();
+        expect(await storage.loadDownloadedTracks(), isEmpty);
+        await storage.saveDownloadedTracks([]);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    'large asynchronous saves preserve snapshots order and immediate flush',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-large-storage-',
+      );
+      final storage = StorageService(supportDirectory: directory);
+      final tracks = List.generate(
+        600,
+        (i) => DownloadedTrack(
+          id: 'song-$i',
+          title: '歌曲$i',
+          artist: '歌手',
+          path: 'song-$i.mp3',
+          format: 'mp3',
+          downloadedAt: DateTime(2026, 10, 5),
+          sourceUrl: '',
+          metadataLyrics: '[00:01]中文歌词\n',
+        ),
+      );
+      try {
+        final firstSave = storage.saveDownloadedTracks(tracks);
+        tracks[0] = tracks[0].copyWith(title: '新标题');
+        final lastSave = storage.saveDownloadedTracks(tracks);
+        tracks.clear();
+        await storage.flushPendingWrites();
+        await Future.wait([firstSave, lastSave]);
+        final restored = await storage.loadDownloadedTracks();
+        expect(restored, hasLength(600));
+        expect(restored.first.title, '新标题');
+        expect(restored.last.id, 'song-599');
+        expect(restored.last.metadataLyrics, '[00:01]中文歌词\n');
+        final backup =
+            jsonDecode(
+                  await File(
+                    '${directory.path}/downloads.json.bak',
+                  ).readAsString(),
+                )
+                as List;
+        expect(backup.first['title'], '歌曲0');
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    'large queue and playlist saves freeze their nested snapshots',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'qingting-large-music-storage-',
+      );
+      final storage = StorageService(supportDirectory: directory);
+      final items = List.generate(
+        600,
+        (i) => PlayerItem(
+          id: 'song-$i',
+          title: '歌曲$i',
+          artist: '歌手',
+          uri: 'file:///song-$i.mp3',
+          lyrics: '[00:01]中文歌词\n',
+        ),
+      );
+      final paths = List.generate(600, (i) => 'song-$i.mp3');
+      try {
+        final queueSave = storage.savePlayerQueue(
+          items,
+          599,
+          shuffleEnabled: true,
+        );
+        final musicSave = storage.saveMyMusic(
+          MyMusicData(
+            favoriteTrackPaths: paths,
+            playlists: [
+              MusicPlaylist(
+                id: 'playlist',
+                name: '歌单',
+                trackPaths: paths,
+                createdAt: DateTime(2026, 10, 5),
+              ),
+            ],
+          ),
+        );
+        items.clear();
+        paths.clear();
+        await storage.flushPendingWrites();
+        await Future.wait([queueSave, musicSave]);
+        final queue = await storage.loadPlayerQueue();
+        final music = await storage.loadMyMusic();
+        expect(queue.items, hasLength(600));
+        expect(queue.items.last.lyrics, '[00:01]中文歌词\n');
+        expect(queue.currentIndex, 599);
+        expect(queue.shuffleEnabled, isTrue);
+        expect(music.favoriteTrackPaths, hasLength(600));
+        expect(music.playlists.single.trackPaths.last, 'song-599.mp3');
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
   test('JSON is compact and preserves Unicode and multiline text', () async {
     final directory = await Directory.systemTemp.createTemp(
       'qingting-compact-json-',
@@ -191,6 +448,14 @@ void main() {
         expect(myMusic.favoriteTrackPaths, ['first.mp3']);
         expect(queue.items.single.id, 'first');
         expect(queue.shuffleEnabled, isFalse);
+        final preserved = await directory
+            .list()
+            .where((file) => file.path.contains('.corrupt-'))
+            .toList();
+        expect(preserved, hasLength(4));
+        for (final file in preserved.cast<File>()) {
+          expect(await file.readAsString(), '{broken');
+        }
       } finally {
         await directory.delete(recursive: true);
       }

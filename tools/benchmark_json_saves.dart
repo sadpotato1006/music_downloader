@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:qingting/coalescing_write_queue.dart';
 import 'package:qingting/models.dart';
+import 'package:qingting/storage_json_codec.dart';
 
 // Synthetic, in-memory benchmark of snapshot construction and JSON encoding.
 // Does not read or write the user's library, and does not measure disk latency.
@@ -59,6 +60,23 @@ Future<void> main() async {
     }
     await Future.wait(saves);
     optimizedWatch.stop();
+    const codec = StorageJsonCodec();
+    final backgroundEncodeWatch = Stopwatch()..start();
+    final encoded = codec.encode(tracks, entries: count);
+    final encodeCallUs = backgroundEncodeWatch.elapsedMicroseconds;
+    final backgroundContent = await encoded;
+    backgroundEncodeWatch.stop();
+    if (backgroundContent != jsonEncode(values)) {
+      throw StateError('Background encoding changed the saved snapshot');
+    }
+    final backgroundDecodeWatch = Stopwatch()..start();
+    final decoded = codec.decode(backgroundContent, _decodeTracks);
+    final decodeCallUs = backgroundDecodeWatch.elapsedMicroseconds;
+    final restored = await decoded;
+    backgroundDecodeWatch.stop();
+    if (restored.length != count || restored.last.id != tracks.last.id) {
+      throw StateError('Background decoding changed the saved snapshot');
+    }
     stdout.writeln(
       jsonEncode({
         'tracks': count,
@@ -69,7 +87,18 @@ Future<void> main() async {
         'after_encodes': compactEncodes,
         'before_serialization_us': baselineWatch.elapsedMicroseconds,
         'after_serialization_us': optimizedWatch.elapsedMicroseconds,
+        'codec_encode_call_us': encodeCallUs,
+        'codec_encode_total_us': backgroundEncodeWatch.elapsedMicroseconds,
+        'codec_decode_call_us': decodeCallUs,
+        'codec_decode_total_us': backgroundDecodeWatch.elapsedMicroseconds,
       }),
     );
   }
 }
+
+List<DownloadedTrack> _decodeTracks(Object? json) => (json as List)
+    .map(
+      (value) =>
+          DownloadedTrack.fromJson(Map<String, dynamic>.from(value as Map)),
+    )
+    .toList();

@@ -1,5 +1,6 @@
 param(
-  [string]$Payload = "QingTingPayload.zip"
+  [string]$Payload = "QingTingPayload.zip",
+  [string]$Version = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,10 +13,20 @@ function Join-Chars([int[]]$Codes) {
 
 $AppName = Join-Chars @(0x9752, 0x542C)
 $AppId = "QingTing"
-$Version = "1.6.0"
 $Publisher = "Pobb"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PayloadPath = Join-Path $ScriptDir $Payload
+if (-not $Version) {
+  $versionSpec = Join-Path $ScriptDir '..\..\pubspec.yaml'
+  if (Test-Path -LiteralPath $versionSpec) {
+    $Version = [regex]::Match((Get-Content -LiteralPath $versionSpec -Raw), '(?m)^version:\s*(\d+\.\d+\.\d+)\+\d+\s*$').Groups[1].Value
+  } else {
+    $Version = [regex]::Match([IO.Path]::GetFileName($Payload), '^QingTing-v(\d+\.\d+\.\d+)(?:\+|-)').Groups[1].Value
+  }
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+  throw 'Cannot determine the payload version. Specify -Version or use the EXE installer.'
+}
 $DefaultInstallDir = Join-Path $env:LOCALAPPDATA "Programs\QingTing"
 
 if (!(Test-Path -LiteralPath $PayloadPath)) {

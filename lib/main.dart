@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/cupertino.dart' hide RepeatMode;
-import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/foundation.dart' show listEquals, compute;
 import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -17,17 +17,26 @@ import 'anyshare_client.dart';
 import 'app_info.dart';
 import 'app_controller.dart';
 import 'app_log.dart';
+import 'cloud_sync_service.dart' show CloudSyncProgress;
 import 'desktop_lyrics_service.dart';
 import 'gequbao_source.dart';
 import 'lyric_parser.dart';
 import 'linux_desktop_service.dart';
 import 'models.dart';
 import 'my_free_mp3_source.dart';
+import 'xiagebao_source.dart';
 import 'pending_album_match.dart';
+import 'playlist_file_service.dart';
+import 'playlist_transfer_service.dart';
+import 'storage_json_codec.dart';
+import 'app_update_service.dart';
+import 'windows_update_controller.dart';
+import 'windows_update_bridge.dart';
 
 part 'ui/search_download.dart';
 part 'ui/library.dart';
 part 'ui/library_batch.dart';
+part 'ui/playlist_transfer.dart';
 part 'ui/lyrics_settings.dart';
 part 'ui/settings.dart';
 part 'ui/linux_desktop_settings.dart';
@@ -35,6 +44,7 @@ part 'ui/cloud_sync.dart';
 part 'ui/playback.dart';
 part 'ui/dialogs.dart';
 part 'ui/diagnostics.dart';
+part 'ui/software_update.dart';
 
 const _accent = Color(0xFF8FD9A8);
 const _appLifecycleChannel = MethodChannel('qingting/app_lifecycle');
@@ -46,7 +56,9 @@ const _line = Color(0xFFE5EFE8);
 Map<String, String> _networkImageHeadersFor(String url) {
   final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
   return {
-    'Referer': host.contains('myfreemp3.ink')
+    'Referer': host == 'xiagebao.com' || host.endsWith('.xiagebao.com')
+        ? 'https://www.xiagebao.com/'
+        : host == 'myfreemp3.ink' || host.endsWith('.myfreemp3.ink')
         ? 'https://myfreemp3.ink/'
         : 'https://www.gequbao.com/',
     'User-Agent': appUserAgent,
@@ -119,10 +131,36 @@ class QingTingApp extends StatefulWidget {
 class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
   late final gequbaoSource = GequbaoSource();
   late final myFreeMp3Source = MyFreeMp3Source();
+  late final xiagebaoSource = XiagebaoSource();
   late final AppController controller = AppController(
     source: gequbaoSource,
-    sources: [gequbaoSource, myFreeMp3Source],
+    sources: [gequbaoSource, myFreeMp3Source, xiagebaoSource],
+    updates: Platform.isWindows ? WindowsUpdateController() : null,
   );
+  Timer? _updateCheckTimer;
+
+  Future<void> _bootstrap() async {
+    await controller.bootstrap();
+    if (!mounted || !controller.isReady) return;
+    await WidgetsBinding.instance.endOfFrame;
+    try {
+      await WindowsUpdateInstaller.acknowledgeStartup();
+    } catch (error, stack) {
+      AppLog.instance.error(
+        'update',
+        '确认新版启动失败',
+        error: error,
+        stackTrace: stack,
+      );
+    }
+    if (!mounted || controller.updates == null) return;
+    controller.updates!.automaticCheckEnabled =
+        controller.settings!.checkUpdatesOnStartup;
+    _updateCheckTimer?.cancel();
+    _updateCheckTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) unawaited(controller.updates!.check(automatic: true));
+    });
+  }
 
   @override
   void initState() {
@@ -131,7 +169,7 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
     if (Platform.isWindows || Platform.isLinux) {
       _appLifecycleChannel.setMethodCallHandler(_handleLifecycleMethod);
     }
-    unawaited(controller.bootstrap());
+    unawaited(_bootstrap());
   }
 
   @override
@@ -152,16 +190,14 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
     if (call.method != 'prepareToExit') {
       throw MissingPluginException('Unknown lifecycle method: ${call.method}');
     }
-    if (Platform.isLinux) {
-      await controller.prepareForExit();
-    } else {
-      await controller.flushPendingWrites();
-    }
+    await controller.prepareForExit();
     return true;
   }
 
   @override
   void dispose() {
+    _updateCheckTimer?.cancel();
+    xiagebaoSource.close();
     WidgetsBinding.instance.removeObserver(this);
     if (Platform.isWindows || Platform.isLinux) {
       _appLifecycleChannel.setMethodCallHandler(null);
@@ -216,7 +252,7 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
               AppBootstrapStatus.loading => const _StartupStatusPage(),
               AppBootstrapStatus.error => _StartupStatusPage(
                 error: controller.bootstrapError,
-                onRetry: () => unawaited(controller.bootstrap()),
+                onRetry: () => unawaited(_bootstrap()),
               ),
               AppBootstrapStatus.ready => child!,
             };
@@ -414,6 +450,8 @@ class _HomeShellState extends State<HomeShell> {
               ),
             ),
             _DesktopLyricsOverlay(controller: controller),
+            if (controller.updates != null)
+              _UpdateOverlay(controller: controller),
             if (_toastMessage != null)
               Positioned(
                 bottom:

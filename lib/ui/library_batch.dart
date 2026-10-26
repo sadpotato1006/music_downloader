@@ -219,6 +219,15 @@ class _LibraryTrackListState extends State<_LibraryTrackList> {
                         }),
                   child: Text(allSelected ? '取消全选' : '全选'),
                 ),
+                IconButton(
+                  tooltip: '加入歌单',
+                  onPressed: _disabled || _selectedKeys.isEmpty
+                      ? null
+                      : () => unawaited(
+                          _perform(_LibraryBatchAction.addToPlaylist),
+                        ),
+                  icon: const Icon(Icons.playlist_add),
+                ),
                 PopupMenuButton<_LibraryBatchAction>(
                   tooltip: '批量操作',
                   enabled: !_disabled && _selectedKeys.isNotEmpty,

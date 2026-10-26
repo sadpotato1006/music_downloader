@@ -18,6 +18,14 @@ abstract class DeferredDownloadMusicSource {
   Future<AudioCandidate> prepareDownloadCandidate(AudioCandidate candidate);
 }
 
+/// Resolve a rejected URL again without reusing a cached temporary link.
+abstract class RefreshableDownloadMusicSource {
+  Future<AudioCandidate> refreshDownloadCandidate(
+    TrackSearchResult track,
+    AudioCandidate previous,
+  );
+}
+
 class MusicSourceException implements Exception {
   const MusicSourceException(this.message);
 

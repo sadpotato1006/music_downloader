@@ -95,6 +95,64 @@ void main() {
     expect(controller.favoriteTracks, isEmpty);
   });
 
+  test('large collection batches preserve songs and report progress', () async {
+    storage.persist = false;
+    final large = [
+      for (var i = 0; i < 2000; i++)
+        tracks.first.copyWith(
+          id: 'large-$i',
+          path: '${root.path}/large-$i.mp3',
+        ),
+    ];
+    controller.downloadedTracks = large;
+    var notifications = 0;
+    controller.addListener(() => notifications++);
+    final stopwatch = Stopwatch()..start();
+    await controller.setFavoritesForTracks(large, favorite: true);
+    final favoriteMs = stopwatch.elapsedMilliseconds;
+    final favoriteNotifications = notifications;
+    expect(controller.favoriteTracks, large);
+    final playlist = await controller.createPlaylist('大歌单');
+    notifications = 0;
+    stopwatch.reset();
+    await controller.setTracksInPlaylist(playlist!.id, large, included: true);
+    expect(controller.tracksForPlaylist(playlist.id), large);
+    expect(controller.libraryBatchCompleted, large.length);
+    expect(favoriteNotifications, lessThan(50));
+    expect(notifications, lessThan(50));
+    if (const bool.fromEnvironment('BATCH_PROFILE')) {
+      // ignore: avoid_print
+      print(
+        '2000 songs: favorites=$favoriteMs ms/$favoriteNotifications notifications; '
+        'playlist=${stopwatch.elapsedMilliseconds} ms/$notifications notifications',
+      );
+    }
+  });
+
+  test(
+    'collection commit preserves other edits and does not revive removed records',
+    () async {
+      storage.persist = false;
+      var edited = false;
+      controller.addListener(() {
+        if (edited ||
+            !controller.isLibraryBatchRunning ||
+            controller.libraryBatchCompleted != 2) {
+          return;
+        }
+        edited = true;
+        controller.downloadedTracks = [tracks[1], tracks[2]];
+        controller.myMusic = MyMusicData(favoriteTrackPaths: [tracks[2].path]);
+      });
+      await controller.setFavoritesForTracks(tracks.take(2), favorite: true);
+      expect(edited, isTrue);
+      expect(controller.myMusic.favoriteTrackPaths, [
+        tracks[2].path,
+        tracks[1].path,
+      ]);
+    },
+  );
+
   test('bulk playlist add preserves order and supports removal', () async {
     final playlist = await controller.createPlaylist('通勤');
     await controller.setTrackInPlaylist(
@@ -345,7 +403,7 @@ void main() {
           await loader.load();
         }
         final icons = File(
-            '.tooling/flutter/bin/cache/artifacts/material_fonts/materialicons-regular.otf',
+          '.tooling/flutter/bin/cache/artifacts/material_fonts/materialicons-regular.otf',
         );
         if (await icons.exists()) {
           final loader = FontLoader('MaterialIcons')
@@ -390,7 +448,7 @@ void main() {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
     }
     expect(controller.isLibraryBatchRunning, isFalse);
   }

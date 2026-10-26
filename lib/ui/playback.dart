@@ -1,6 +1,6 @@
 part of '../main.dart';
 
-class MiniPlayer extends StatelessWidget {
+class MiniPlayer extends StatefulWidget {
   const MiniPlayer({
     super.key,
     required this.controller,
@@ -11,42 +11,89 @@ class MiniPlayer extends StatelessWidget {
   final bool isDesktop;
 
   @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<Duration>(
-      valueListenable: controller.player.positionListenable,
-      builder: (context, position, _) {
-        final item = controller.currentItem;
-        final lyricLines = parseLyricLines(item?.lyrics);
-        final currentLyricIndex = _currentLyricIndex(lyricLines, position);
+  State<MiniPlayer> createState() => _MiniPlayerState();
+}
 
-        return SafeArea(
-          top: false,
-          child: Container(
-            height: isDesktop ? 78 : 82,
-            padding: EdgeInsets.symmetric(
-              horizontal: isDesktop ? 24 : 14,
-              vertical: isDesktop ? 10 : 8,
-            ),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              border: Border(top: BorderSide(color: _line)),
-            ),
-            child: isDesktop
-                ? _DesktopMiniPlayerContent(
-                    controller: controller,
-                    item: item,
-                    lyricLines: lyricLines,
-                    currentLyricIndex: currentLyricIndex,
-                  )
-                : _MobileMiniPlayerContent(
-                    controller: controller,
-                    item: item,
-                    lyricLines: lyricLines,
-                    currentLyricIndex: currentLyricIndex,
-                  ),
-          ),
-        );
-      },
+class _MiniPlayerState extends State<MiniPlayer> {
+  List<LyricLine> _lines = const [];
+  int _highlightedIndex = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.player.positionListenable.addListener(_onPositionChanged);
+    _updateLyricState();
+  }
+
+  @override
+  void didUpdateWidget(MiniPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.player.positionListenable.removeListener(
+        _onPositionChanged,
+      );
+      widget.controller.player.positionListenable.addListener(
+        _onPositionChanged,
+      );
+    }
+    // The parent rebuilds on song, metadata and playback state changes.
+    _updateLyricState();
+  }
+
+  void _updateLyricState() {
+    _lines = parseLyricLines(widget.controller.currentItem?.lyrics);
+    _highlightedIndex = _currentLyricIndex(
+      _lines,
+      widget.controller.player.position,
+    );
+  }
+
+  void _onPositionChanged() {
+    final index = _currentLyricIndex(_lines, widget.controller.player.position);
+    if (index != _highlightedIndex) {
+      setState(() => _highlightedIndex = index);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.player.positionListenable.removeListener(
+      _onPositionChanged,
+    );
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = widget.controller;
+    final isDesktop = widget.isDesktop;
+    final item = controller.currentItem;
+    return SafeArea(
+      top: false,
+      child: Container(
+        height: isDesktop ? 78 : 82,
+        padding: EdgeInsets.symmetric(
+          horizontal: isDesktop ? 24 : 14,
+          vertical: isDesktop ? 10 : 8,
+        ),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: _line)),
+        ),
+        child: isDesktop
+            ? _DesktopMiniPlayerContent(
+                controller: controller,
+                item: item,
+                lyricLines: _lines,
+                currentLyricIndex: _highlightedIndex,
+              )
+            : _MobileMiniPlayerContent(
+                controller: controller,
+                item: item,
+                lyricLines: _lines,
+                currentLyricIndex: _highlightedIndex,
+              ),
+      ),
     );
   }
 }

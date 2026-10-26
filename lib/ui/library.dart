@@ -3,9 +3,14 @@ part of '../main.dart';
 enum _LibrarySection { all, favorites, playlists, recent }
 
 class LibraryPage extends StatefulWidget {
-  const LibraryPage({super.key, required this.controller});
+  const LibraryPage({
+    super.key,
+    required this.controller,
+    this.playlistFiles = const PlaylistFileService(),
+  });
 
   final AppController controller;
+  final PlaylistFileService playlistFiles;
 
   @override
   State<LibraryPage> createState() => _LibraryPageState();
@@ -14,8 +19,49 @@ class LibraryPage extends StatefulWidget {
 class _LibraryPageState extends State<LibraryPage> {
   AppController get controller => widget.controller;
   _LibrarySection section = _LibrarySection.all;
+  bool _transferring = false;
 
-  Future<void> _showLibrarySearch() async {
+  Future<void> _importPlaylists() async {
+    if (_transferring) return;
+    setState(() => _transferring = true);
+    try {
+      final content = await widget.playlistFiles.open();
+      if (content == null || !mounted) return;
+      final playlists =
+          content.length >= StorageJsonCodec.backgroundTextThreshold
+          ? await compute(PlaylistTransferService.decode, content)
+          : PlaylistTransferService.decode(content);
+      if (!mounted) return;
+      final requests = await _choosePlaylistImport(
+        context,
+        controller,
+        playlists,
+      );
+      if (requests == null || !mounted) return;
+      await controller.importPlaylists(requests);
+    } catch (error) {
+      controller.showMessage('导入歌单失败：$error');
+    } finally {
+      if (mounted) setState(() => _transferring = false);
+    }
+  }
+
+  Future<void> _exportAllPlaylists() async {
+    if (_transferring) return;
+    setState(() => _transferring = true);
+    try {
+      await _exportPlaylistFile(controller, files: widget.playlistFiles);
+    } finally {
+      if (mounted) setState(() => _transferring = false);
+    }
+  }
+
+  Future<void> _toggleLibrarySearch() async {
+    if (controller.libraryQuery.trim().isNotEmpty) {
+      controller.setLibraryQuery('');
+      setState(() {});
+      return;
+    }
     final value = await showModalBottomSheet<String>(
       context: context,
       useSafeArea: false,
@@ -76,6 +122,10 @@ class _LibraryPageState extends State<LibraryPage> {
             _PlaylistToolbar(
               count: controller.myMusic.playlists.length,
               onCreate: _createPlaylist,
+              onImport: _transferring ? null : _importPlaylists,
+              onExport: _transferring || controller.myMusic.playlists.isEmpty
+                  ? null
+                  : _exportAllPlaylists,
             ),
             const SizedBox(height: 8),
           ],
@@ -84,6 +134,7 @@ class _LibraryPageState extends State<LibraryPage> {
                 ? _PlaylistOverview(
                     controller: controller,
                     onCreate: _createPlaylist,
+                    playlistFiles: widget.playlistFiles,
                   )
                 : _LibraryTrackList(
                     key: ValueKey(section),
@@ -94,7 +145,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     toolbar: switch (section) {
                       _LibrarySection.all => _LibraryToolbar(
                         controller: controller,
-                        onSearch: _showLibrarySearch,
+                        onSearch: _toggleLibrarySearch,
                       ),
                       _LibrarySection.favorites => _LibraryCollectionToolbar(
                         controller: controller,
@@ -206,10 +257,17 @@ class _LibraryCollectionToolbar extends StatelessWidget {
 }
 
 class _PlaylistToolbar extends StatelessWidget {
-  const _PlaylistToolbar({required this.count, required this.onCreate});
+  const _PlaylistToolbar({
+    required this.count,
+    required this.onCreate,
+    required this.onImport,
+    required this.onExport,
+  });
 
   final int count;
   final VoidCallback onCreate;
+  final VoidCallback? onImport;
+  final VoidCallback? onExport;
 
   @override
   Widget build(BuildContext context) {
@@ -220,6 +278,16 @@ class _PlaylistToolbar extends StatelessWidget {
             '$count 个歌单',
             style: const TextStyle(fontWeight: FontWeight.w700, color: _muted),
           ),
+        ),
+        IconButton(
+          tooltip: '导入歌单',
+          onPressed: onImport,
+          icon: const Icon(Icons.file_upload_outlined),
+        ),
+        IconButton(
+          tooltip: '导出全部歌单',
+          onPressed: onExport,
+          icon: const Icon(Icons.file_download_outlined),
         ),
         FilledButton.icon(
           onPressed: onCreate,
@@ -232,10 +300,15 @@ class _PlaylistToolbar extends StatelessWidget {
 }
 
 class _PlaylistOverview extends StatelessWidget {
-  const _PlaylistOverview({required this.controller, required this.onCreate});
+  const _PlaylistOverview({
+    required this.controller,
+    required this.onCreate,
+    required this.playlistFiles,
+  });
 
   final AppController controller;
   final VoidCallback onCreate;
+  final PlaylistFileService playlistFiles;
 
   @override
   Widget build(BuildContext context) {
@@ -273,9 +346,16 @@ class _PlaylistOverview extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontWeight: FontWeight.w700),
             ),
-            subtitle: Text('$count 首歌曲'),
+            subtitle: Text(
+              '$count 首歌曲${playlist.pendingTracks.isEmpty ? '' : ' · ${playlist.pendingTracks.length} 首待匹配'}',
+            ),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showPlaylistSheet(context, controller, playlist.id),
+            onTap: () => _showPlaylistSheet(
+              context,
+              controller,
+              playlist.id,
+              playlistFiles: playlistFiles,
+            ),
           ),
         );
       },
@@ -338,8 +418,9 @@ Future<String?> _showPlaylistNameDialog(
 void _showPlaylistSheet(
   BuildContext context,
   AppController controller,
-  String playlistId,
-) {
+  String playlistId, {
+  PlaylistFileService playlistFiles = const PlaylistFileService(),
+}) {
   showModalBottomSheet<void>(
     context: context,
     useSafeArea: true,
@@ -348,8 +429,11 @@ void _showPlaylistSheet(
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
     ),
-    builder: (context) =>
-        _PlaylistSheet(controller: controller, playlistId: playlistId),
+    builder: (context) => _PlaylistSheet(
+      controller: controller,
+      playlistId: playlistId,
+      playlistFiles: playlistFiles,
+    ),
   );
 }
 
@@ -372,16 +456,37 @@ void _showAddToPlaylistSheet(
 }
 
 class _PlaylistSheet extends StatefulWidget {
-  const _PlaylistSheet({required this.controller, required this.playlistId});
+  const _PlaylistSheet({
+    required this.controller,
+    required this.playlistId,
+    required this.playlistFiles,
+  });
 
   final AppController controller;
   final String playlistId;
+  final PlaylistFileService playlistFiles;
 
   @override
   State<_PlaylistSheet> createState() => _PlaylistSheetState();
 }
 
 class _PlaylistSheetState extends State<_PlaylistSheet> {
+  bool _exporting = false;
+
+  Future<void> _export() async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      await _exportPlaylistFile(
+        widget.controller,
+        playlistId: widget.playlistId,
+        files: widget.playlistFiles,
+      );
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -482,21 +587,31 @@ class _PlaylistSheetState extends State<_PlaylistSheet> {
                 ),
                 PopupMenuButton<String>(
                   tooltip: '歌单设置',
+                  enabled: !_exporting,
                   onSelected: (value) {
                     if (value == 'rename') {
                       unawaited(_rename(playlist));
                     } else if (value == 'delete') {
                       unawaited(_delete(playlist));
+                    } else if (value == 'export') {
+                      unawaited(_export());
                     }
                   },
                   itemBuilder: (context) => const [
                     PopupMenuItem(value: 'rename', child: Text('重命名')),
+                    PopupMenuItem(value: 'export', child: Text('导出歌单')),
                     PopupMenuItem(value: 'delete', child: Text('删除歌单')),
                   ],
                 ),
               ],
             ),
             const SizedBox(height: 12),
+            if (playlist.pendingTracks.isNotEmpty)
+              TextButton.icon(
+                onPressed: () => _showPendingPlaylistTracks(context, playlist),
+                icon: const Icon(Icons.info_outline, size: 18),
+                label: Text('${playlist.pendingTracks.length} 首歌曲待匹配 · 查看'),
+              ),
             Expanded(
               child: _LibraryTrackList(
                 controller: widget.controller,
@@ -818,7 +933,7 @@ class _LibraryToolbar extends StatelessWidget {
         _LibrarySortMenu(controller: controller),
         const SizedBox(width: 6),
         _CompactIconButton(
-          tooltip: hasQuery ? '修改搜索' : '搜索',
+          tooltip: hasQuery ? '清除搜索' : '搜索',
           icon: hasQuery ? Icons.search_off : Icons.search,
           selected: hasQuery,
           onPressed: onSearch,
