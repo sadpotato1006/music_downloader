@@ -46,7 +46,7 @@ class DiagnosticsPage extends StatelessWidget {
                   ),
                   Text(
                     '${entries.length} 条',
-                    style: const TextStyle(color: _muted),
+                    style: const TextStyle(color: appMuted),
                   ),
                 ],
               ),
@@ -112,7 +112,7 @@ class _DiagnosticSummary extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border.all(color: _line),
+        border: Border.all(color: themeLine(context)),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Padding(
@@ -120,9 +120,12 @@ class _DiagnosticSummary extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Row(
+            Row(
               children: [
-                Icon(Icons.health_and_safety_outlined, color: _accentStrong),
+                Icon(
+                  Icons.health_and_safety_outlined,
+                  color: themeAccent(context),
+                ),
                 SizedBox(width: 10),
                 Text(
                   '运行信息',
@@ -131,18 +134,13 @@ class _DiagnosticSummary extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-            Text('版本：$appVersion'),
+            Text('版本：$appReleaseVersion'),
             const SizedBox(height: 5),
             Text('平台：${Platform.operatingSystem}'),
             const SizedBox(height: 5),
             SelectableText(
               '日志文件：${log.filePath ?? '不可用，仅保留内存日志'}',
-              style: const TextStyle(color: _muted, fontSize: 12),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              '复制内容会自动去除日志中 URL 的查询参数，避免携带临时签名。',
-              style: TextStyle(color: _muted, fontSize: 12),
+              style: const TextStyle(color: appMuted, fontSize: 12),
             ),
           ],
         ),
@@ -159,7 +157,7 @@ class _DiagnosticLogTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = switch (entry.level) {
-      AppLogLevel.info => _accentStrong,
+      AppLogLevel.info => themeAccent(context),
       AppLogLevel.warning => Colors.orange.shade700,
       AppLogLevel.error => Colors.red.shade700,
     };
@@ -173,7 +171,7 @@ class _DiagnosticLogTile extends StatelessWidget {
       color: Colors.white,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
-        side: const BorderSide(color: _line),
+        side: BorderSide(color: themeLine(context)),
       ),
       child: ExpansionTile(
         leading: Icon(icon, color: color),
@@ -185,7 +183,7 @@ class _DiagnosticLogTile extends StatelessWidget {
         ),
         subtitle: Text(
           '${entry.timestamp.toLocal().toString().split('.').first} · ${entry.category}',
-          style: const TextStyle(fontSize: 11, color: _muted),
+          style: const TextStyle(fontSize: 11, color: appMuted),
         ),
         childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
         expandedCrossAxisAlignment: CrossAxisAlignment.start,
@@ -194,7 +192,7 @@ class _DiagnosticLogTile extends StatelessWidget {
             entry.detail == null || entry.detail!.isEmpty
                 ? entry.message
                 : entry.detail!,
-            style: const TextStyle(fontSize: 12, color: _ink),
+            style: const TextStyle(fontSize: 12, color: appInk),
           ),
         ],
       ),

@@ -18,6 +18,7 @@ class MusicSearchController extends ChangeNotifier {
   final String Function(Object error) describeError;
   String query = '';
   bool isSearching = false;
+  bool failed = false;
   String? error;
   List<TrackSearchResult> results = const [];
   int _generation = 0;
@@ -29,6 +30,7 @@ class MusicSearchController extends ChangeNotifier {
     bool current() => !_disposed && _generation == generation;
     query = value.trim();
     error = null;
+    failed = false;
     if (query.isEmpty) {
       results = const [];
       isSearching = false;
@@ -46,6 +48,7 @@ class MusicSearchController extends ChangeNotifier {
       return;
     } catch (failure) {
       if (!current()) return;
+      failed = true;
       results = const [];
       error = failure is MusicSourceException
           ? failure.message

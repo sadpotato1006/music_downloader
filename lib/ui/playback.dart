@@ -70,29 +70,38 @@ class _MiniPlayerState extends State<MiniPlayer> {
     final item = controller.currentItem;
     return SafeArea(
       top: false,
-      child: Container(
-        height: isDesktop ? 78 : 82,
-        padding: EdgeInsets.symmetric(
-          horizontal: isDesktop ? 24 : 14,
-          vertical: isDesktop ? 10 : 8,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          isDesktop ? 24 : 12,
+          6,
+          isDesktop ? 24 : 12,
+          12,
         ),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          border: Border(top: BorderSide(color: _line)),
+        child: ThemeSurface(
+          key: const ValueKey('mini-player-surface'),
+          isolateContent: true,
+          radius: 24,
+          padding: EdgeInsets.symmetric(
+            horizontal: isDesktop ? 20 : 12,
+            vertical: 12,
+          ),
+          child: SizedBox(
+            height: MediaQuery.textScalerOf(context).scale(isDesktop ? 60 : 58),
+            child: isDesktop
+                ? _DesktopMiniPlayerContent(
+                    controller: controller,
+                    item: item,
+                    lyricLines: _lines,
+                    currentLyricIndex: _highlightedIndex,
+                  )
+                : _MobileMiniPlayerContent(
+                    controller: controller,
+                    item: item,
+                    lyricLines: _lines,
+                    currentLyricIndex: _highlightedIndex,
+                  ),
+          ),
         ),
-        child: isDesktop
-            ? _DesktopMiniPlayerContent(
-                controller: controller,
-                item: item,
-                lyricLines: _lines,
-                currentLyricIndex: _highlightedIndex,
-              )
-            : _MobileMiniPlayerContent(
-                controller: controller,
-                item: item,
-                lyricLines: _lines,
-                currentLyricIndex: _highlightedIndex,
-              ),
       ),
     );
   }
@@ -133,7 +142,11 @@ class _DesktopMiniPlayerContent extends StatelessWidget {
                 Expanded(
                   child: _TrackText(
                     title: item?.title ?? '未播放',
-                    subtitle: lyricText ?? item?.artist ?? '青听',
+                    subtitle:
+                        controller.playbackStatusText ??
+                        lyricText ??
+                        item?.artist ??
+                        '青听',
                     tertiary: item?.album.trim().isEmpty ?? true
                         ? null
                         : item?.album.trim(),
@@ -187,7 +200,11 @@ class _MobileMiniPlayerContent extends StatelessWidget {
                 Expanded(
                   child: _TrackText(
                     title: item?.title ?? '未播放',
-                    subtitle: lyricText ?? item?.artist ?? '青听',
+                    subtitle:
+                        controller.playbackStatusText ??
+                        lyricText ??
+                        item?.artist ??
+                        '青听',
                     tertiary: item?.album.trim().isEmpty ?? true
                         ? null
                         : item?.album.trim(),
@@ -244,10 +261,18 @@ class _PlayButton extends StatelessWidget {
       child: SizedBox.square(
         dimension: size,
         child: IconButton.filled(
-          tooltip: controller.player.isPlaying ? '暂停' : '播放',
+          tooltip: controller.currentPlaybackHealth.error != null
+              ? '重试播放'
+              : controller.player.isPlaying
+              ? '暂停'
+              : '播放',
           onPressed: enabled ? controller.togglePlayPause : null,
           icon: Icon(
-            controller.player.isPlaying ? Icons.pause : Icons.play_arrow,
+            controller.currentPlaybackHealth.error != null
+                ? Icons.refresh
+                : controller.player.isPlaying
+                ? Icons.pause
+                : Icons.play_arrow,
             size: compact ? 22 : 24,
           ),
         ),
@@ -284,7 +309,12 @@ class _ResponsiveTrackList extends StatelessWidget {
           itemCount: itemCount,
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: columns,
-            mainAxisExtent: 72,
+            mainAxisExtent:
+                72 *
+                (MediaQuery.textScalerOf(context).scale(16) / 16).clamp(
+                  1,
+                  double.infinity,
+                ),
             mainAxisSpacing: 6,
             crossAxisSpacing: 6,
           ),
@@ -314,6 +344,12 @@ class TrackTile extends StatelessWidget {
     this.onTap,
     this.onLongPress,
     this.selected = false,
+    this.current = false,
+    this.playing = false,
+    this.preparing = false,
+    this.buffering = false,
+    this.playbackError,
+    this.onRetry,
     this.tertiary,
     this.coverUrl,
     this.coverFilePath,
@@ -332,6 +368,12 @@ class TrackTile extends StatelessWidget {
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
   final bool selected;
+  final bool current;
+  final bool playing;
+  final bool preparing;
+  final bool buffering;
+  final String? playbackError;
+  final VoidCallback? onRetry;
   final String? coverUrl;
   final String? coverFilePath;
   final bool showArtwork;
@@ -349,38 +391,80 @@ class TrackTile extends StatelessWidget {
         onTap: onTap,
         onLongPress: onLongPress,
         borderRadius: BorderRadius.circular(16),
-        splashColor: _accent.withValues(alpha: 0.18),
-        highlightColor: _accent.withValues(alpha: 0.10),
+        splashColor: themeAccent(context).withValues(alpha: 0.18),
+        highlightColor: themeAccent(context).withValues(alpha: 0.10),
         child: Ink(
-          decoration: selected
-              ? _tileDecoration().copyWith(
-                  color: _accent.withValues(alpha: 0.16),
-                  border: Border.all(color: _accentStrong),
+          decoration: selected || current
+              ? tileDecoration(context, song: true).copyWith(
+                  color: themeTint(context),
+                  border: Border.all(color: themeAccent(context), width: 0.8),
                 )
-              : _tileDecoration(),
+              : tileDecoration(context, song: true),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
               children: [
                 if (showArtwork) ...[
-                  _TrackArtwork(
-                    coverUrl: coverUrl,
-                    coverFilePath: coverFilePath,
-                    icon: Icons.music_note,
-                    size: artworkSize,
-                    borderRadius: 12,
+                  Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      _TrackArtwork(
+                        coverUrl: coverUrl,
+                        coverFilePath: coverFilePath,
+                        icon: Icons.music_note,
+                        size: artworkSize,
+                        borderRadius: 12,
+                      ),
+                      if (preparing || buffering)
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: themeTint(context),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Padding(
+                            padding: EdgeInsets.all(5),
+                            child: SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        ),
+                      if (playbackError != null && onRetry != null)
+                        IconButton.filledTonal(
+                          tooltip: '重试播放',
+                          onPressed: onRetry,
+                          icon: const Icon(Icons.refresh),
+                        ),
+                    ],
                   ),
                   const SizedBox(width: 10),
                 ],
                 Expanded(
-                  child: _TrackText(
-                    title: title,
-                    subtitle: subtitle,
-                    tertiary: tertiary,
-                    titleWeight: titleWeight,
-                    titleSize: titleSize,
-                    subtitleSize: subtitleSize,
-                    tertiarySize: tertiarySize,
+                  child: Tooltip(
+                    message: playbackError ?? '',
+                    child: _TrackText(
+                      title: title,
+                      subtitle: subtitle,
+                      tertiary: buffering
+                          ? '正在缓冲…'
+                          : preparing
+                          ? '正在准备播放'
+                          : playbackError != null
+                          ? '播放失败：$playbackError'
+                          : current && !playing
+                          ? '已暂停'
+                          : tertiary,
+                      tertiaryColor: playbackError != null
+                          ? Theme.of(context).colorScheme.error
+                          : preparing || buffering || current
+                          ? themeAccent(context)
+                          : null,
+                      titleWeight: titleWeight,
+                      titleSize: titleSize,
+                      subtitleSize: subtitleSize,
+                      tertiarySize: tertiarySize,
+                      compact: true,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -399,22 +483,29 @@ class _TrackText extends StatelessWidget {
     required this.title,
     required this.subtitle,
     this.tertiary,
+    this.tertiaryColor,
     this.titleWeight = FontWeight.w700,
     this.titleSize = 15,
     this.subtitleSize = 13,
     this.tertiarySize = 12,
+    this.compact = false,
   });
 
   final String title;
   final String subtitle;
   final String? tertiary;
+  final Color? tertiaryColor;
   final FontWeight titleWeight;
   final double titleSize;
   final double subtitleSize;
   final double tertiarySize;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
+    final lineHeight = compact && tertiary?.trim().isNotEmpty == true
+        ? 1.2
+        : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -423,14 +514,22 @@ class _TrackText extends StatelessWidget {
           title,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontWeight: titleWeight, fontSize: titleSize),
+          style: TextStyle(
+            fontWeight: titleWeight,
+            fontSize: titleSize,
+            height: lineHeight,
+          ),
         ),
         const SizedBox(height: 3),
         Text(
           subtitle,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: TextStyle(color: _muted, fontSize: subtitleSize),
+          style: TextStyle(
+            color: appMuted,
+            fontSize: subtitleSize,
+            height: lineHeight,
+          ),
         ),
         if (tertiary != null && tertiary!.trim().isNotEmpty) ...[
           const SizedBox(height: 1),
@@ -439,65 +538,13 @@ class _TrackText extends StatelessWidget {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: _muted.withValues(alpha: 0.82),
+              color: tertiaryColor ?? appMuted.withValues(alpha: 0.82),
               fontSize: tertiarySize,
+              height: lineHeight,
             ),
           ),
         ],
       ],
-    );
-  }
-}
-
-class _PageFrame extends StatelessWidget {
-  const _PageFrame({required this.child, this.horizontalPadding = 24});
-
-  final Widget child;
-  final double horizontalPadding;
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      bottom: false,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          horizontalPadding,
-          20,
-          horizontalPadding,
-          14,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [Expanded(child: child)],
-        ),
-      ),
-    );
-  }
-}
-
-class _SettingPanel extends StatelessWidget {
-  const _SettingPanel({required this.title, required this.child});
-
-  final String title;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: _tileDecoration(),
-      child: Material(
-        type: MaterialType.transparency,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
-            const SizedBox(height: 12),
-            child,
-          ],
-        ),
-      ),
     );
   }
 }
@@ -518,25 +565,31 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: _accentStrong.withValues(alpha: 0.52), size: 44),
-          const SizedBox(height: 12),
-          Text(
-            text,
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: _muted),
-          ),
-          if (actionLabel != null && onAction != null) ...[
-            const SizedBox(height: 14),
-            FilledButton.icon(
-              onPressed: onAction,
-              icon: const Icon(Icons.add),
-              label: Text(actionLabel!),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              color: themeAccent(context).withValues(alpha: 0.52),
+              size: 44,
             ),
+            const SizedBox(height: 18),
+            Text(
+              text,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: appMuted),
+            ),
+            if (actionLabel != null && onAction != null) ...[
+              const SizedBox(height: 14),
+              FilledButton.icon(
+                onPressed: onAction,
+                icon: const Icon(Icons.add),
+                label: Text(actionLabel!),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -563,6 +616,9 @@ class _LyricsSheet extends StatefulWidget {
 }
 
 class _LyricsSheetState extends State<_LyricsSheet> {
+  Object? _lastView;
+  Object get _view => widget.controller.playbackViewState;
+
   static const _lyricsMinListPadding = 84.0;
   static const _estimatedLyricLineExtent = 58.0;
 
@@ -571,6 +627,8 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   List<LyricLine> _lines = const [];
   int _highlightedIndex = -1;
   bool _scrollScheduled = false;
+  bool _followingLyrics = true;
+  (String, String)? _lyricItemKey;
   int lastScrolledIndex = -1;
   String? lastScrolledItemId;
   double _lyricsVerticalPadding = _lyricsMinListPadding;
@@ -578,6 +636,7 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   @override
   void initState() {
     super.initState();
+    _lastView = _view;
     widget.controller.addListener(_handleControllerChanged);
     widget.controller.player.positionListenable.addListener(
       _handlePlayerPositionChanged,
@@ -597,6 +656,9 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   }
 
   void _handleControllerChanged() {
+    final view = _view;
+    if (view == _lastView) return;
+    _lastView = view;
     if (!mounted) {
       return;
     }
@@ -605,6 +667,13 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   }
 
   void _updateLyricState() {
+    final item = widget.controller.currentItem;
+    final key = item == null ? null : (item.id, item.uri);
+    if (key != _lyricItemKey) {
+      _lyricItemKey = key;
+      _followingLyrics = true;
+      lastScrolledIndex = -1;
+    }
     final lines = parseLyricLines(widget.controller.currentItem?.lyrics);
     if (!identical(lines, _lines)) {
       _lines = lines;
@@ -628,11 +697,11 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   }
 
   void _scheduleScroll() {
-    if (_scrollScheduled) return;
+    if (_scrollScheduled || !_followingLyrics) return;
     _scrollScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollScheduled = false;
-      if (!mounted || !scrollController.hasClients) {
+      if (!mounted || !_followingLyrics || !scrollController.hasClients) {
         return;
       }
       final item = widget.controller.currentItem;
@@ -644,7 +713,7 @@ class _LyricsSheetState extends State<_LyricsSheet> {
       if (currentIndex < 0 || currentIndex == lastScrolledIndex) {
         return;
       }
-      final itemId = item?.id;
+      final itemKey = _lyricItemKey;
       final lineContext = _lyricLineKeys[currentIndex]?.currentContext;
       if (lineContext == null || !lineContext.mounted) {
         final estimatedTarget =
@@ -657,7 +726,10 @@ class _LyricsSheetState extends State<_LyricsSheet> {
               .toDouble(),
         );
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || widget.controller.currentItem?.id != itemId) {
+          if (!mounted ||
+              !_followingLyrics ||
+              _lyricItemKey != itemKey ||
+              _highlightedIndex != currentIndex) {
             return;
           }
           final builtContext = _lyricLineKeys[currentIndex]?.currentContext;
@@ -686,6 +758,26 @@ class _LyricsSheetState extends State<_LyricsSheet> {
     });
   }
 
+  bool _handleLyricsScroll(ScrollNotification notification) {
+    final manual =
+        notification is ScrollStartNotification &&
+            notification.dragDetails != null ||
+        notification is UserScrollNotification &&
+            notification.direction != ScrollDirection.idle;
+    if (notification.depth == 0 && manual && _followingLyrics) {
+      setState(() => _followingLyrics = false);
+    }
+    return false;
+  }
+
+  void _resumeLyricsFollowing() {
+    setState(() {
+      _followingLyrics = true;
+      lastScrolledIndex = -1;
+    });
+    _scheduleScroll();
+  }
+
   @override
   Widget build(BuildContext context) {
     final item = widget.controller.currentItem;
@@ -705,7 +797,7 @@ class _LyricsSheetState extends State<_LyricsSheet> {
                 width: 38,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: _line,
+                  color: themeLine(context),
                   borderRadius: BorderRadius.circular(99),
                 ),
               ),
@@ -757,6 +849,8 @@ class _LyricsSheetState extends State<_LyricsSheet> {
                 ],
               ),
               const SizedBox(height: 16),
+              if (widget.controller.playbackStatusText != null)
+                _PlaybackStatusNotice(controller: widget.controller),
               Expanded(
                 child: lines.isEmpty
                     ? const _EmptyState(icon: Icons.lyrics, text: '这首歌没有内嵌歌词')
@@ -767,60 +861,75 @@ class _LyricsSheetState extends State<_LyricsSheet> {
                                   .clamp(_lyricsMinListPadding, 260.0)
                                   .toDouble();
                           _lyricsVerticalPadding = verticalPadding;
-                          return ListView.builder(
-                            controller: scrollController,
-                            padding: EdgeInsets.symmetric(
-                              vertical: verticalPadding,
-                            ),
-                            itemCount: lines.length,
-                            itemBuilder: (context, index) {
-                              return InkWell(
-                                key: _lyricLineKeys.putIfAbsent(
-                                  index,
-                                  GlobalKey.new,
-                                ),
-                                borderRadius: BorderRadius.circular(12),
-                                onTap:
-                                    !isLyricTimestampSeekable(
-                                      lines[index].time,
-                                      duration,
-                                    )
-                                    ? null
-                                    : () => widget.controller.seekToLyricLine(
-                                        item!,
+                          return NotificationListener<ScrollNotification>(
+                            onNotification: _handleLyricsScroll,
+                            child: ListView.builder(
+                              key: const ValueKey('lyrics-list'),
+                              controller: scrollController,
+                              padding: EdgeInsets.symmetric(
+                                vertical: verticalPadding,
+                              ),
+                              itemCount: lines.length,
+                              itemBuilder: (context, index) {
+                                return InkWell(
+                                  key: _lyricLineKeys.putIfAbsent(
+                                    index,
+                                    GlobalKey.new,
+                                  ),
+                                  borderRadius: BorderRadius.circular(12),
+                                  onTap:
+                                      !isLyricTimestampSeekable(
                                         lines[index].time,
+                                        duration,
+                                      )
+                                      ? null
+                                      : () => widget.controller.seekToLyricLine(
+                                          item!,
+                                          lines[index].time,
+                                        ),
+                                  child: AnimatedDefaultTextStyle(
+                                    duration: const Duration(milliseconds: 160),
+                                    style: TextStyle(
+                                      color: index == currentIndex
+                                          ? themeAccent(context)
+                                          : appMuted,
+                                      fontSize: 16,
+                                      fontWeight: index == currentIndex
+                                          ? FontWeight.w800
+                                          : FontWeight.w500,
+                                      height: 1.45,
+                                    ),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 8,
+                                        horizontal: 8,
                                       ),
-                                child: AnimatedDefaultTextStyle(
-                                  duration: const Duration(milliseconds: 160),
-                                  style: TextStyle(
-                                    color: index == currentIndex
-                                        ? _accentStrong
-                                        : _muted,
-                                    fontSize: 16,
-                                    fontWeight: index == currentIndex
-                                        ? FontWeight.w800
-                                        : FontWeight.w500,
-                                    height: 1.45,
-                                  ),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 8,
-                                      horizontal: 8,
-                                    ),
-                                    child: Text(
-                                      lines[index].text,
-                                      textAlign: TextAlign.center,
+                                      child: Text(
+                                        lines[index].text,
+                                        textAlign: TextAlign.center,
+                                      ),
                                     ),
                                   ),
-                                ),
-                              );
-                            },
+                                );
+                              },
+                            ),
                           );
                         },
                       ),
               ),
+              if (!_followingLyrics &&
+                  lines.isNotEmpty &&
+                  lines.first.time != null)
+                TextButton.icon(
+                  onPressed: _resumeLyricsFollowing,
+                  icon: const Icon(Icons.my_location, size: 18),
+                  label: const Text('回到当前歌词'),
+                ),
               const SizedBox(height: 8),
-              _LyricsProgress(controller: widget.controller),
+              _LyricsProgress(
+                key: ValueKey((item?.id, item?.uri)),
+                controller: widget.controller,
+              ),
               const SizedBox(height: 8),
               _LyricsPlaybackControls(controller: widget.controller),
             ],
@@ -831,25 +940,144 @@ class _LyricsSheetState extends State<_LyricsSheet> {
   }
 }
 
-class _LyricsProgress extends StatelessWidget {
-  const _LyricsProgress({required this.controller});
+class _PlaybackStatusNotice extends StatelessWidget {
+  const _PlaybackStatusNotice({required this.controller});
+  final AppController controller;
+  @override
+  Widget build(BuildContext context) {
+    final error = controller.currentPlaybackHealth.error;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Icon(
+            error == null ? Icons.hourglass_top : Icons.error_outline,
+            size: 18,
+            color: themeAccent(context),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              error == null ? '正在缓冲…' : '播放中断：$error',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (error != null)
+            TextButton(
+              onPressed: controller.retryCurrentPlayback,
+              child: const Text('重试播放'),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LyricsProgress extends StatefulWidget {
+  const _LyricsProgress({super.key, required this.controller});
 
   final AppController controller;
 
   @override
+  State<_LyricsProgress> createState() => _LyricsProgressState();
+}
+
+class _LyricsProgressState extends State<_LyricsProgress> {
+  double? _previewMs;
+  double? _pendingMs;
+  Timer? _seekTimer;
+  PlayerItem? _dragItem;
+  int _seekGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.player.positionListenable.addListener(_confirmSeek);
+  }
+
+  @override
+  void didUpdateWidget(_LyricsProgress oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.player.positionListenable.removeListener(
+        _confirmSeek,
+      );
+      widget.controller.player.positionListenable.addListener(_confirmSeek);
+      _seekGeneration++;
+      _seekTimer?.cancel();
+      _previewMs = _pendingMs = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _seekTimer?.cancel();
+    widget.controller.player.positionListenable.removeListener(_confirmSeek);
+    super.dispose();
+  }
+
+  void _clearPreview() {
+    _seekTimer?.cancel();
+    setState(() => _previewMs = _pendingMs = null);
+  }
+
+  void _confirmSeek() {
+    if (_pendingMs != null &&
+        (widget.controller.player.position.inMilliseconds - _pendingMs!).abs() <
+            1000) {
+      _clearPreview();
+    }
+  }
+
+  Future<void> _finishSeek(double value) async {
+    if (!mounted) return;
+    final controller = widget.controller;
+    final current = controller.currentItem;
+    final generation = ++_seekGeneration;
+    if (current == null ||
+        current.id != _dragItem?.id ||
+        current.uri != _dragItem?.uri) {
+      setState(() => _previewMs = null);
+      return;
+    }
+    _pendingMs = value;
+    _seekTimer?.cancel();
+    // Native players may acknowledge the seek before publishing its position.
+    // Keep the preview until that position arrives, with a bounded fallback.
+    _seekTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted && generation == _seekGeneration) _clearPreview();
+    });
+    try {
+      await controller.seekTo(Duration(milliseconds: value.round()));
+      if (mounted && generation == _seekGeneration) {
+        _confirmSeek();
+      }
+    } catch (_) {
+      if (mounted && generation == _seekGeneration) {
+        _clearPreview();
+        controller.showGlobalMessage('跳转失败，请重试');
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
     return ValueListenableBuilder<Duration>(
       valueListenable: controller.player.positionListenable,
       builder: (context, position, child) {
         final maximum = controller.maximumSeekPosition.inMilliseconds;
         final maxMs = (maximum <= 0 ? 1 : maximum).toDouble();
+        final displayedMs = (_previewMs ?? position.inMilliseconds.toDouble())
+            .clamp(0.0, maxMs);
         return Row(
           children: [
             SizedBox(
               width: 42,
               child: Text(
-                _formatDuration(position),
-                style: const TextStyle(fontSize: 12, color: _muted),
+                _formatDuration(Duration(milliseconds: displayedMs.round())),
+                style: const TextStyle(fontSize: 12, color: appMuted),
               ),
             ),
             Expanded(
@@ -865,14 +1093,20 @@ class _LyricsProgress extends StatelessWidget {
                   ),
                 ),
                 child: Slider(
-                  value: position.inMilliseconds.clamp(0, maxMs).toDouble(),
+                  key: const ValueKey('lyrics-progress'),
+                  value: displayedMs,
                   min: 0,
                   max: maxMs,
-                  onChanged: controller.currentItem == null
+                  onChangeStart: (_) {
+                    _seekGeneration++;
+                    _seekTimer?.cancel();
+                    _pendingMs = null;
+                    _dragItem = controller.currentItem;
+                  },
+                  onChangeEnd: _finishSeek,
+                  onChanged: controller.currentItem == null || maximum <= 0
                       ? null
-                      : (value) => controller.seekTo(
-                          Duration(milliseconds: value.round()),
-                        ),
+                      : (value) => setState(() => _previewMs = value),
                 ),
               ),
             ),
@@ -881,7 +1115,7 @@ class _LyricsProgress extends StatelessWidget {
               child: Text(
                 _formatDuration(controller.player.duration),
                 textAlign: TextAlign.right,
-                style: const TextStyle(fontSize: 12, color: _muted),
+                style: const TextStyle(fontSize: 12, color: appMuted),
               ),
             ),
           ],
@@ -953,8 +1187,10 @@ class _LyricsRoundButton extends StatelessWidget {
         tooltip: tooltip,
         onPressed: onPressed,
         style: IconButton.styleFrom(
-          backgroundColor: selected ? _accent.withValues(alpha: 0.18) : null,
-          foregroundColor: selected ? _accentStrong : _ink,
+          backgroundColor: selected
+              ? themeAccent(context).withValues(alpha: 0.18)
+              : null,
+          foregroundColor: selected ? themeAccent(context) : appInk,
         ),
         icon: Icon(icon),
       ),
@@ -973,10 +1209,18 @@ class _LyricsMainPlayButton extends StatelessWidget {
     return SizedBox.square(
       dimension: 52,
       child: IconButton.filled(
-        tooltip: controller.player.isPlaying ? '暂停' : '播放',
+        tooltip: controller.currentPlaybackHealth.error != null
+            ? '重试播放'
+            : controller.player.isPlaying
+            ? '暂停'
+            : '播放',
         onPressed: enabled ? controller.togglePlayPause : null,
         icon: Icon(
-          controller.player.isPlaying ? Icons.pause : Icons.play_arrow,
+          controller.currentPlaybackHealth.error != null
+              ? Icons.refresh
+              : controller.player.isPlaying
+              ? Icons.pause
+              : Icons.play_arrow,
           size: 26,
         ),
       ),
@@ -1020,7 +1264,7 @@ void _showTrackInfoSheet(BuildContext context, PlayerItem item) {
                 width: 38,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: _line,
+                  color: themeLine(context),
                   borderRadius: BorderRadius.circular(99),
                 ),
               ),
@@ -1062,13 +1306,13 @@ class _TrackInfoRow extends StatelessWidget {
             width: 46,
             child: Text(
               label,
-              style: const TextStyle(color: _muted, fontSize: 13),
+              style: const TextStyle(color: appMuted, fontSize: 13),
             ),
           ),
           Expanded(
             child: SelectableText(
               value,
-              style: const TextStyle(fontSize: 14.5, color: _ink),
+              style: const TextStyle(fontSize: 14.5, color: appInk),
             ),
           ),
         ],
@@ -1087,6 +1331,13 @@ class _QueueSheet extends StatefulWidget {
 }
 
 class _QueueSheetState extends State<_QueueSheet> {
+  Object? _lastView;
+  Object get _view => (
+    widget.controller.queue,
+    widget.controller.currentQueueIndex,
+    widget.controller.shuffleEnabled,
+  );
+
   static const _queueItemExtent = 80.0;
 
   final ScrollController queueScrollController = ScrollController();
@@ -1095,6 +1346,7 @@ class _QueueSheetState extends State<_QueueSheet> {
   @override
   void initState() {
     super.initState();
+    _lastView = _view;
     widget.controller.addListener(_handleChanged);
     _scheduleCurrentQueueScroll(force: true);
   }
@@ -1107,6 +1359,9 @@ class _QueueSheetState extends State<_QueueSheet> {
   }
 
   void _handleChanged() {
+    final view = _view;
+    if (view == _lastView) return;
+    _lastView = view;
     if (mounted) {
       setState(() {});
       _scheduleCurrentQueueScroll();
@@ -1159,7 +1414,7 @@ class _QueueSheetState extends State<_QueueSheet> {
               width: 38,
               height: 4,
               decoration: BoxDecoration(
-                color: _line,
+                color: themeLine(context),
                 borderRadius: BorderRadius.circular(99),
               ),
             ),
@@ -1176,7 +1431,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                 ),
                 Text(
                   '${queue.length} 首',
-                  style: const TextStyle(color: _muted),
+                  style: const TextStyle(color: appMuted),
                 ),
                 const SizedBox(width: 10),
                 _IconAction(
@@ -1237,19 +1492,27 @@ class _QueueSheetState extends State<_QueueSheet> {
                             color: Colors.transparent,
                             child: InkWell(
                               borderRadius: BorderRadius.circular(16),
-                              splashColor: _accent.withValues(alpha: 0.18),
-                              highlightColor: _accent.withValues(alpha: 0.10),
+                              splashColor: themeAccent(
+                                context,
+                              ).withValues(alpha: 0.18),
+                              highlightColor: themeAccent(
+                                context,
+                              ).withValues(alpha: 0.10),
                               onTap: selected
                                   ? () {}
                                   : () => controller.playQueueAt(index),
                               child: Ink(
                                 decoration: BoxDecoration(
                                   color: selected
-                                      ? _accent.withValues(alpha: 0.14)
+                                      ? themeAccent(
+                                          context,
+                                        ).withValues(alpha: 0.14)
                                       : Colors.white,
                                   borderRadius: BorderRadius.circular(16),
                                   border: Border.all(
-                                    color: selected ? _accentStrong : _line,
+                                    color: selected
+                                        ? themeAccent(context)
+                                        : themeLine(context),
                                   ),
                                 ),
                                 child: Padding(
@@ -1324,7 +1587,7 @@ class _TrackArtwork extends StatelessWidget {
     final fallback = _LeadingIconShell(
       size: size,
       borderRadius: borderRadius,
-      child: Icon(icon, color: _accentStrong, size: size * 0.52),
+      child: Icon(icon, color: themeAccent(context), size: size * 0.52),
     );
 
     if (filePath != null && filePath.isNotEmpty) {
@@ -1391,7 +1654,7 @@ class _LeadingIconShell extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: _accent.withValues(alpha: 0.18),
+        color: themeAccent(context).withValues(alpha: 0.18),
         borderRadius: BorderRadius.circular(borderRadius),
       ),
       alignment: Alignment.center,

@@ -46,84 +46,106 @@ class _SearchPageState extends State<SearchPage> {
     final controller = widget.controller;
     final searchHistory =
         controller.settings?.sourceSearchHistory ?? const <String>[];
-    return _PageFrame(
+    final controls = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            const Text(
+              '音乐来源',
+              style: TextStyle(color: appMuted, fontWeight: FontWeight.w700),
+            ),
+            const Spacer(),
+            OutlinedButton.icon(
+              onPressed:
+                  !controller.canSwitchSource ||
+                      controller.isSearching ||
+                      controller.resolvingPlayId != null ||
+                      controller.preparingDownloadId != null ||
+                      controller.preparingQueueNextId != null
+                  ? null
+                  : () => unawaited(controller.switchToNextSource()),
+              icon: const Icon(Icons.swap_horiz),
+              label: Text(controller.source.name),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: textController,
+                focusNode: searchFocusNode,
+                textInputAction: TextInputAction.search,
+                onSubmitted: _search,
+                decoration: const InputDecoration(
+                  hintText: '歌名、歌手或关键词',
+                  prefixIcon: Icon(Icons.search),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              height: 52,
+              child: FilledButton.icon(
+                onPressed: controller.isSearching
+                    ? null
+                    : () => _search(textController.text),
+                icon: controller.isSearching
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.arrow_forward),
+                label: const Text('搜索'),
+              ),
+            ),
+          ],
+        ),
+        if (searchFocusNode.hasFocus && searchHistory.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _SearchHistoryDropdown(history: searchHistory, onSelected: _search),
+        ],
+      ],
+    );
+    return PageFrame(
       child: Column(
         children: [
-          Row(
-            children: [
-              const Text(
-                '音乐来源',
-                style: TextStyle(color: _muted, fontWeight: FontWeight.w700),
-              ),
-              const Spacer(),
-              OutlinedButton.icon(
-                onPressed:
-                    !controller.canSwitchSource ||
-                        controller.isSearching ||
-                        controller.resolvingPlayId != null ||
-                        controller.preparingDownloadId != null ||
-                        controller.preparingQueueNextId != null
-                    ? null
-                    : () => unawaited(controller.switchToNextSource()),
-                icon: const Icon(Icons.swap_horiz),
-                label: Text(controller.source.name),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: textController,
-                  focusNode: searchFocusNode,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: _search,
-                  decoration: const InputDecoration(
-                    hintText: '歌名、歌手或关键词',
-                    prefixIcon: Icon(Icons.search),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              SizedBox(
-                height: 52,
-                child: FilledButton.icon(
-                  onPressed: controller.isSearching
-                      ? null
-                      : () => _search(textController.text),
-                  icon: controller.isSearching
-                      ? const SizedBox.square(
-                          dimension: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.arrow_forward),
-                  label: const Text('搜索'),
-                ),
-              ),
-            ],
-          ),
-          if (searchFocusNode.hasFocus && searchHistory.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            _SearchHistoryDropdown(history: searchHistory, onSelected: _search),
-          ],
+          ThemeSurface(padding: const EdgeInsets.all(18), child: controls),
           const SizedBox(height: 18),
           Expanded(
-            child: controller.searchResults.isEmpty
-                ? _EmptyState(
-                    icon: Icons.music_note,
-                    text: controller.searchError ?? '输入关键词开始搜索',
-                  )
+            child: controller.isSearching || controller.searchResults.isEmpty
+                ? _searchState(controller)
                 : _ResponsiveTrackList(
                     itemCount: controller.searchResults.length,
                     itemBuilder: (context, index) {
                       final result = controller.searchResults[index];
+                      final playbackKey = controller.searchPlaybackKey(result);
+                      final preparing =
+                          controller.preparingPlaybackKey == playbackKey;
+                      final failure = controller.playbackFailure;
+                      final current = controller.isCurrentSearchResult(result);
                       return TrackTile(
                         title: result.title,
                         subtitle: result.displayArtist,
                         tertiary: result.source,
                         coverUrl: result.coverUrl,
-                        onTap: () => controller.playSearchResult(result),
+                        current: current,
+                        playing: controller.player.isPlaying,
+                        preparing: preparing,
+                        buffering:
+                            current &&
+                            controller.currentPlaybackHealth.buffering,
+                        playbackError: failure?.key == playbackKey
+                            ? failure?.message
+                            : current
+                            ? controller.currentPlaybackHealth.error
+                            : null,
+                        onRetry: () => controller.playSearchResult(result),
+                        onTap: preparing
+                            ? null
+                            : () => controller.playSearchResult(result),
                         trailing: [
                           _IconAction(
                             tooltip: '下一首播放',
@@ -153,6 +175,85 @@ class _SearchPageState extends State<SearchPage> {
                   ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _searchState(AppController controller) {
+    if (controller.isSearching) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(
+              '正在搜索“${controller.searchQuery}”…',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+    if (controller.searchQuery.isEmpty && controller.searchError == null) {
+      return const _EmptyState(icon: Icons.music_note, text: '输入关键词开始搜索');
+    }
+    final canSwitch =
+        controller.canSwitchSource &&
+        controller.resolvingPlayId == null &&
+        controller.preparingDownloadId == null &&
+        controller.preparingQueueNextId == null;
+    return Center(
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              controller.onlineSearch.failed
+                  ? Icons.cloud_off
+                  : Icons.search_off,
+              size: 40,
+              color: themeAccent(context),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              controller.onlineSearch.failed ? '搜索失败' : '没有找到相关歌曲',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              controller.onlineSearch.failed
+                  ? controller.searchError ?? '请稍后重试'
+                  : '试试其他关键词，或换个来源搜索',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _search(controller.searchQuery),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('重试搜索'),
+                ),
+                if (controller.canSwitchSource)
+                  FilledButton.icon(
+                    onPressed: canSwitch
+                        ? () {
+                            searchFocusNode.unfocus();
+                            textController.text = controller.searchQuery;
+                            unawaited(controller.switchToNextSource());
+                          }
+                        : null,
+                    icon: const Icon(Icons.swap_horiz),
+                    label: const Text('换源搜索'),
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -227,7 +328,7 @@ class _SearchHistoryDropdown extends StatelessWidget {
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: _line),
+            border: Border.all(color: themeLine(context)),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.06),
@@ -242,17 +343,17 @@ class _SearchHistoryDropdown extends StatelessWidget {
               shrinkWrap: true,
               padding: const EdgeInsets.symmetric(vertical: 6),
               itemCount: history.length,
-              separatorBuilder: (_, _) => const Divider(
+              separatorBuilder: (_, _) => Divider(
                 height: 1,
                 indent: 44,
                 endIndent: 12,
-                color: _line,
+                color: themeLine(context),
               ),
               itemBuilder: (context, index) {
                 final item = history[index];
                 return ListTile(
                   dense: true,
-                  leading: const Icon(Icons.history, size: 18, color: _muted),
+                  leading: const Icon(Icons.history, size: 18, color: appMuted),
                   title: Text(
                     item,
                     maxLines: 1,
@@ -284,7 +385,7 @@ class DownloadsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _PageFrame(
+    return PageFrame(
       child: controller.downloadTasks.isEmpty
           ? Column(
               children: [
@@ -344,7 +445,7 @@ class _TaskTile extends StatelessWidget {
     }
     return Container(
       padding: const EdgeInsets.all(14),
-      decoration: _tileDecoration(),
+      decoration: tileDecoration(context, song: true),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -411,7 +512,7 @@ class _TaskTile extends StatelessWidget {
                 : '${_formatBytes(task.receivedBytes)} / ${_formatBytes(task.totalBytes!)}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: _muted, fontSize: 12),
+            style: const TextStyle(color: appMuted, fontSize: 12),
           ),
         ],
       ),

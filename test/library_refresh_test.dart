@@ -73,6 +73,91 @@ void main() {
     localPath: track.path,
   );
 
+  for (final action in ['local', 'queue', 'next', 'collection', 'random']) {
+    for (final fails in [false, true]) {
+      test('$action resumes during sync scan (failure=$fails)', () async {
+        final blocked = _BlockedStorage(Directory(p.join(root.path, 'data')));
+        final cloud = _Cloud();
+        create(cloud: cloud, customStorage: blocked);
+        final song = track('playable');
+        await File(song.path).writeAsBytes([1]);
+        controller.downloadedTracks = [song];
+        controller.queue = [item(song)];
+        final syncing = controller.syncCloud();
+        await cloud.started.future;
+        // Keep the post-sync scan busy importing a new cover. Known songs
+        // should become playable as soon as sync stops changing audio files.
+        await File(p.join(music.path, 'new.mp3')).writeAsBytes(
+          Id3LyricsEmbedder.embedMetadataBytes(
+            [255, 251, 144, 100],
+            title: 'New',
+            artist: 'Artist',
+            cover: Id3CoverImage(
+              mimeType: 'image/jpeg',
+              bytes: Uint8List.fromList([1, 2, 3]),
+            ),
+          ),
+        );
+        var finished = false;
+        final playback = switch (action) {
+          'queue' => controller.playQueueAt(0),
+          'next' => controller.queueDownloadedNext(song),
+          'collection' => controller.playDownloadedCollection([song]),
+          'random' => controller.startRandomLibraryPlayback(),
+          _ => controller.playDownloaded(song),
+        }.whenComplete(() => finished = true);
+        await Future<void>.delayed(Duration.zero);
+        expect(finished, isFalse);
+        expect(player.openedItem, isNull);
+        expect(controller.playbackFailure, isNull);
+        if (fails) {
+          cloud.result.completeError(StateError('sync failed'));
+        } else {
+          cloud.result.complete(
+            const CloudSyncResult(uploaded: 0, downloaded: 0, skipped: 0),
+          );
+        }
+        try {
+          await blocked.started.future.timeout(const Duration(seconds: 2));
+          await playback.timeout(const Duration(seconds: 2));
+          expect(controller.isScanningDownloadDirectory, isTrue);
+          expect(player.openedItem?.localPath, song.path);
+          expect(controller.playbackFailure, isNull);
+        } finally {
+          blocked.release.complete();
+          await syncing;
+        }
+      });
+    }
+  }
+
+  for (final action in ['local', 'queue', 'next', 'collection', 'random']) {
+    test('clearing the queue cancels $action waiting for sync', () async {
+      final cloud = _Cloud();
+      create(cloud: cloud);
+      final song = track('waiting');
+      await File(song.path).writeAsBytes([1]);
+      controller.downloadedTracks = [song];
+      controller.queue = [item(song)];
+      final syncing = controller.syncCloud();
+      await cloud.started.future;
+      final playback = switch (action) {
+        'queue' => controller.playQueueAt(0),
+        'next' => controller.queueDownloadedNext(song),
+        'collection' => controller.playDownloadedCollection([song]),
+        'random' => controller.startRandomLibraryPlayback(),
+        _ => controller.playDownloaded(song),
+      };
+      await controller.clearQueue();
+      cloud.result.complete(
+        const CloudSyncResult(uploaded: 0, downloaded: 0, skipped: 0),
+      );
+      await Future.wait([syncing, playback]);
+      expect(player.openedItem, isNull);
+      expect(controller.queue, isEmpty);
+    });
+  }
+
   test(
     'scan removes missing records and collection references even with no new songs',
     () async {
@@ -316,6 +401,16 @@ void main() {
 }
 
 class _Player extends Fake implements PlaybackService {
+  PlayerItem? openedItem;
+  @override
+  Future<void> open(PlayerItem item) async {
+    openedItem = item;
+    isPlaying = true;
+  }
+
+  @override
+  PlaybackHealth health = const PlaybackHealth();
+
   final _position = ValueNotifier(Duration.zero);
   @override
   VoidCallback? onChanged;

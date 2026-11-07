@@ -83,7 +83,7 @@ class DownloadTransferService {
           !validator.startsWith('W/') &&
           responseValidator == validator) {
         await body.stream.listen(null, onError: (_) {}).cancel();
-        await _validateFile(file);
+        await validateFile(file);
         onResponse(offset, total, responseValidator);
         onProgress(offset, total);
         return;
@@ -169,7 +169,7 @@ class DownloadTransferService {
       );
     }
     try {
-      await _validateFile(file);
+      await validateFile(file);
     } on InvalidAudioResponse {
       // Never resume from an HTML page or another invalid payload next time.
       if (await file.exists()) await file.delete();
@@ -184,7 +184,7 @@ class DownloadTransferService {
               '')
           .trim();
 
-  static Future<void> _validateFile(File file) async {
+  static Future<void> validateFile(File file) async {
     final input = await file.open();
     late final Uint8List prefix;
     try {

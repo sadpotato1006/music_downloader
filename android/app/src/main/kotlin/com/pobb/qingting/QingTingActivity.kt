@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.hardware.display.DisplayManager
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -15,6 +16,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextUtils
@@ -28,7 +30,71 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlin.math.roundToInt
 
-class MainActivity : FlutterActivity() {
+class QingTingActivity : FlutterActivity() {
+    private var refreshRateListener: DisplayManager.DisplayListener? = null
+
+    override fun onResume() {
+        super.onResume()
+        preferSmoothDisplayMode()
+        val manager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = Unit
+            override fun onDisplayRemoved(displayId: Int) = Unit
+            override fun onDisplayChanged(displayId: Int) {
+                preferSmoothDisplayMode()
+            }
+        }
+        refreshRateListener = listener
+        manager.registerDisplayListener(listener, Handler(Looper.getMainLooper()))
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) preferSmoothDisplayMode()
+    }
+
+    override fun onPause() {
+        refreshRateListener?.let {
+            (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+                .unregisterDisplayListener(it)
+        }
+        refreshRateListener = null
+        super.onPause()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun preferSmoothDisplayMode() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val attributes = window.attributes
+        if (power.isPowerSaveMode) {
+            if (attributes.preferredDisplayModeId != 0 || attributes.preferredRefreshRate != 0f) {
+                attributes.preferredDisplayModeId = 0
+                attributes.preferredRefreshRate = 0f
+                window.attributes = attributes
+            }
+            return
+        }
+        val activeDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            windowManager.defaultDisplay
+        } ?: return
+        val current = activeDisplay.mode
+        // Request a higher rate only at the current resolution. Android retains
+        // control over battery, thermal and user refresh-rate restrictions.
+        val preferred = activeDisplay.supportedModes
+            .filter { it.physicalWidth == current.physicalWidth &&
+                it.physicalHeight == current.physicalHeight }
+            .maxByOrNull { it.refreshRate } ?: return
+        if (attributes.preferredDisplayModeId != preferred.modeId ||
+            attributes.preferredRefreshRate != preferred.refreshRate) {
+            attributes.preferredDisplayModeId = preferred.modeId
+            attributes.preferredRefreshRate = preferred.refreshRate
+            window.attributes = attributes
+        }
+    }
+
     private val storageChannel = "qingting/storage"
     private val desktopLyricsChannel = "qingting/desktop_lyrics"
     private val mediaControlsChannel = "qingting/media_controls"
@@ -50,6 +116,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        AndroidAppUpdate.register(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, storageChannel).setMethodCallHandler { call, result ->
             when (call.method) {
                 "hasAllFilesAccess" -> result.success(hasAllFilesAccess())

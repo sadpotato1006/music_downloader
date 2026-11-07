@@ -173,7 +173,7 @@ extension AppControllerLibraryBatchActions on AppController {
       _removePendingAlbumMatchForPath(track.path);
       _visibleDownloadedTracksSource = null;
     } finally {
-      _metadataWriteKeys.remove(key);
+      _songFiles.endWrite(key);
     }
   }
 
@@ -184,9 +184,9 @@ extension AppControllerLibraryBatchActions on AppController {
     tracks,
     apply: (track) async {
       final key = _trackPathKey(track.path);
-      if (_metadataWriteKeys.contains(key) ||
+      if (_songFiles.isWriting(key) ||
           _metadataReadInProgress(key) ||
-          _deletingTrackKeys.contains(key)) {
+          _songFiles.isDeleting(key)) {
         throw StateError('歌曲正在处理中，请稍后重试');
       }
       _removeDownloadedRecordInMemory(track);

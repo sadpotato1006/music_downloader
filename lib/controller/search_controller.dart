@@ -29,8 +29,22 @@ extension AppControllerSearchActions on AppController {
     unawaited(_ensureLibraryLyricsForQuery(libraryQuery));
   }
 
-  Future<void> _ensureLibraryLyricsForQuery(String query) =>
-      _libraryLyricsSearch.search(query, downloadedTracks);
+  Future<void> _ensureLibraryLyricsForQuery(String query) {
+    if (downloadedTracks.length >= AppController.backgroundLibraryThreshold) {
+      final request = (
+        downloadedTracks,
+        LibrarySearch.normalize(query),
+        librarySortMode,
+      );
+      if (_completedLibraryView == request) {
+        return _libraryLyricsSearch.search(query, downloadedTracks);
+      }
+      unawaited(_libraryLyricsSearch.search('', const []));
+      _requestLibraryView(request);
+      return libraryViewReady;
+    }
+    return _libraryLyricsSearch.search(query, downloadedTracks);
+  }
 
   void setLibrarySortMode(LibrarySortMode mode) {
     if (librarySortMode == mode) {
@@ -62,6 +76,7 @@ extension AppControllerSearchActions on AppController {
     _sourceRequests.resetDelay();
     searchResults = [];
     searchError = null;
+    onlineSearch.failed = false;
     globalMessage = '已切换到 ${source.name}';
     _notify();
 
@@ -90,8 +105,7 @@ extension AppControllerSearchActions on AppController {
     if (listEquals(updated, activeSettings.sourceSearchHistory)) {
       return;
     }
-    settings = activeSettings.copyWith(sourceSearchHistory: updated);
-    _debouncedSaveSettings();
+    preferences.update((value) => value.copyWith(sourceSearchHistory: updated));
   }
 
   void _rememberLibrarySearch(String keyword) {
@@ -106,8 +120,9 @@ extension AppControllerSearchActions on AppController {
     if (listEquals(updated, activeSettings.librarySearchHistory)) {
       return;
     }
-    settings = activeSettings.copyWith(librarySearchHistory: updated);
-    _debouncedSaveSettings();
+    preferences.update(
+      (value) => value.copyWith(librarySearchHistory: updated),
+    );
   }
 
   List<String> _updatedSearchHistory(List<String> current, String keyword) {
@@ -127,6 +142,8 @@ extension AppControllerSearchActions on AppController {
     if (_isDisposed) return;
     final generation = _beginPlaybackRequest();
     resolvingPlayId = result.id;
+    final key = searchPlaybackKey(result);
+    preparingPlaybackKey = key;
     globalMessage = '正在准备播放：${result.title}';
     _notify();
 
@@ -152,12 +169,15 @@ extension AppControllerSearchActions on AppController {
     } on MusicSourceException catch (error) {
       if (!_canCommitPlaybackRequest(generation)) return;
       globalMessage = error.message;
+      playbackFailure = (key: key, message: error.message);
     } catch (error) {
       if (!_canCommitPlaybackRequest(generation)) return;
       globalMessage = '播放失败：${_friendlyUnexpectedError(error)}';
+      playbackFailure = (key: key, message: globalMessage!);
     } finally {
       if (_canCommitPlaybackRequest(generation)) {
         resolvingPlayId = null;
+        preparingPlaybackKey = null;
         _notify();
       }
     }
@@ -205,24 +225,44 @@ extension AppControllerSearchActions on AppController {
   Future<void> playDownloaded(DownloadedTrack track) async {
     if (_isDisposed) return;
     final generation = _beginPlaybackRequest();
-    if (!_tryBeginMetadataRead(track.path)) {
-      globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候再播放。';
-      _notify();
-      return;
-    }
+    final key = localPlaybackKey(track);
+    preparingPlaybackKey = key;
+    _notify();
     var startedPlayback = false;
+    var acquiredRead = false;
     try {
+      acquiredRead = await _beginMetadataReadWhenAvailable(track.path);
+      if (!acquiredRead || !_canCommitPlaybackRequest(generation)) return;
       final item = await _playerItemFromDownloadedTrack(
         track,
         metadataReadHeld: true,
       );
       if (item == null || !_canCommitPlaybackRequest(generation)) {
+        if (item == null && _canCommitPlaybackRequest(generation)) {
+          playbackFailure = (
+            key: key,
+            message: globalMessage ?? '文件不可用，请检查后重试',
+          );
+        }
         return;
       }
-      await _enqueueAndPlay(item, requestGeneration: generation);
+      await _enqueueAndPlay(
+        item,
+        requestGeneration: generation,
+        metadataReadHeld: true,
+      );
       startedPlayback = _isCurrentPlaybackRequest(generation, item);
+    } catch (error) {
+      if (_canCommitPlaybackRequest(generation)) {
+        globalMessage = '播放失败：${_friendlyUnexpectedError(error)}';
+        playbackFailure = (key: key, message: globalMessage!);
+      }
     } finally {
-      _endMetadataRead(track.path);
+      if (acquiredRead) _endMetadataRead(track.path);
+      if (_canCommitPlaybackRequest(generation)) {
+        preparingPlaybackKey = null;
+        _notify();
+      }
       if (startedPlayback) {
         unawaited(_captureCurrentTrackDuration());
       }
@@ -237,12 +277,10 @@ extension AppControllerSearchActions on AppController {
     _notify();
 
     try {
-      if (!_tryBeginMetadataRead(track.path)) {
-        globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候再加入队列。';
-        return;
-      }
+      if (!await _beginMetadataReadWhenAvailable(track.path)) return;
       var startedPlayback = false;
       try {
+        if (!_canCommitQueueNext(generation)) return;
         final item = await _playerItemFromDownloadedTrack(
           track,
           metadataReadHeld: true,
@@ -250,7 +288,10 @@ extension AppControllerSearchActions on AppController {
         if (item == null || !_canCommitQueueNext(generation)) {
           return;
         }
-        final started = await _enqueueNextOrPlayWhenIdle(item);
+        final started = await _enqueueNextOrPlayWhenIdle(
+          item,
+          metadataReadHeld: true,
+        );
         startedPlayback = started;
         if (!_canCommitQueueNext(generation)) return;
         globalMessage = started

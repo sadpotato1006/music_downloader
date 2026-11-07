@@ -696,21 +696,4 @@ extension AppControllerDownloadActions on AppController {
     final normalized = p.normalize(value.trim());
     return Platform.isWindows ? normalized.toLowerCase() : normalized;
   }
-
-  String _normalizeManualDownloadPath(String value) {
-    return value
-        .trim()
-        .replaceAll('\\', Platform.pathSeparator)
-        .replaceFirstMapped(
-          RegExp(r'[，,]+([/\\])?$'),
-          (match) => match.group(1) ?? '',
-        )
-        .trim();
-  }
-
-  void _debouncedSaveSettings() {
-    if (settings != null) _settingsPersistence.schedule();
-  }
-
-  Future<void> _flushPendingSettings() => _settingsPersistence.flush();
 }

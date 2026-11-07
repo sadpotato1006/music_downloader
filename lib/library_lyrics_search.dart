@@ -68,6 +68,11 @@ class LibraryLyricsSearch {
     return _start();
   }
 
+  // The worker already checked cached lyric text. Publishing a large view only
+  // needs set membership, rather than scanning lyric strings again on the UI.
+  bool matchesCurrent(DownloadedTrack track, String normalizedQuery) =>
+      _query == normalizedQuery && _matches.contains(trackKey(track));
+
   Future<void> _start() {
     if (_operation != null) return _operation!;
     if (_disposed || _pending == null) return Future<void>.value();

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import 'app_log.dart';
+import 'audio_cache_service.dart';
 import 'coalescing_write_queue.dart';
 import 'download_transfer_service.dart';
 import 'models.dart';
@@ -20,10 +21,12 @@ class DownloadController extends ChangeNotifier {
     required this.runTask,
     required this.concurrency,
     required this.canStart,
+    this.audioCache,
   });
 
   final StorageService storage;
   final DownloadTransferService transferService;
+  final AudioCacheService? audioCache;
   final Future<void> Function(String id, CancelToken token) runTask;
   final int Function() concurrency;
   final bool Function() canStart;
@@ -294,7 +297,7 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<void> transfer(DownloadTask task, CancelToken token) =>
-      transferService.download(
+      _transferWithCache(
         task,
         token,
         onResponse: (received, total, validator) {
@@ -330,6 +333,37 @@ class DownloadController extends ChangeNotifier {
           _progress.value += 1;
         },
       );
+
+  Future<void> _transferWithCache(
+    DownloadTask task,
+    CancelToken token, {
+    required void Function(int, int?) onProgress,
+    required void Function(int, int?, String?) onResponse,
+  }) async {
+    final cache = audioCache;
+    if (cache != null) {
+      try {
+        if (await cache.copyIfAvailable(
+          task,
+          token,
+          onResponse: onResponse,
+          onProgress: onProgress,
+        )) {
+          return;
+        }
+      } catch (error) {
+        if (token.isCancelled) throw token.cancelError!;
+        AppLog.instance.warning('cache', '音频缓存不可用，继续正常下载', detail: error);
+      }
+    }
+    if (token.isCancelled) throw token.cancelError!;
+    await transferService.download(
+      task,
+      token,
+      onResponse: onResponse,
+      onProgress: onProgress,
+    );
+  }
 
   Future<void> waitForIdle() async {
     while (_workers.isNotEmpty || _cleanups.isNotEmpty) {

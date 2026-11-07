@@ -46,7 +46,7 @@ Future<List<PlaylistImportRequest>?> _choosePlaylistImport(
             children: [
               const Text(
                 '选择新建歌单或合并目标。重复歌曲自动去重，新建时重名自动加序号。',
-                style: TextStyle(color: _muted, fontSize: 13),
+                style: TextStyle(color: appMuted, fontSize: 13),
               ),
               const SizedBox(height: 12),
               Expanded(
@@ -65,7 +65,7 @@ Future<List<PlaylistImportRequest>?> _choosePlaylistImport(
                         ),
                         Text(
                           '${preview.paths.length} 首已匹配 · ${preview.pending.length} 首待匹配',
-                          style: const TextStyle(color: _muted, fontSize: 13),
+                          style: const TextStyle(color: appMuted, fontSize: 13),
                         ),
                         const SizedBox(height: 8),
                         DropdownButtonFormField<String>(
@@ -97,7 +97,7 @@ Future<List<PlaylistImportRequest>?> _choosePlaylistImport(
               const SizedBox(height: 12),
               const Text(
                 '未匹配歌曲会保留；歌曲下载或扫描入库后自动重试匹配。',
-                style: TextStyle(color: _muted, fontSize: 12),
+                style: TextStyle(color: appMuted, fontSize: 12),
               ),
             ],
           ),
@@ -136,7 +136,7 @@ void _showPendingPlaylistTracks(BuildContext context, MusicPlaylist playlist) {
           children: [
             const Text(
               '这些歌曲尚未匹配到本地曲库；存在多个可能的版本时也会保留在这里。歌曲入库后自动重试匹配。',
-              style: TextStyle(color: _muted, fontSize: 13),
+              style: TextStyle(color: appMuted, fontSize: 13),
             ),
             const SizedBox(height: 12),
             Expanded(

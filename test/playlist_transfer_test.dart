@@ -492,6 +492,9 @@ class _Source implements MusicSource {
 
 class _Player implements PlaybackService {
   @override
+  PlaybackHealth health = const PlaybackHealth();
+
+  @override
   VoidCallback? onChanged;
   @override
   VoidCallback? onCompleted;

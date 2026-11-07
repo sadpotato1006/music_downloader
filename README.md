@@ -4,7 +4,7 @@
 
 <h1 align="center">青听</h1>
 
-<p align="center">搜索、聆听与整理你的音乐。<br>v1.7.0 · Android · Windows · Linux</p>
+<p align="center">搜索、聆听与整理你的音乐。<br>v1.7.1 · Android · Windows · Linux</p>
 
 <p align="center">
   <a href="https://github.com/sadpotato1006/music_downloader/releases">下载</a> ·
@@ -21,6 +21,8 @@
 - **收藏与歌单**：多选歌曲，批量收藏、加入歌单和修改专辑；歌单文件支持导入、导出与合并。
 - **专辑与封面**：自动补全专辑信息，为 MP3 写入歌曲信息、歌词和封面。
 - **北科云盘同步**：在设备间同步歌曲及歌曲信息，仅限 USTBer 使用。
+- **主题配色**：青竹、晴空、暮紫、樱粉、暖杏、石墨六套轻量主题，在设置中切换并自动保存，歌曲细边框跟随配色；所有卡片边线跟随配色，Android 保留原版固定图标。
+- **软件更新**：三端支持手动与启动时检查；Windows 应用内升级，Android 下载并打开系统安装器，Linux 提供对应版本发布页入口。
 
 ## 下载安装
 

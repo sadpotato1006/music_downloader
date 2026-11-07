@@ -1,52 +1,20 @@
 part of '../app_controller.dart';
 
 extension AppControllerLibraryActions on AppController {
-  bool _tryBeginMetadataRead(String path, {bool completedDownload = false}) {
-    final pathKey = _trackPathKey(path);
-    if ((_cloudSyncOwnsFiles && !completedDownload) ||
-        _deletingTrackKeys.contains(pathKey) ||
-        _metadataWriteKeys.contains(pathKey)) {
-      return false;
-    }
-    _metadataReadCounts[pathKey] = (_metadataReadCounts[pathKey] ?? 0) + 1;
-    return true;
-  }
+  bool _tryBeginMetadataRead(String path, {bool completedDownload = false}) =>
+      _songFiles.tryRead(
+        _trackPathKey(path),
+        completedDownload: completedDownload,
+      );
 
-  Future<bool> _beginMetadataReadWhenAvailable(String path) async {
-    final pathKey = _trackPathKey(path);
-    while (!_isDisposed) {
-      if (_deletingTrackKeys.contains(pathKey)) {
-        return false;
-      }
-      if (_tryBeginMetadataRead(path)) {
-        return true;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    return false;
-  }
+  Future<bool> _beginMetadataReadWhenAvailable(String path) =>
+      _songFiles.readWhenAvailable(_trackPathKey(path));
 
-  void _endMetadataRead(String path) {
-    final pathKey = _trackPathKey(path);
-    final count = _metadataReadCounts[pathKey] ?? 0;
-    if (count <= 1) {
-      _metadataReadCounts.remove(pathKey);
-    } else {
-      _metadataReadCounts[pathKey] = count - 1;
-    }
-  }
+  void _endMetadataRead(String path) => _songFiles.endRead(_trackPathKey(path));
 
-  bool _metadataReadInProgress(String pathKey) =>
-      (_metadataReadCounts[pathKey] ?? 0) > 0;
+  bool _metadataReadInProgress(String pathKey) => _songFiles.isReading(pathKey);
 
-  bool _tryBeginMetadataWrite(String pathKey) {
-    if (_cloudSyncOwnsFiles ||
-        _deletingTrackKeys.contains(pathKey) ||
-        _metadataReadInProgress(pathKey)) {
-      return false;
-    }
-    return _metadataWriteKeys.add(pathKey);
-  }
+  bool _tryBeginMetadataWrite(String pathKey) => _songFiles.tryWrite(pathKey);
 
   Future<void> _captureCurrentTrackDuration() {
     final activeOperation = _durationCaptureOperation;
@@ -106,7 +74,7 @@ extension AppControllerLibraryActions on AppController {
         detail: '$error\n$stackTrace',
       );
     } finally {
-      _metadataWriteKeys.remove(pathKey);
+      _songFiles.endWrite(pathKey);
     }
   }
 
@@ -290,7 +258,7 @@ extension AppControllerLibraryActions on AppController {
 
   Future<void> removeDownloadedRecord(DownloadedTrack track) async {
     final trackPathKey = _trackPathKey(track.path);
-    if (_metadataWriteKeys.contains(trackPathKey) ||
+    if (_songFiles.isWriting(trackPathKey) ||
         _metadataReadInProgress(trackPathKey)) {
       globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候。';
       _notify();
@@ -305,7 +273,7 @@ extension AppControllerLibraryActions on AppController {
       fileDeletionService.movesFilesToRecycleBin;
 
   bool isDeletingDownloadedTrack(DownloadedTrack track) =>
-      _deletingTrackKeys.contains(_trackPathKey(track.path));
+      _songFiles.isDeleting(_trackPathKey(track.path));
 
   Future<bool> deleteDownloadedTrack(
     DownloadedTrack track, {
@@ -317,13 +285,13 @@ extension AppControllerLibraryActions on AppController {
       return false;
     }
     final trackPathKey = _trackPathKey(track.path);
-    if (_metadataWriteKeys.contains(trackPathKey) ||
+    if (_songFiles.isWriting(trackPathKey) ||
         _metadataReadInProgress(trackPathKey)) {
       globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候。';
       _notify();
       return false;
     }
-    if (!_deletingTrackKeys.add(trackPathKey)) {
+    if (!_songFiles.tryDelete(trackPathKey)) {
       globalMessage = '正在删除“${track.title}”，请稍候。';
       _notify();
       return false;
@@ -336,7 +304,7 @@ extension AppControllerLibraryActions on AppController {
         resumePlayback: resumePlayback,
       );
     } finally {
-      _deletingTrackKeys.remove(trackPathKey);
+      _songFiles.endDelete(trackPathKey);
       _notify();
     }
   }
@@ -648,8 +616,8 @@ extension AppControllerLibraryActions on AppController {
     final missing = await mapWithConcurrency(snapshot, (track) async {
       final key = _trackPathKey(track.path);
       if (unfinishedPaths.contains(key) ||
-          _metadataWriteKeys.contains(key) ||
-          _deletingTrackKeys.contains(key)) {
+          _songFiles.isWriting(key) ||
+          _songFiles.isDeleting(key)) {
         return null;
       }
       try {
@@ -667,8 +635,8 @@ extension AppControllerLibraryActions on AppController {
       if (await File(track.path).exists() ||
           !identical(_downloadedTrackByPath(track.path), track) ||
           _unfinishedDownloadPaths().contains(key) ||
-          _metadataWriteKeys.contains(key) ||
-          _deletingTrackKeys.contains(key)) {
+          _songFiles.isWriting(key) ||
+          _songFiles.isDeleting(key)) {
         continue;
       }
       if (currentItem?.localPath != null &&
@@ -677,8 +645,8 @@ extension AppControllerLibraryActions on AppController {
         if (await File(track.path).exists() ||
             !identical(_downloadedTrackByPath(track.path), track) ||
             _unfinishedDownloadPaths().contains(key) ||
-            _metadataWriteKeys.contains(key) ||
-            _deletingTrackKeys.contains(key)) {
+            _songFiles.isWriting(key) ||
+            _songFiles.isDeleting(key)) {
           continue;
         }
       }
@@ -747,7 +715,7 @@ extension AppControllerLibraryActions on AppController {
         removeCover: removeCover,
       );
     } finally {
-      _metadataWriteKeys.remove(trackPathKey);
+      _songFiles.endWrite(trackPathKey);
     }
   }
 
@@ -1141,6 +1109,7 @@ extension AppControllerLibraryActions on AppController {
   }
 
   void _scheduleDeferredAlbumWrites() {
+    if (!_startupMaintenanceReady) return;
     if (_isDisposed ||
         _preparingToExit ||
         _deferredAlbumWritesScheduled ||
@@ -1164,8 +1133,7 @@ extension AppControllerLibraryActions on AppController {
               final key = _trackPathKey(pending.trackPath);
               while (!_isDisposed &&
                   !_isTrackLoadedInPlayer(pending.trackPath) &&
-                  (_metadataReadInProgress(key) ||
-                      _metadataWriteKeys.contains(key))) {
+                  (_metadataReadInProgress(key) || _songFiles.isWriting(key))) {
                 await Future<void>.delayed(const Duration(milliseconds: 50));
               }
               if (_isDisposed || _isTrackLoadedInPlayer(pending.trackPath)) {
@@ -1400,18 +1368,19 @@ extension AppControllerLibraryActions on AppController {
     bool includeMetadata = true,
     bool showMissingMessage = true,
     bool metadataReadHeld = false,
+    bool Function()? shouldRun,
   }) async {
     final acquiredRead = metadataReadHeld
         ? true
-        : _tryBeginMetadataRead(track.path);
+        : await _beginMetadataReadWhenAvailable(track.path);
     if (!acquiredRead) {
-      if (showMissingMessage) {
-        globalMessage = '正在更新“${track.title}”的歌曲信息，请稍候再播放。';
-        _notify();
-      }
       return null;
     }
     try {
+      if (_isDisposed || (shouldRun != null && !shouldRun())) return null;
+      // A queued read may resume after sync or a metadata edit replaced the
+      // library record. Build playback metadata from that latest record.
+      track = _downloadedTrackByPath(track.path) ?? track;
       final file = File(track.path);
       if (!await file.exists()) {
         if (showMissingMessage) {
@@ -1572,7 +1541,7 @@ extension AppControllerLibraryActions on AppController {
         fillOnly: requireAlbumMissing,
       );
     } finally {
-      _metadataWriteKeys.remove(trackPathKey);
+      _songFiles.endWrite(trackPathKey);
     }
   }
 
@@ -1785,12 +1754,11 @@ extension AppControllerLibraryActions on AppController {
   }
 
   Future<void> _hydrateDownloadedTracksInBackground() async {
-    await Future<void>.delayed(const Duration(milliseconds: 200));
-    if (_isDisposed) return;
+    if (_isDisposed || _preparingToExit) return;
     final hydrated = await mapWithConcurrency(
       List<DownloadedTrack>.from(downloadedTracks),
       (track) async {
-        if (_isDisposed) {
+        if (_isDisposed || _preparingToExit) {
           return null;
         }
         final result = await _hydrateDownloadedTrack(track);
@@ -1800,7 +1768,7 @@ extension AppControllerLibraryActions on AppController {
       maxConcurrent: 3,
     );
 
-    if (_isDisposed) return;
+    if (_isDisposed || _preparingToExit) return;
     final updates = {
       for (final result in hydrated.whereType<_HydratedTrack>())
         _trackPathKey(result.original.path): result,
@@ -1890,14 +1858,13 @@ extension AppControllerLibraryActions on AppController {
   Future<_HydratedTrack?> _hydrateDownloadedTrack(
     DownloadedTrack snapshot,
   ) async {
-    final trackPathKey = _trackPathKey(snapshot.path);
-    if (!_tryBeginMetadataWrite(trackPathKey)) {
+    if (!_tryBeginMetadataRead(snapshot.path)) {
       return null;
     }
     try {
       return await _hydrateDownloadedTrackUnlocked(snapshot);
     } finally {
-      _metadataWriteKeys.remove(trackPathKey);
+      _endMetadataRead(snapshot.path);
     }
   }
 

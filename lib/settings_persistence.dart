@@ -9,11 +9,16 @@ class SettingsPersistence {
   SettingsPersistence({
     required this.current,
     required this.save,
+    this.onChanged,
     this.delay = const Duration(milliseconds: 350),
   });
   final AppSettings? Function() current;
   final Future<void> Function(AppSettings settings) save;
   final Duration delay;
+  final void Function()? onChanged;
+  Object? lastError;
+  bool get hasPending => _savedRevision < _revision;
+  bool get isSaving => _active != null;
   Timer? _timer;
   int _revision = 0;
   int _savedRevision = 0;
@@ -21,17 +26,13 @@ class SettingsPersistence {
 
   void schedule() {
     _revision++;
+    onChanged?.call();
     _timer?.cancel();
     _timer = Timer(delay, () async {
       try {
         await flush();
-      } catch (error, stack) {
-        AppLog.instance.error(
-          'storage',
-          '保存设置失败，将在下次保存时重试',
-          error: error,
-          stackTrace: stack,
-        );
+      } catch (_) {
+        // flush records the error and retains the pending revision for retry.
       }
     });
   }
@@ -50,11 +51,23 @@ class SettingsPersistence {
       final revision = _revision;
       final operation = Future<void>.sync(() => save(snapshot));
       _active = operation;
+      onChanged?.call();
       try {
         await operation;
         _savedRevision = revision;
+        lastError = null;
+      } catch (error, stack) {
+        lastError = error;
+        AppLog.instance.error(
+          'storage',
+          '保存设置失败，修改仍待保存',
+          error: error,
+          stackTrace: stack,
+        );
+        rethrow;
       } finally {
         if (identical(_active, operation)) _active = null;
+        onChanged?.call();
       }
     }
   }

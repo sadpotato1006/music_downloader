@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'app_info.dart';
 import 'app_log.dart';
 import 'app_update_service.dart';
+import 'android_update_bridge.dart';
 import 'windows_update_bridge.dart';
 
 enum AppUpdateStatus {
@@ -18,16 +19,25 @@ enum AppUpdateStatus {
   installing,
 }
 
-class WindowsUpdateController extends ChangeNotifier {
-  WindowsUpdateController({
+class AppUpdateController extends ChangeNotifier {
+  AppUpdateController({
     AppUpdateSource? source,
     UpdateInstaller? installer,
+    AppUpdatePlatform? platform,
     String currentVersion = appVersion,
-  }) : _source = source ?? GitHubUpdateSource(),
-       _installer = installer ?? WindowsUpdateInstaller(),
+  }) : platform = platform ?? AppUpdatePlatform.current,
+       _source = source ?? GitHubUpdateSource(platform: platform),
+       _installer =
+           installer ??
+           ((platform ?? AppUpdatePlatform.current) == AppUpdatePlatform.android
+               ? AndroidUpdateInstaller()
+               : WindowsUpdateInstaller()),
        currentVersion = UpdateVersion.parse(currentVersion);
 
   final AppUpdateSource _source;
+  final AppUpdatePlatform platform;
+  bool get supportsInAppInstall => platform != AppUpdatePlatform.linux;
+  bool get restartsApp => platform == AppUpdatePlatform.windows;
   final UpdateInstaller _installer;
   final UpdateVersion currentVersion;
   AppUpdateStatus status = AppUpdateStatus.idle;
@@ -95,7 +105,9 @@ class WindowsUpdateController extends ChangeNotifier {
   Future<void> download() async {
     final selected = release;
     if (_disposed ||
+        !supportsInAppInstall ||
         selected == null ||
+        selected.requiresManualInstall ||
         busy ||
         status == AppUpdateStatus.ready) {
       return;
@@ -142,11 +154,33 @@ class WindowsUpdateController extends ChangeNotifier {
     if (status == AppUpdateStatus.downloading) _cancel?.cancel('用户取消更新下载');
   }
 
+  Future<void> openDownloadPage(
+    Future<bool> Function(String url) openUrl,
+  ) async {
+    final selected = release;
+    if (_disposed ||
+        busy ||
+        selected == null ||
+        !selected.requiresManualInstall) {
+      return;
+    }
+    error = null;
+    try {
+      if (!await openUrl(selected.url.toString())) {
+        throw const FormatException('无法打开发布页，请稍后重试');
+      }
+    } catch (exception) {
+      if (!_disposed) error = _message(exception, '无法打开发布页，请稍后重试');
+    }
+    _notify();
+  }
+
   Future<void> install({
     required Future<void> Function() prepareToExit,
     required void Function() restoreAfterFailure,
   }) async {
     if (_disposed ||
+        !supportsInAppInstall ||
         status != AppUpdateStatus.ready ||
         _download == null ||
         release == null) {
@@ -160,6 +194,12 @@ class WindowsUpdateController extends ChangeNotifier {
       session = await _installer.prepare(_download!, release!);
       await prepareToExit();
       await session.commitAndExit();
+      if (!restartsApp && !_disposed) {
+        restoreAfterFailure();
+        status = AppUpdateStatus.ready;
+        noticeVisible = false;
+        _notify();
+      }
     } catch (exception, stack) {
       try {
         await session?.abort();

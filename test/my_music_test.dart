@@ -514,6 +514,9 @@ class _FailingQueueStorageService extends _FakeStorageService {
 }
 
 class _FakePlaybackService implements PlaybackService {
+  @override
+  PlaybackHealth health = const PlaybackHealth();
+
   final ValueNotifier<Duration> _positionListenable = ValueNotifier(
     Duration.zero,
   );

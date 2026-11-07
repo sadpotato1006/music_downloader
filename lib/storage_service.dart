@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
@@ -10,6 +11,7 @@ import 'app_log.dart';
 import 'models.dart';
 import 'pending_album_match.dart';
 import 'storage_json_codec.dart';
+import 'snapshot_delta.dart';
 
 class StorageRecoveryException implements Exception {
   const StorageRecoveryException({
@@ -40,7 +42,13 @@ class StorageService {
   static const _pendingAlbumMatchesFileName = 'pending_album_matches.json';
 
   final Directory? _supportDirectoryOverride;
+  Future<Directory> audioCacheDirectory() => _supportDirectory('audio_cache');
   final Map<String, Future<void>> _writeQueues = {};
+  final Map<String, Future<void>> _snapshotWrites = {};
+  final Map<String, String> _snapshotHashes = {};
+  final Map<String, SnapshotBase> _snapshotBases = {};
+  static const incrementalEntryThreshold = 512;
+  static const maxDeltaBytes = 256 * 1024;
   final Map<String, StorageRecoveryException> _blockedJsonFiles = {};
   static const _jsonCodec = StorageJsonCodec();
 
@@ -58,19 +66,32 @@ class StorageService {
   }
 
   Future<List<DownloadedTrack>> loadDownloadedTracks() async {
-    return await _loadJsonWithBackup(
-          _libraryFileName,
-          _decodeDownloadedTracks,
-        ) ??
-        const [];
+    final base =
+        await _loadJsonWithBackup(_libraryFileName, _decodeDownloadedTracks) ??
+        const <DownloadedTrack>[];
+    final hash = _snapshotHashes[_libraryFileName];
+    if (hash == null) {
+      await _checkMissingDeltaBase(_libraryFileName);
+      return base;
+    }
+    final delta = await _loadJsonWithBackup(
+      '$_libraryFileName.delta',
+      _decodeLibraryDelta,
+    );
+    _snapshotBases[_libraryFileName] = SnapshotBase(hash, base);
+    return delta?.hash == hash
+        ? _applyDelta(_libraryFileName, delta!, base)
+        : base;
   }
 
-  Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) async {
-    await _saveJson(
+  Future<void> saveDownloadedTracks(List<DownloadedTrack> tracks) {
+    final snapshot = List<DownloadedTrack>.unmodifiable(tracks);
+    return _saveSnapshot(
       _libraryFileName,
-      List<DownloadedTrack>.unmodifiable(tracks),
-      entries: tracks.length,
-      textCodeUnits: tracks.fold<int>(
+      snapshot,
+      snapshot,
+      const {},
+      textCodeUnits: snapshot.fold<int>(
         0,
         (count, track) =>
             count +
@@ -115,26 +136,44 @@ class StorageService {
   }
 
   Future<SavedPlayerQueue> loadPlayerQueue() async {
-    return await _loadJsonWithBackup(_queueFileName, _decodePlayerQueue) ??
+    final base =
+        await _loadJsonWithBackup(_queueFileName, _decodePlayerQueue) ??
         const SavedPlayerQueue(items: [], currentIndex: -1);
+    final hash = _snapshotHashes[_queueFileName];
+    if (hash == null) {
+      await _checkMissingDeltaBase(_queueFileName);
+      return base;
+    }
+    final delta = await _loadJsonWithBackup(
+      '$_queueFileName.delta',
+      _decodeQueueDelta,
+    );
+    _snapshotBases[_queueFileName] = SnapshotBase(hash, base.items);
+    if (delta?.hash != hash) return base;
+    return SavedPlayerQueue(
+      items: _applyDelta(_queueFileName, delta!, base.items),
+      currentIndex: delta.metadata['currentIndex'] as int,
+      shuffleEnabled: delta.metadata['shuffleEnabled'] as bool,
+    );
   }
 
   Future<void> savePlayerQueue(
     List<PlayerItem> items,
     int currentIndex, {
     required bool shuffleEnabled,
-  }) async {
+  }) {
     final saved = SavedPlayerQueue(
       items: List<PlayerItem>.unmodifiable(items),
       currentIndex: items.isEmpty
           ? -1
-          : currentIndex.clamp(0, items.length - 1).toInt(),
+          : currentIndex.clamp(0, items.length - 1),
       shuffleEnabled: shuffleEnabled,
     );
-    await _saveJson(
+    return _saveSnapshot(
       _queueFileName,
+      saved.items,
       saved,
-      entries: items.length,
+      {'currentIndex': saved.currentIndex, 'shuffleEnabled': shuffleEnabled},
       textCodeUnits: items.fold<int>(
         0,
         (count, item) => count + (item.lyrics?.length ?? 0),
@@ -351,6 +390,104 @@ class StorageService {
     return directory;
   }
 
+  Future<void> _rememberSnapshotHash(String fileName, String content) async {
+    if (fileName == _libraryFileName || fileName == _queueFileName) {
+      _snapshotHashes[fileName] = await _snapshotDigest(content);
+    }
+  }
+
+  Future<void> _checkMissingDeltaBase(String fileName) async {
+    final delta = await _supportFile('$fileName.delta');
+    if (await delta.exists() || await _backupFile(delta).exists()) {
+      final failure = StorageRecoveryException(
+        path: (await _supportFile(fileName)).path,
+      );
+      _blockedJsonFiles[fileName] = failure;
+      throw failure;
+    }
+  }
+
+  List<T> _applyDelta<T extends Object>(
+    String fileName,
+    SnapshotDelta<T> delta,
+    List<T> base,
+  ) {
+    try {
+      return delta.apply(base);
+    } catch (_) {
+      final failure = StorageRecoveryException(path: '$fileName.delta');
+      _blockedJsonFiles['$fileName.delta'] = failure;
+      throw failure;
+    }
+  }
+
+  Future<void> _saveSnapshot(
+    String fileName,
+    List<Object> items,
+    Object value,
+    Map<String, Object?> metadata, {
+    int textCodeUnits = 0,
+  }) {
+    final previous = _snapshotWrites[fileName];
+    late final Future<void> operation;
+    operation = () async {
+      if (previous != null) {
+        try {
+          await previous;
+        } catch (_) {
+          /* A later edit can retry. */
+        }
+      }
+      _ensureJsonWritesAllowed();
+      final base = _snapshotBases[fileName];
+      if (base != null &&
+          base.items.length >= incrementalEntryThreshold &&
+          items.length >= incrementalEntryThreshold) {
+        final delta = base.diff(items, metadata);
+        if (delta != null) {
+          final content = await _jsonCodec.encode(
+            delta,
+            entries: delta.changed.length,
+            textCodeUnits: _changedTextSize(delta.changed.values),
+          );
+          if (content.length <= maxDeltaBytes ~/ 3) {
+            await _saveJson('$fileName.delta', delta, serialized: content);
+            return;
+          }
+        }
+      }
+      final content = await _jsonCodec.encode(
+        value,
+        entries: items.length,
+        textCodeUnits: textCodeUnits,
+      );
+      final hash = await _snapshotDigest(content);
+      if (base != null &&
+          base.hash == hash &&
+          base.items.length >= incrementalEntryThreshold) {
+        // Reverting to the exact checkpoint must first commit an empty overlay.
+        // Otherwise a crash could replay an older delta over identical bytes.
+        final reset = SnapshotDelta<Object>(
+          hash: hash,
+          baseLength: items.length,
+          length: items.length,
+          changed: const {},
+          metadata: metadata,
+        );
+        await _saveJson('$fileName.delta', reset);
+      } else {
+        await _saveJson(fileName, value, serialized: content);
+      }
+      _snapshotBases[fileName] = SnapshotBase(hash, items);
+    }();
+    _snapshotWrites[fileName] = operation;
+    return operation.whenComplete(() {
+      if (identical(_snapshotWrites[fileName], operation)) {
+        _snapshotWrites.remove(fileName);
+      }
+    });
+  }
+
   Future<T?> _loadJsonWithBackup<T>(
     String fileName,
     T Function(Object? json) decode,
@@ -361,14 +498,15 @@ class StorageService {
     final backupExists = await backup.exists();
     if (!primaryExists && !backupExists) {
       _blockedJsonFiles.remove(fileName);
+      _snapshotHashes.remove(fileName);
+      _snapshotBases.remove(fileName);
       return null;
     }
     if (primaryExists) {
       try {
-        final value = await _jsonCodec.decode(
-          await file.readAsString(),
-          decode,
-        );
+        final content = await file.readAsString();
+        final value = await _jsonCodec.decode(content, decode);
+        await _rememberSnapshotHash(fileName, content);
         _blockedJsonFiles.remove(fileName);
         return value;
       } catch (error, stackTrace) {
@@ -415,6 +553,7 @@ class StorageService {
       throw failure;
     }
     _blockedJsonFiles.remove(fileName);
+    await _rememberSnapshotHash(fileName, content);
     AppLog.instance.info('storage', '$fileName 已从备份恢复，损坏主文件已另存');
     return value;
   }
@@ -424,6 +563,7 @@ class StorageService {
     Object? value, {
     int entries = 0,
     int textCodeUnits = 0,
+    String? serialized,
   }) async {
     final previous = _writeQueues[fileName];
     late final Future<void> operation;
@@ -436,15 +576,18 @@ class StorageService {
         }
       }
       _ensureJsonWritesAllowed();
-      final content = await _jsonCodec.encode(
-        value,
-        entries: entries,
-        textCodeUnits: textCodeUnits,
-      );
+      final content =
+          serialized ??
+          await _jsonCodec.encode(
+            value,
+            entries: entries,
+            textCodeUnits: textCodeUnits,
+          );
       // A parallel bootstrap read may discover corruption during encoding.
       _ensureJsonWritesAllowed();
       final file = await _supportFile(fileName);
       await _atomicWrite(file, content);
+      await _rememberSnapshotHash(fileName, content);
     }();
     // Register before the first filesystem await so an immediate flush sees it.
     _writeQueues[fileName] = operation;
@@ -464,9 +607,9 @@ class StorageService {
   Future<void> flushPendingWrites() async {
     Object? firstError;
     StackTrace? firstStackTrace;
-    while (_writeQueues.isNotEmpty) {
+    while (_writeQueues.isNotEmpty || _snapshotWrites.isNotEmpty) {
       try {
-        await Future.wait(_writeQueues.values.toList());
+        await Future.wait([..._writeQueues.values, ..._snapshotWrites.values]);
       } catch (error, stackTrace) {
         firstError ??= error;
         firstStackTrace ??= stackTrace;
@@ -628,3 +771,38 @@ List<PendingAlbumMatch> _decodePendingAlbumMatches(Object? json) =>
               item.candidates.isNotEmpty,
         )
         .toList();
+
+SnapshotDelta<DownloadedTrack> _decodeLibraryDelta(Object? json) =>
+    SnapshotDelta.decode(
+      json,
+      (value) => _decodeDownloadedTracks([value]).single,
+      queue: false,
+    );
+SnapshotDelta<PlayerItem> _decodeQueueDelta(Object? json) =>
+    SnapshotDelta.decode(
+      json,
+      (value) => _decodePlayerQueue({
+        'items': [value],
+        'currentIndex': 0,
+      }).items.single,
+      queue: true,
+    );
+
+int _changedTextSize(Iterable<Object> items) => items.fold(
+  0,
+  (count, item) =>
+      count +
+      switch (item) {
+        DownloadedTrack track =>
+          (track.metadataLyrics?.length ?? 0) +
+              (track.syncedMetadata?.values.lyrics.length ?? 0),
+        PlayerItem item => item.lyrics?.length ?? 0,
+        _ => 0,
+      },
+);
+Future<String> _snapshotDigest(String content) async {
+  if (content.length < StorageJsonCodec.backgroundTextThreshold) {
+    return sha256.convert(utf8.encode(content)).toString();
+  }
+  return Isolate.run(() => sha256.convert(utf8.encode(content)).toString());
+}

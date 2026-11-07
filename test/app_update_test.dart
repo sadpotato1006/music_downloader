@@ -1,16 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
+import 'package:qingting/android_update_bridge.dart';
 import 'package:qingting/app_info.dart';
 import 'package:qingting/app_update_service.dart';
 import 'package:qingting/models.dart';
 import 'package:qingting/windows_update_bridge.dart';
-import 'package:qingting/windows_update_controller.dart';
+import 'package:qingting/app_update_controller.dart';
 
 const _base =
     'https://github.com/sadpotato1006/music_downloader/releases/download/v1.7.0/';
@@ -101,7 +102,10 @@ void main() {
           200,
         ),
       );
-      source = GitHubUpdateSource(dio: Dio()..httpClientAdapter = adapter);
+      source = GitHubUpdateSource(
+        dio: Dio()..httpClientAdapter = adapter,
+        platform: AppUpdatePlatform.windows,
+      );
       addTearDown(source.close);
     });
     Future<AppUpdateRelease?> check() =>
@@ -174,6 +178,252 @@ void main() {
     });
   });
 
+  for (final platform in [AppUpdatePlatform.android, AppUpdatePlatform.linux]) {
+    group('${platform.name} release checks', () {
+      late Map<String, dynamic> latest, manifest;
+      late GitHubUpdateSource source;
+      late _Adapter adapter;
+      setUp(() {
+        latest = _latest();
+        manifest = _manifest();
+        // Android and Linux do not depend on a Windows installer.
+        manifest.remove('windows-x64');
+        adapter = _Adapter(
+          (options) => ResponseBody.fromString(
+            jsonEncode(
+              options.uri.host == 'api.github.com' ? latest : manifest,
+            ),
+            200,
+          ),
+        );
+        source = GitHubUpdateSource(
+          dio: Dio()..httpClientAdapter = adapter,
+          platform: platform,
+        );
+        addTearDown(source.close);
+      });
+      Future<AppUpdateRelease?> check([String current = '1.6.1+34']) =>
+          source.check(UpdateVersion.parse(current), CancelToken());
+
+      test('checks build numbers without a Windows package', () async {
+        final found = (await check('1.7.0+34'))!;
+        expect(found.version.toString(), '1.7.0+35');
+        expect(found.requiresManualInstall, isTrue);
+        expect(found.notes, 'Release notes');
+        expect(
+          found.url.toString(),
+          'https://github.com/sadpotato1006/music_downloader/releases/tag/v1.7.0',
+        );
+        expect(await check('1.7.0+35'), isNull);
+        expect(await check('1.8.0+1'), isNull);
+      });
+      test(
+        'new releases without a manifest still offer manual download',
+        () async {
+          latest['assets'] = [];
+          expect((await check())!.requiresManualInstall, isTrue);
+          expect(adapter.calls, hasLength(1));
+          expect(await check('1.7.0+35'), isNull);
+        },
+      );
+      test('ignores drafts and prereleases', () async {
+        latest['draft'] = true;
+        expect(await check(), isNull);
+        latest['draft'] = false;
+        latest['prerelease'] = true;
+        expect(await check(), isNull);
+      });
+      test('rejects mismatched version and duplicate manifests', () async {
+        manifest['version'] = '1.8.0+35';
+        await expectLater(check(), throwsFormatException);
+        manifest['version'] = '1.7.0+35';
+        (latest['assets'] as List).add(_asset('qingting-update.json'));
+        await expectLater(check(), throwsFormatException);
+      });
+      if (platform == AppUpdatePlatform.android) {
+        const apkName = 'QingTing-v1.7.0-build35.apk';
+        test('selects the verified Android APK', () async {
+          manifest['android'] = {
+            'installer': apkName,
+            'size': _bytes.length,
+            'sha256': _hash,
+          };
+          (latest['assets'] as List).add(_asset(apkName));
+          final found = (await check())!;
+          expect(found.requiresManualInstall, isFalse);
+          expect(found.assetName, apkName);
+          expect(found.sha256Hex, _hash);
+        });
+        for (final invalid in ['name', 'size', 'hash', 'url', 'digest']) {
+          test('rejects invalid Android $invalid', () async {
+            final entry = <String, dynamic>{
+              'installer': apkName,
+              'size': _bytes.length,
+              'sha256': _hash,
+            };
+            final asset = _asset(apkName);
+            manifest['android'] = entry;
+            (latest['assets'] as List).add(asset);
+            switch (invalid) {
+              case 'name':
+                entry['installer'] = _name;
+              case 'size':
+                entry['size'] = 1;
+              case 'hash':
+                entry['sha256'] = 'bad';
+              case 'url':
+                asset['browser_download_url'] = 'https://example.com/$apkName';
+              case 'digest':
+                asset['digest'] = 'sha256:bad';
+            }
+            await expectLater(check(), throwsFormatException);
+          });
+        }
+      }
+    });
+  }
+
+  test(
+    'Linux only checks and opens downloads, never downloads an installer',
+    () async {
+      final source = _Source();
+      final controller = AppUpdateController(
+        source: source,
+        platform: AppUpdatePlatform.linux,
+        currentVersion: '1.6.1+34',
+      );
+      addTearDown(controller.dispose);
+      controller.automaticCheckEnabled = false;
+      await controller.check(automatic: true);
+      expect(source.checks, 0);
+      await controller.check();
+      expect(controller.noticeVisible, isTrue);
+      await controller.download();
+      expect(source.downloads, 0);
+      controller.release = AppUpdateRelease(
+        version: UpdateVersion.parse('1.7.0+35'),
+        notes: '',
+        url: Uri.parse(appReleasePage),
+        requiresManualInstall: true,
+      );
+      await controller.openDownloadPage((url) async => false);
+      expect(controller.error, contains('无法打开发布页'));
+      String? opened;
+      await controller.openDownloadPage((url) async {
+        opened = url;
+        return true;
+      });
+      expect(opened, appReleasePage);
+      expect(controller.error, isNull);
+    },
+  );
+
+  group('Android installer handoff', () {
+    const channel = MethodChannel('qingting/app_update');
+    late Directory cache;
+    late File apk;
+    late AppUpdateRelease release;
+    late List<MethodCall> calls;
+    setUp(() async {
+      cache = await Directory.systemTemp.createTemp('qingting-apk-test-');
+      apk = await File('${cache.path}/update.apk').writeAsBytes(_bytes);
+      release = AppUpdateRelease(
+        version: UpdateVersion.parse('1.7.0+35'),
+        notes: '',
+        assetName: 'update.apk',
+        url: Uri.parse('$_base$_name'),
+        size: _bytes.length,
+        sha256Hex: _hash,
+      );
+      calls = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            return true;
+          });
+    });
+    tearDown(() async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+      await cache.delete(recursive: true);
+    });
+    test(
+      'verifies first, saves, opens installer, and returns to a usable app',
+      () async {
+        final source = _Source();
+        final controller = AppUpdateController(
+          source: source,
+          platform: AppUpdatePlatform.android,
+          currentVersion: '1.6.1+34',
+        );
+        addTearDown(controller.dispose);
+        await controller.check();
+        controller.release = release;
+        source.pendingDownload = Completer<File>()..complete(apk);
+        await controller.download();
+        var saved = false, restored = false;
+        await controller.install(
+          prepareToExit: () async {
+            expect(calls.map((c) => c.method), ['prepareInstall']);
+            saved = true;
+          },
+          restoreAfterFailure: () {
+            restored = true;
+          },
+        );
+        expect(saved && restored, isTrue);
+        expect(calls.map((c) => c.method), ['prepareInstall', 'installApk']);
+        expect(calls.first.arguments['versionName'], '1.7.0');
+        expect(calls.first.arguments['versionCode'], 35);
+        expect(calls.first.arguments['path'], apk.path);
+        expect(controller.status, AppUpdateStatus.ready);
+        expect(controller.error, isNull);
+      },
+    );
+    test('rejects changed files before invoking native installer', () async {
+      await apk.writeAsString('corrupted');
+      await expectLater(
+        AndroidUpdateInstaller().prepare(apk, release),
+        throwsFormatException,
+      );
+      expect(calls, isEmpty);
+    });
+    test(
+      'unknown source permission keeps APK ready for retry without exiting',
+      () async {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              channel,
+              (_) async => throw PlatformException(
+                code: 'update_failed',
+                message: '请允许青听安装应用，返回后再次点击“安装更新”',
+              ),
+            );
+        final source = _Source()
+          ..pendingDownload = (Completer<File>()..complete(apk));
+        final controller = AppUpdateController(
+          source: source,
+          platform: AppUpdatePlatform.android,
+          currentVersion: '1.6.1+34',
+        );
+        addTearDown(controller.dispose);
+        await controller.check();
+        controller.release = release;
+        await controller.download();
+        var saved = false;
+        await controller.install(
+          prepareToExit: () async {
+            saved = true;
+          },
+          restoreAfterFailure: () {},
+        );
+        expect(saved, isFalse);
+        expect(controller.status, AppUpdateStatus.ready);
+        expect(controller.error, contains('请允许青听安装应用'));
+      },
+    );
+  });
+
   group('download validation', () {
     late Directory cache;
     late _Adapter adapter;
@@ -232,13 +482,14 @@ void main() {
   group('user controlled update lifecycle', () {
     late _Source source;
     late _Installer installer;
-    late WindowsUpdateController controller;
+    late AppUpdateController controller;
     setUp(() {
       source = _Source();
       installer = _Installer();
-      controller = WindowsUpdateController(
+      controller = AppUpdateController(
         source: source,
         installer: installer,
+        platform: AppUpdatePlatform.windows,
         currentVersion: '1.6.1+34',
       );
       addTearDown(controller.dispose);

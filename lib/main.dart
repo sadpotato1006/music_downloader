@@ -5,8 +5,8 @@ import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/cupertino.dart' hide RepeatMode;
 import 'package:flutter/foundation.dart' show listEquals, compute;
 import 'package:flutter/material.dart' hide RepeatMode;
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:path/path.dart' as p;
@@ -16,6 +16,15 @@ import 'anyshare_auth.dart';
 import 'anyshare_client.dart';
 import 'app_info.dart';
 import 'app_controller.dart';
+import 'ui/lyrics_settings.dart';
+import 'ui/linux_desktop_settings.dart';
+import 'ui/settings.dart';
+import 'ui/settings_save_notice.dart';
+import 'ui/selected_builder.dart';
+import 'ui/theme.dart';
+import 'ui/components.dart';
+
+export 'ui/theme.dart' show qingTingTheme;
 import 'app_log.dart';
 import 'cloud_sync_service.dart' show CloudSyncProgress;
 import 'desktop_lyrics_service.dart';
@@ -29,30 +38,24 @@ import 'pending_album_match.dart';
 import 'playlist_file_service.dart';
 import 'playlist_transfer_service.dart';
 import 'storage_json_codec.dart';
+import 'app_update_controller.dart';
 import 'app_update_service.dart';
-import 'windows_update_controller.dart';
 import 'windows_update_bridge.dart';
 
 part 'ui/search_download.dart';
 part 'ui/library.dart';
 part 'ui/library_batch.dart';
 part 'ui/playlist_transfer.dart';
-part 'ui/lyrics_settings.dart';
-part 'ui/settings.dart';
-part 'ui/linux_desktop_settings.dart';
+
+part 'ui/settings_integration.dart';
+
 part 'ui/cloud_sync.dart';
 part 'ui/playback.dart';
 part 'ui/dialogs.dart';
 part 'ui/diagnostics.dart';
 part 'ui/software_update.dart';
 
-const _accent = Color(0xFF8FD9A8);
 const _appLifecycleChannel = MethodChannel('qingting/app_lifecycle');
-const _accentStrong = Color(0xFF4AA66A);
-const _ink = Color(0xFF1F2A24);
-const _muted = Color(0xFF6B756F);
-const _surface = Color(0xFFF7FAF8);
-const _line = Color(0xFFE5EFE8);
 Map<String, String> _networkImageHeadersFor(String url) {
   final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
   return {
@@ -64,28 +67,6 @@ Map<String, String> _networkImageHeadersFor(String url) {
     'User-Agent': appUserAgent,
   };
 }
-
-const _desktopLyricColorOptions = [
-  0xFF4AA66A,
-  0xFF1F2A24,
-  0xFFFFFFFF,
-  0xFFFFD166,
-  0xFF56CCF2,
-  0xFFFF6B9D,
-  0xFF7C5CFF,
-  0xFFFF7A45,
-  0xFF00D1B2,
-  0xFFB8E986,
-  0xFFFFF3B0,
-  0xFFB0D7FF,
-];
-const _systemUiOverlayStyle = SystemUiOverlayStyle(
-  statusBarColor: Colors.white,
-  statusBarIconBrightness: Brightness.dark,
-  statusBarBrightness: Brightness.light,
-  systemNavigationBarColor: Colors.white,
-  systemNavigationBarIconBrightness: Brightness.dark,
-);
 
 const _topNavDestinations = [
   _TopNavDestination(icon: Icons.search, label: '搜索'),
@@ -116,7 +97,7 @@ Future<void> main() async {
   };
   await AppLog.instance.initialize();
   AppLog.instance.info('app', '青听启动', detail: 'version=$appVersion');
-  SystemChrome.setSystemUIOverlayStyle(_systemUiOverlayStyle);
+  SystemChrome.setSystemUIOverlayStyle(systemUiOverlayStyle);
   MediaKit.ensureInitialized();
   runApp(const QingTingApp());
 }
@@ -134,11 +115,13 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
   late final xiagebaoSource = XiagebaoSource();
   late final AppController controller = AppController(
     source: gequbaoSource,
+    waitForStartupFrame: () => WidgetsBinding.instance.endOfFrame,
     sources: [gequbaoSource, myFreeMp3Source, xiagebaoSource],
-    updates: Platform.isWindows ? WindowsUpdateController() : null,
+    updates: Platform.isWindows || Platform.isAndroid || Platform.isLinux
+        ? AppUpdateController()
+        : null,
   );
   Timer? _updateCheckTimer;
-
   Future<void> _bootstrap() async {
     await controller.bootstrap();
     if (!mounted || !controller.isReady) return;
@@ -210,42 +193,16 @@ class _QingTingAppState extends State<QingTingApp> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: _systemUiOverlayStyle,
+      value: systemUiOverlayStyle,
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
         title: '青听',
-        theme: ThemeData(
-          useMaterial3: true,
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: _accent,
-            brightness: Brightness.light,
-            surface: Colors.white,
-          ),
-          scaffoldBackgroundColor: _surface,
-          fontFamily: Platform.isLinux ? 'Noto Sans CJK SC' : 'Microsoft YaHei',
-          textTheme: ThemeData.light().textTheme.apply(
-            bodyColor: _ink,
-            displayColor: _ink,
-          ),
-          inputDecorationTheme: InputDecorationTheme(
-            filled: true,
-            fillColor: Colors.white,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(16),
-              borderSide: const BorderSide(color: _line),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(16),
-              borderSide: const BorderSide(color: _line),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(16),
-              borderSide: const BorderSide(color: _accentStrong, width: 1.4),
-            ),
-          ),
-        ),
-        home: AnimatedBuilder(
-          animation: controller,
+        builder: (context, child) =>
+            AppThemeScope(theme: controller.preferences.theme, child: child!),
+        theme: qingTingTheme(),
+        home: SelectedBuilder(
+          listenable: controller,
+          select: () => (controller.bootstrapStatus, controller.bootstrapError),
           child: HomeShell(controller: controller),
           builder: (context, child) {
             return switch (controller.bootstrapStatus) {
@@ -302,7 +259,7 @@ class _StartupStatusPage extends StatelessWidget {
                   Text(
                     error ?? '正在恢复设置、曲库、播放队列和下载任务…',
                     textAlign: TextAlign.center,
-                    style: const TextStyle(color: _muted),
+                    style: const TextStyle(color: appMuted),
                   ),
                   if (failed) ...[
                     const SizedBox(height: 20),
@@ -333,8 +290,11 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   late final PageController _pageController;
+  late int _selectedPageTarget;
+  int? _programmaticPageTarget;
+  int _navigationRevision = 0;
   Timer? _toastTimer;
-  String? _toastMessage;
+  final _toastMessage = ValueNotifier<String?>(null);
   String? _scheduledToastMessage;
 
   AppController get controller => widget.controller;
@@ -343,6 +303,7 @@ class _HomeShellState extends State<HomeShell> {
   void initState() {
     super.initState();
     _pageController = PageController(initialPage: controller.selectedIndex);
+    _selectedPageTarget = controller.selectedIndex;
     controller.addListener(_handleControllerChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -359,12 +320,14 @@ class _HomeShellState extends State<HomeShell> {
     }
     oldWidget.controller.removeListener(_handleControllerChanged);
     controller.addListener(_handleControllerChanged);
+    _selectedPageTarget = -1;
     _handleControllerChanged();
   }
 
   @override
   void dispose() {
     _toastTimer?.cancel();
+    _toastMessage.dispose();
     controller.removeListener(_handleControllerChanged);
     _pageController.dispose();
     super.dispose();
@@ -376,23 +339,56 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _syncPageWithSelectedIndex() {
-    if (!_pageController.hasClients) {
+    final target = controller.selectedIndex;
+    // Progress, playback and settings notifications must not restart a swipe.
+    if (!_pageController.hasClients || _selectedPageTarget == target) return;
+    _selectedPageTarget = target;
+    _programmaticPageTarget = target;
+    final revision = ++_navigationRevision;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _pageController.jumpToPage(target);
+      _programmaticPageTarget = null;
       return;
     }
-    final currentPage =
-        _pageController.page?.round() ?? _pageController.initialPage;
-    if (currentPage == controller.selectedIndex) {
-      return;
-    }
-    _pageController.animateToPage(
-      controller.selectedIndex,
-      duration: const Duration(milliseconds: 240),
-      curve: Curves.easeOutCubic,
+    unawaited(
+      _pageController
+          .animateToPage(
+            target,
+            duration: const Duration(milliseconds: 320),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() {
+            if (mounted && revision == _navigationRevision) {
+              _programmaticPageTarget = null;
+            }
+          }),
     );
+  }
+
+  void _onPageChanged(int index) {
+    // Intermediate pages crossed by a tab animation are not new destinations.
+    if (_programmaticPageTarget != null) return;
+    _selectedPageTarget = index;
+    controller.selectIndex(index);
+  }
+
+  bool _onPageScrollStart(ScrollStartNotification notification) {
+    if (notification.depth == 0 && notification.dragDetails != null) {
+      _navigationRevision++;
+      _programmaticPageTarget = null;
+    }
+    return false;
   }
 
   @override
   Widget build(BuildContext context) {
+    return AppThemeScope(
+      theme: controller.preferences.theme,
+      child: _buildShell(context),
+    );
+  }
+
+  Widget _buildShell(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final isDesktop = constraints.maxWidth >= 820;
@@ -401,46 +397,54 @@ class _HomeShellState extends State<HomeShell> {
             Scaffold(
               body: Column(
                 children: [
-                  AnimatedBuilder(
-                    animation: controller,
+                  SelectedBuilder(
+                    key: const ValueKey('navigation-updates'),
+                    listenable: controller,
+                    select: () => controller.selectedIndex,
                     builder: (context, _) => _TopNavigation(
                       controller: controller,
                       isDesktop: isDesktop,
+                      pageController: _pageController,
                     ),
                   ),
                   Expanded(
-                    child: PageView(
-                      controller: _pageController,
-                      onPageChanged: controller.selectIndex,
-                      children: [
-                        _ActiveControllerPage(
-                          controller: controller,
-                          index: 0,
-                          builder: (_) => SearchPage(controller: controller),
-                        ),
-                        _ActiveControllerPage(
-                          controller: controller,
-                          index: 1,
-                          additionalListenables: [
-                            controller.downloadProgressListenable,
-                          ],
-                          builder: (_) => DownloadsPage(controller: controller),
-                        ),
-                        _ActiveControllerPage(
-                          controller: controller,
-                          index: 2,
-                          builder: (_) => LibraryPage(controller: controller),
-                        ),
-                        _ActiveControllerPage(
-                          controller: controller,
-                          index: 3,
-                          builder: (_) => SettingsPage(controller: controller),
-                        ),
-                      ],
+                    child: NotificationListener<ScrollStartNotification>(
+                      onNotification: _onPageScrollStart,
+                      child: PageView(
+                        controller: _pageController,
+                        onPageChanged: _onPageChanged,
+                        children: [
+                          _ActiveControllerPage(
+                            controller: controller,
+                            index: 0,
+                            select: () => controller.searchViewState,
+                            builder: (_) => SearchPage(controller: controller),
+                          ),
+                          _ActiveControllerPage(
+                            controller: controller,
+                            index: 1,
+                            select: () => controller.downloadsViewState,
+                            additionalListenables: [
+                              controller.downloadProgressListenable,
+                            ],
+                            builder: (_) =>
+                                DownloadsPage(controller: controller),
+                          ),
+                          _ActiveControllerPage(
+                            controller: controller,
+                            index: 2,
+                            select: () => controller.libraryViewState,
+                            builder: (_) => LibraryPage(controller: controller),
+                          ),
+                          SettingsPage(controller: controller),
+                        ],
+                      ),
                     ),
                   ),
-                  AnimatedBuilder(
-                    animation: controller,
+                  SelectedBuilder(
+                    key: const ValueKey('mini-player-updates'),
+                    listenable: controller,
+                    select: () => controller.miniPlayerViewState,
                     builder: (context, _) => MiniPlayer(
                       controller: controller,
                       isDesktop: isDesktop,
@@ -452,17 +456,18 @@ class _HomeShellState extends State<HomeShell> {
             _DesktopLyricsOverlay(controller: controller),
             if (controller.updates != null)
               _UpdateOverlay(controller: controller),
-            if (_toastMessage != null)
-              Positioned(
-                bottom:
-                    MediaQuery.paddingOf(context).bottom +
-                    (isDesktop ? 98 : 112),
-                left: 18,
-                right: 18,
-                child: IgnorePointer(
-                  child: _QingTingToast(message: _toastMessage!),
-                ),
+            Positioned(
+              bottom:
+                  MediaQuery.paddingOf(context).bottom + (isDesktop ? 98 : 112),
+              left: 18,
+              right: 18,
+              child: ValueListenableBuilder<String?>(
+                valueListenable: _toastMessage,
+                builder: (_, message, _) => message == null
+                    ? const SizedBox.shrink()
+                    : IgnorePointer(child: _QingTingToast(message: message)),
               ),
+            ),
           ],
         );
       },
@@ -480,17 +485,20 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
       _scheduledToastMessage = null;
-      setState(() => _toastMessage = message);
+      _toastMessage.value = message;
       _toastTimer?.cancel();
       _toastTimer = Timer(const Duration(milliseconds: 2200), () {
         if (mounted) {
-          setState(() => _toastMessage = null);
+          _toastMessage.value = null;
         }
       });
       if (controller.globalMessage == message) {
         controller.clearGlobalMessage();
       }
     });
+    // Selected widgets may all ignore this notification, so request the frame
+    // needed to deliver the toast's post-frame callback explicitly.
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 }
 
@@ -498,12 +506,14 @@ class _ActiveControllerPage extends StatefulWidget {
   const _ActiveControllerPage({
     required this.controller,
     required this.index,
+    required this.select,
     required this.builder,
     this.additionalListenables = const [],
   });
 
   final AppController controller;
   final int index;
+  final Object Function() select;
   final WidgetBuilder builder;
   final List<Listenable> additionalListenables;
 
@@ -511,7 +521,12 @@ class _ActiveControllerPage extends StatefulWidget {
   State<_ActiveControllerPage> createState() => _ActiveControllerPageState();
 }
 
-class _ActiveControllerPageState extends State<_ActiveControllerPage> {
+class _ActiveControllerPageState extends State<_ActiveControllerPage>
+    with AutomaticKeepAliveClientMixin {
+  Object? _lastView;
+  bool _wasActive = false;
+  @override
+  bool get wantKeepAlive => true;
   @override
   void initState() {
     super.initState();
@@ -552,13 +567,26 @@ class _ActiveControllerPageState extends State<_ActiveControllerPage> {
   }
 
   void _handleChanged() {
-    if (mounted && widget.controller.selectedIndex == widget.index) {
-      setState(() {});
+    final active = widget.controller.selectedIndex == widget.index;
+    if (!active) {
+      _wasActive = false;
+      return;
     }
+    final view = widget.select();
+    if (!_wasActive || view != _lastView) {
+      _lastView = view;
+      if (mounted) setState(() {});
+    }
+    _wasActive = true;
   }
 
   @override
-  Widget build(BuildContext context) => widget.builder(context);
+  Widget build(BuildContext context) {
+    super.build(context);
+    _lastView = widget.select();
+    _wasActive = widget.controller.selectedIndex == widget.index;
+    return RepaintBoundary(child: widget.builder(context));
+  }
 }
 
 class _QingTingToast extends StatelessWidget {
@@ -577,7 +605,7 @@ class _QingTingToast extends StatelessWidget {
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: _line),
+              border: Border.all(color: themeLine(context)),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withValues(alpha: 0.10),
@@ -595,12 +623,12 @@ class _QingTingToast extends StatelessWidget {
                     width: 30,
                     height: 30,
                     decoration: BoxDecoration(
-                      color: _accent.withValues(alpha: 0.22),
+                      color: themeAccent(context).withValues(alpha: 0.22),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(
+                    child: Icon(
                       Icons.music_note,
-                      color: _accentStrong,
+                      color: themeAccent(context),
                       size: 19,
                     ),
                   ),
@@ -611,7 +639,7 @@ class _QingTingToast extends StatelessWidget {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: _ink,
+                        color: appInk,
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                       ),
@@ -638,6 +666,8 @@ class _DesktopLyricsOverlay extends StatefulWidget {
 
 class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
     with WidgetsBindingObserver {
+  String? _lyricSource;
+  List<LyricLine> _lyricLines = const [];
   bool _lastEnabled = false;
   String? _lastText;
   double? _lastFontSize;
@@ -747,7 +777,7 @@ class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
     final settings =
         widget.controller.settings?.desktopLyrics ??
         defaultDesktopLyricsSettings;
-    final text = _resolveDesktopLyricText(settings)?.trim();
+    final text = settings.enabled ? _resolveDesktopLyricText(settings) : null;
     final enabled = settings.enabled && text != null && text.isNotEmpty;
 
     if (!enabled) {
@@ -791,20 +821,22 @@ class _DesktopLyricsOverlayState extends State<_DesktopLyricsOverlay>
   }
 
   String? _resolveDesktopLyricText(DesktopLyricsSettings settings) {
-    final item = widget.controller.currentItem;
-    if (item == null) {
-      return null;
+    final source = widget.controller.currentItem?.lyrics;
+    if (source != _lyricSource) {
+      // Keep the current lines locally: position ticks should not trim/hash
+      // the LRC or touch the shared parser cache. Null also clears old lyrics.
+      _lyricLines = parseLyricLines(source);
+      _lyricSource = source;
     }
-    final lines = parseLyricLines(item.lyrics);
-    if (lines.isEmpty) {
+    if (_lyricLines.isEmpty) {
       return null;
     }
     final effectivePosition =
         widget.controller.player.position -
         Duration(milliseconds: settings.delayMilliseconds);
     return _currentLyricText(
-      lines,
-      _currentLyricIndex(lines, effectivePosition),
+      _lyricLines,
+      _currentLyricIndex(_lyricLines, effectivePosition),
     );
   }
 
@@ -820,49 +852,109 @@ class _TopNavDestination {
 }
 
 class _TopNavigation extends StatelessWidget {
-  const _TopNavigation({required this.controller, required this.isDesktop});
+  const _TopNavigation({
+    required this.controller,
+    required this.isDesktop,
+    required this.pageController,
+  });
 
   final AppController controller;
   final bool isDesktop;
+  final PageController pageController;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: _line)),
-      ),
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            isDesktop ? 28 : 12,
-            isDesktop ? 8 : 5,
-            isDesktop ? 28 : 12,
-            isDesktop ? 8 : 5,
-          ),
-          child: Row(
+    // Tight height also keeps LayoutBuilder's animation rebuilds from
+    // invalidating the surrounding capsule's layout and cached paint.
+    final tabs = SizedBox(
+      height: 48,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final tabWidth = constraints.maxWidth / _topNavDestinations.length;
+          return Stack(
             children: [
-              if (isDesktop) ...[const _AppMark(), const SizedBox(width: 22)],
-              Expanded(
-                child: Row(
-                  children: [
-                    for (
-                      var index = 0;
-                      index < _topNavDestinations.length;
-                      index++
-                    )
-                      _TopNavItem(
-                        destination: _topNavDestinations[index],
-                        selected: controller.selectedIndex == index,
-                        onTap: () => controller.selectIndex(index),
-                        compact: !isDesktop,
+              // Moving Positioned.left would relayout the navigation on every
+              // tick. Keep its layout fixed and translate the cached lens only.
+              Positioned(
+                top: 2,
+                bottom: 2,
+                left: 2,
+                width: tabWidth - 4,
+                child: AnimatedBuilder(
+                  animation: pageController,
+                  child: IgnorePointer(
+                    child: RepaintBoundary(
+                      child: DecoratedBox(
+                        key: const ValueKey('navigation-indicator'),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(999),
+                          color: themeTint(context),
+                        ),
                       ),
-                  ],
+                    ),
+                  ),
+                  builder: (context, child) {
+                    final page =
+                        pageController.hasClients &&
+                            pageController.position.hasContentDimensions
+                        ? pageController.page ??
+                              pageController.initialPage.toDouble()
+                        : pageController.initialPage.toDouble();
+                    return Transform.translate(
+                      offset: Offset(page.clamp(0, 3) * tabWidth, 0),
+                      child: child,
+                    );
+                  },
                 ),
               ),
+              Row(
+                children: [
+                  for (
+                    var index = 0;
+                    index < _topNavDestinations.length;
+                    index++
+                  )
+                    _TopNavItem(
+                      destination: _topNavDestinations[index],
+                      selected: controller.selectedIndex == index,
+                      onTap: () => controller.selectIndex(index),
+                      compact: !isDesktop,
+                    ),
+                ],
+              ),
             ],
-          ),
+          );
+        },
+      ),
+    );
+    final content = Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: isDesktop ? 20 : 4,
+        vertical: 4,
+      ),
+      child: Row(
+        children: [
+          if (isDesktop) ...[const _AppMark(), const SizedBox(width: 22)],
+          Expanded(child: tabs),
+        ],
+      ),
+    );
+    // The inset belongs outside the surface, so the status bar never becomes
+    // part of the capsule on Android's edge-to-edge windows.
+    return SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          isDesktop ? 24 : 16,
+          12,
+          isDesktop ? 24 : 16,
+          0,
+        ),
+        child: ThemeSurface(
+          key: const ValueKey('navigation-capsule'),
+          radius: 999,
+          isolateContent: true,
+          child: content,
         ),
       ),
     );
@@ -881,10 +973,10 @@ class _AppMark extends StatelessWidget {
           width: 38,
           height: 38,
           decoration: BoxDecoration(
-            color: _accent.withValues(alpha: 0.2),
+            color: themeTint(context),
             borderRadius: BorderRadius.circular(13),
           ),
-          child: const Icon(Icons.music_note, color: _accentStrong),
+          child: Icon(Icons.music_note, color: themeAccent(context)),
         ),
         const SizedBox(width: 8),
         const Text(
@@ -911,51 +1003,36 @@ class _TopNavItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final foreground = selected ? _accentStrong : _muted;
     return Expanded(
       child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: compact ? 2 : 4),
-        child: Tooltip(
-          message: destination.label,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(15),
-            onTap: onTap,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              height: compact ? 40 : 42,
-              padding: EdgeInsets.symmetric(horizontal: compact ? 4 : 12),
-              decoration: BoxDecoration(
-                color: selected
-                    ? _accent.withValues(alpha: 0.18)
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(15),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    destination.icon,
-                    color: foreground,
-                    size: compact ? 20 : 19,
-                  ),
-                  SizedBox(width: compact ? 4 : 7),
-                  Flexible(
-                    child: Text(
-                      destination.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: selected ? _ink : _muted,
-                        fontSize: compact ? 12.5 : 13,
-                        fontWeight: selected
-                            ? FontWeight.w800
-                            : FontWeight.w600,
-                      ),
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        child: NavigationButton(
+          selected: selected,
+          onTap: onTap,
+          child: SizedBox(
+            height: 48,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  destination.icon,
+                  size: 19,
+                  color: selected ? themeAccent(context) : appMuted,
+                ),
+                SizedBox(width: compact ? 4 : 8),
+                Flexible(
+                  child: Text(
+                    destination.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: compact ? 12.5 : 13,
+                      color: selected ? appInk : appMuted,
+                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

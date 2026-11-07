@@ -700,6 +700,9 @@ class _BatchDeletion implements FileDeletionService {
 }
 
 class _BatchPlayer implements PlaybackService {
+  @override
+  PlaybackHealth health = const PlaybackHealth();
+
   final opens = <String>[];
   PlayerItem? opened;
   @override

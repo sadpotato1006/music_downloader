@@ -94,7 +94,12 @@ class _LibraryPageState extends State<LibraryPage> {
     };
     final emptyText = switch (section) {
       _LibrarySection.all =>
-        controller.downloadedTracks.isEmpty ? '下载完成后会出现在这里' : '没有匹配的本地歌曲',
+        controller.isPreparingLibraryView
+            ? '正在整理曲库…'
+            : controller.libraryViewError ??
+                  (controller.downloadedTracks.isEmpty
+                      ? '下载完成后会出现在这里'
+                      : '没有匹配的本地歌曲'),
       _LibrarySection.favorites => '还没有喜欢的歌曲',
       _LibrarySection.recent => '还没有最近播放记录',
       _LibrarySection.playlists => '还没有创建歌单',
@@ -109,7 +114,7 @@ class _LibraryPageState extends State<LibraryPage> {
       _LibrarySection.playlists => Icons.queue_music,
     };
 
-    return _PageFrame(
+    return PageFrame(
       horizontalPadding: 18,
       child: Column(
         children: [
@@ -118,6 +123,15 @@ class _LibraryPageState extends State<LibraryPage> {
             onSelected: (value) => setState(() => section = value),
           ),
           const SizedBox(height: 10),
+          if (section == _LibrarySection.all &&
+              controller.isPreparingLibraryView)
+            const LinearProgressIndicator(),
+          if (section == _LibrarySection.all &&
+              controller.libraryViewError != null)
+            TextButton(
+              onPressed: controller.retryLibraryView,
+              child: const Text('重试搜索'),
+            ),
           if (section == _LibrarySection.playlists) ...[
             _PlaylistToolbar(
               count: controller.myMusic.playlists.length,
@@ -276,7 +290,10 @@ class _PlaylistToolbar extends StatelessWidget {
         Expanded(
           child: Text(
             '$count 个歌单',
-            style: const TextStyle(fontWeight: FontWeight.w700, color: _muted),
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              color: appMuted,
+            ),
           ),
         ),
         IconButton(
@@ -333,12 +350,12 @@ class _PlaylistOverview extends StatelessWidget {
           child: ListTile(
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: _line),
+              side: BorderSide(color: themeLine(context)),
             ),
-            leading: const _LeadingIconShell(
+            leading: _LeadingIconShell(
               size: 48,
               borderRadius: 14,
-              child: Icon(Icons.queue_music, color: _accentStrong),
+              child: Icon(Icons.queue_music, color: themeAccent(context)),
             ),
             title: Text(
               playlist.name,
@@ -471,6 +488,9 @@ class _PlaylistSheet extends StatefulWidget {
 }
 
 class _PlaylistSheetState extends State<_PlaylistSheet> {
+  Object? _lastView;
+  Object get _view => widget.controller.libraryViewState;
+
   bool _exporting = false;
 
   Future<void> _export() async {
@@ -490,6 +510,7 @@ class _PlaylistSheetState extends State<_PlaylistSheet> {
   @override
   void initState() {
     super.initState();
+    _lastView = _view;
     widget.controller.addListener(_handleChanged);
   }
 
@@ -500,6 +521,9 @@ class _PlaylistSheetState extends State<_PlaylistSheet> {
   }
 
   void _handleChanged() {
+    final view = _view;
+    if (view == _lastView) return;
+    _lastView = view;
     if (mounted) {
       setState(() {});
     }
@@ -558,7 +582,7 @@ class _PlaylistSheetState extends State<_PlaylistSheet> {
               width: 38,
               height: 4,
               decoration: BoxDecoration(
-                color: _line,
+                color: themeLine(context),
                 borderRadius: BorderRadius.circular(99),
               ),
             ),
@@ -580,7 +604,7 @@ class _PlaylistSheetState extends State<_PlaylistSheet> {
                       ),
                       Text(
                         '${tracks.length} 首歌曲',
-                        style: const TextStyle(color: _muted, fontSize: 13),
+                        style: const TextStyle(color: appMuted, fontSize: 13),
                       ),
                     ],
                   ),
@@ -644,9 +668,13 @@ class _AddToPlaylistSheet extends StatefulWidget {
 }
 
 class _AddToPlaylistSheetState extends State<_AddToPlaylistSheet> {
+  Object? _lastView;
+  Object get _view => widget.controller.myMusic;
+
   @override
   void initState() {
     super.initState();
+    _lastView = _view;
     widget.controller.addListener(_handleChanged);
   }
 
@@ -657,6 +685,9 @@ class _AddToPlaylistSheetState extends State<_AddToPlaylistSheet> {
   }
 
   void _handleChanged() {
+    final view = _view;
+    if (view == _lastView) return;
+    _lastView = view;
     if (mounted) {
       setState(() {});
     }
@@ -690,7 +721,7 @@ class _AddToPlaylistSheetState extends State<_AddToPlaylistSheet> {
               width: 38,
               height: 4,
               decoration: BoxDecoration(
-                color: _line,
+                color: themeLine(context),
                 borderRadius: BorderRadius.circular(99),
               ),
             ),
@@ -716,7 +747,7 @@ class _AddToPlaylistSheetState extends State<_AddToPlaylistSheet> {
                 widget.track.title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: _muted),
+                style: const TextStyle(color: appMuted),
               ),
             ),
             const SizedBox(height: 12),
@@ -821,7 +852,7 @@ class _LibrarySearchSheetState extends State<_LibrarySearchSheet> {
                   width: 38,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: _line,
+                    color: themeLine(context),
                     borderRadius: BorderRadius.circular(99),
                   ),
                 ),
@@ -966,8 +997,10 @@ class _CompactIconButton extends StatelessWidget {
           onPressed: onPressed,
           style: OutlinedButton.styleFrom(
             padding: EdgeInsets.zero,
-            backgroundColor: selected ? _accent.withValues(alpha: 0.16) : null,
-            foregroundColor: selected ? _accentStrong : _ink,
+            backgroundColor: selected
+                ? themeAccent(context).withValues(alpha: 0.16)
+                : null,
+            foregroundColor: selected ? themeAccent(context) : appInk,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14),
             ),
@@ -1047,7 +1080,7 @@ class _AlbumMatchButton extends StatelessWidget {
               '当前：${controller.matchingAlbumTrackTitle}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: _muted, fontSize: 12),
+              style: const TextStyle(color: appMuted, fontSize: 12),
             ),
           ],
           const SizedBox(height: 3),
@@ -1056,7 +1089,7 @@ class _AlbumMatchButton extends StatelessWidget {
             '待确认 $pendingCount · '
             '未找到 ${controller.albumMatchNotFound} · '
             '失败 ${controller.albumMatchFailed}',
-            style: const TextStyle(color: _muted, fontSize: 12),
+            style: const TextStyle(color: appMuted, fontSize: 12),
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
@@ -1092,7 +1125,7 @@ class _AlbumMatchButton extends StatelessWidget {
             '${controller.albumMatchUpdated}，待确认 $pendingCount，'
             '未找到 ${controller.albumMatchNotFound}，'
             '失败 ${controller.albumMatchFailed}',
-            style: const TextStyle(color: _muted, fontSize: 12),
+            style: const TextStyle(color: appMuted, fontSize: 12),
           ),
         ],
         if (pendingCount > 0) ...[
@@ -1128,7 +1161,7 @@ class _LibrarySortMenu extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(child: Text(_librarySortLabel(mode))),
                 if (mode == controller.librarySortMode)
-                  const Icon(Icons.check, color: _accentStrong, size: 20),
+                  Icon(Icons.check, color: themeAccent(context), size: 20),
               ],
             ),
           ),
@@ -1138,12 +1171,12 @@ class _LibrarySortMenu extends StatelessWidget {
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: Colors.white,
-            border: Border.all(color: _line),
+            border: Border.all(color: themeLine(context)),
             borderRadius: BorderRadius.circular(14),
           ),
           child: Icon(
             _librarySortIcon(controller.librarySortMode),
-            color: _muted,
+            color: appMuted,
           ),
         ),
       ),

@@ -1,17 +1,41 @@
-part of '../main.dart';
+import 'dart:io';
 
-class _LyricsSettingsButton extends StatelessWidget {
-  const _LyricsSettingsButton({
+import 'package:flutter/material.dart';
+
+import '../desktop_lyrics_service.dart';
+import '../models.dart';
+import '../settings_controller.dart';
+import 'theme.dart';
+import 'settings_save_notice.dart';
+
+const _desktopLyricColorOptions = [
+  0xFF4AA66A,
+  0xFF1F2A24,
+  0xFFFFFFFF,
+  0xFFFFD166,
+  0xFF56CCF2,
+  0xFFFF6B9D,
+  0xFF7C5CFF,
+  0xFFFF7A45,
+  0xFF00D1B2,
+  0xFFB8E986,
+  0xFFFFF3B0,
+  0xFFB0D7FF,
+];
+
+class LyricsSettingsButton extends StatelessWidget {
+  const LyricsSettingsButton({
+    super.key,
     required this.controller,
     required this.onPressed,
   });
 
-  final AppController controller;
+  final SettingsController controller;
   final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
-    final enabled = controller.settings?.desktopLyrics.enabled ?? false;
+    final enabled = controller.value?.desktopLyrics.enabled ?? false;
     return SizedBox(
       width: double.infinity,
       child: OutlinedButton.icon(
@@ -29,10 +53,10 @@ class _LyricsSettingsButton extends StatelessWidget {
   }
 }
 
-class _LyricsSettingsSheet extends StatelessWidget {
-  const _LyricsSettingsSheet({required this.controller});
+class LyricsSettingsSheet extends StatelessWidget {
+  const LyricsSettingsSheet({super.key, required this.controller});
 
-  final AppController controller;
+  final SettingsController controller;
 
   @override
   Widget build(BuildContext context) {
@@ -40,7 +64,7 @@ class _LyricsSettingsSheet extends StatelessWidget {
       animation: controller,
       builder: (context, _) {
         final settings =
-            controller.settings?.desktopLyrics ?? defaultDesktopLyricsSettings;
+            controller.value?.desktopLyrics ?? defaultDesktopLyricsSettings;
         return Padding(
           padding: EdgeInsets.fromLTRB(
             20,
@@ -53,12 +77,13 @@ class _LyricsSettingsSheet extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                SettingsSaveNotice(controller: controller),
                 Center(
                   child: Container(
                     width: 38,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: _line,
+                      color: themeLine(context),
                       borderRadius: BorderRadius.circular(99),
                     ),
                   ),
@@ -322,7 +347,7 @@ class _LyricsSettingsPreview extends StatelessWidget {
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: settings.backgroundOpacity),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: _line),
+            border: Border.all(color: themeLine(context)),
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -387,7 +412,7 @@ class _LyricsSettingSlider extends StatelessWidget {
             Text(
               valueLabel,
               style: const TextStyle(
-                color: _muted,
+                color: appMuted,
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -433,7 +458,7 @@ class _LyricsColorChoice extends StatelessWidget {
             color: color,
             shape: BoxShape.circle,
             border: Border.all(
-              color: selected ? _accentStrong : _line,
+              color: selected ? themeAccent(context) : themeLine(context),
               width: selected ? 3 : 1,
             ),
             boxShadow: [
@@ -448,7 +473,9 @@ class _LyricsColorChoice extends StatelessWidget {
               ? Icon(
                   Icons.check,
                   size: 18,
-                  color: color.computeLuminance() > 0.62 ? _ink : Colors.white,
+                  color: color.computeLuminance() > 0.62
+                      ? appInk
+                      : Colors.white,
                 )
               : null,
         ),
@@ -484,7 +511,7 @@ class _LyricsCustomColorChoice extends StatelessWidget {
             color: selected ? color : Colors.white,
             shape: BoxShape.circle,
             border: Border.all(
-              color: selected ? _accentStrong : _line,
+              color: selected ? themeAccent(context) : themeLine(context),
               width: selected ? 3 : 1,
             ),
             boxShadow: [
@@ -500,7 +527,7 @@ class _LyricsCustomColorChoice extends StatelessWidget {
             size: 18,
             color: selected && color.computeLuminance() < 0.55
                 ? Colors.white
-                : _ink,
+                : appInk,
           ),
         ),
       ),
@@ -601,12 +628,14 @@ class _LyricsColorPickerDialogState extends State<_LyricsColorPickerDialog> {
               decoration: BoxDecoration(
                 color: color,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _line),
+                border: Border.all(color: themeLine(context)),
               ),
               child: Text(
                 '青听桌面歌词预览',
                 style: TextStyle(
-                  color: color.computeLuminance() > 0.62 ? _ink : Colors.white,
+                  color: color.computeLuminance() > 0.62
+                      ? appInk
+                      : Colors.white,
                   fontWeight: FontWeight.w800,
                 ),
               ),
@@ -704,4 +733,32 @@ class _ColorComponentSlider extends StatelessWidget {
       ],
     );
   }
+}
+
+String _desktopLyricPositionLabel(double value) {
+  if (value < 0.28) {
+    return '靠上';
+  }
+  if (value > 0.72) {
+    return '靠下';
+  }
+  return '居中';
+}
+
+String _desktopLyricHorizontalPositionLabel(double value) {
+  if (value < 0.28) {
+    return '靠左';
+  }
+  if (value > 0.72) {
+    return '靠右';
+  }
+  return '居中';
+}
+
+String _formatLyricDelay(int milliseconds) {
+  if (milliseconds == 0) {
+    return '0ms';
+  }
+  final sign = milliseconds > 0 ? '+' : '';
+  return '$sign${milliseconds}ms';
 }

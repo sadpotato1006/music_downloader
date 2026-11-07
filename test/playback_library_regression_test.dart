@@ -43,6 +43,54 @@ void main() {
     return controller;
   }
 
+  for (final action in ['play', 'next']) {
+    test(
+      'search $action uses the downloaded file without resolving online',
+      () async {
+        final source = _ControlledSource();
+        final controller = controllerFor(source: source);
+        final file = await _audioFile(directory, 'downloaded.mp3');
+        controller.downloadedTracks = [
+          _track(
+            file.path,
+          ).copyWith(id: 'a', sourceUrl: _result('a').detailUrl),
+        ];
+        if (action == 'play') {
+          await controller.playSearchResult(_result('a'));
+        } else {
+          await controller.queueSearchResultNext(_result('a'));
+        }
+        expect(player.openedItem?.localPath, file.path);
+        expect(player.openedItem?.uri, file.uri.toString());
+        expect(controller.isCurrentSearchResult(_result('a')), isTrue);
+        expect(source.detailCalls, 0);
+        expect(source.resolveCalls, 0);
+      },
+    );
+  }
+
+  test(
+    'missing downloaded file falls back to a cacheable online item',
+    () async {
+      final source = _ControlledSource();
+      final controller = controllerFor(source: source);
+      controller.downloadedTracks = [
+        _track(
+          '${directory.path}/missing.mp3',
+        ).copyWith(id: 'a', sourceUrl: _result('a').detailUrl),
+      ];
+      await controller.playSearchResult(_result('a'));
+      expect(player.openedItem?.localPath, isNull);
+      expect(player.openedItem?.audioCacheKey, isNotNull);
+      final restored = PlayerItem.fromJson(
+        player.openedItem!.toJson(),
+      ).copyWith(album: 'Album');
+      expect(restored.audioCacheKey, player.openedItem!.audioCacheKey);
+      expect(restored.audioCacheFormat, 'mp3');
+      expect(source.resolveCalls, 1);
+    },
+  );
+
   for (final action in ['queue', 'local', 'collection', 'clear']) {
     test('pending online playback cannot undo $action', () async {
       final source = _ControlledSource(blockDetails: true);
@@ -351,6 +399,45 @@ void main() {
       );
     },
   );
+
+  for (final action in ['local', 'queue', 'next', 'collection', 'random']) {
+    test('startup cover hydration does not block $action playback', () async {
+      storage.blockCover = true;
+      final file = await _audioFile(directory, 'hydrating.mp3');
+      final track = _track(file.path);
+      storage.tracks = [track];
+      final controller = controllerFor();
+      await controller.bootstrap();
+      await storage.coverStarted.future;
+      try {
+        final playback = switch (action) {
+          'queue' => () {
+            controller.queue = [
+              PlayerItem(
+                id: track.id,
+                title: track.title,
+                artist: track.artist,
+                uri: file.uri.toString(),
+                localPath: file.path,
+              ),
+            ];
+            return controller.playQueueAt(0);
+          }(),
+          'next' => controller.queueDownloadedNext(track),
+          'collection' => controller.playDownloadedCollection([track]),
+          'random' => controller.startRandomLibraryPlayback(),
+          _ => controller.playDownloaded(track),
+        };
+        await playback.timeout(const Duration(seconds: 2));
+        expect(player.openedItem?.localPath, file.path);
+        expect(controller.playbackFailure, isNull);
+        expect(storage.coverRelease.isCompleted, isFalse);
+      } finally {
+        storage.coverRelease.complete();
+        await controller.startupMaintenanceDone;
+      }
+    });
+  }
 
   for (final action in ['edit', 'remove', 'reimport']) {
     test('startup hydration preserves a concurrent $action', () async {
@@ -848,6 +935,9 @@ class _CountingTracks extends ListBase<DownloadedTrack> {
 }
 
 class _FakePlaybackService implements PlaybackService {
+  @override
+  PlaybackHealth health = const PlaybackHealth();
+
   final ValueNotifier<Duration> _positionListenable = ValueNotifier(
     Duration.zero,
   );

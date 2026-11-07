@@ -242,9 +242,9 @@ class AndroidMediaControls(
     }
 
     private fun launchPendingIntent(): PendingIntent {
-        val intent =
-            context.packageManager.getLaunchIntentForPackage(context.packageName)
-                ?: Intent(context, MainActivity::class.java)
+        // A launcher alias may be disabled after a theme change. Keep the
+        // notification's pending intent bound to the real activity instead.
+        val intent = Intent(context, QingTingActivity::class.java)
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         return PendingIntent.getActivity(context, 0, intent, pendingIntentFlags())
     }

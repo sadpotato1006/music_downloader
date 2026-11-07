@@ -195,9 +195,10 @@ extension AppControllerSongMetadataActions on AppController {
   }
 
   void _scheduleMetadataTagWrites() {
+    if (!_startupMaintenanceReady) return;
     if (_isDisposed ||
         _preparingToExit ||
-        _cloudSyncOwnsFiles ||
+        _songFiles.isSyncing ||
         _metadataTagWriteOperation != null ||
         !downloadedTracks.any(
           (track) =>
@@ -219,7 +220,7 @@ extension AppControllerSongMetadataActions on AppController {
   Future<void> _writePendingMetadataTags() async {
     await _playbackMutationQueue;
     for (final snapshot in downloadedTracks.toList()) {
-      if (_isDisposed || _preparingToExit || _cloudSyncOwnsFiles) return;
+      if (_isDisposed || _preparingToExit || _songFiles.isSyncing) return;
       if (!snapshot.metadataPendingFileWrite ||
           _isTrackLoadedInPlayer(snapshot.path)) {
         continue;
@@ -252,7 +253,7 @@ extension AppControllerSongMetadataActions on AppController {
           stackTrace: stackTrace,
         );
       } finally {
-        _metadataWriteKeys.remove(key);
+        _songFiles.endWrite(key);
       }
     }
   }

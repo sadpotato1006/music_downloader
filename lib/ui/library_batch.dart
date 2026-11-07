@@ -47,6 +47,9 @@ class _LibraryTrackList extends StatefulWidget {
 }
 
 class _LibraryTrackListState extends State<_LibraryTrackList> {
+  Object? _lastView;
+  Object get _view => widget.controller.libraryViewState;
+
   final Set<String> _selectedKeys = {};
   bool _selecting = false;
   bool _busy = false;
@@ -60,6 +63,7 @@ class _LibraryTrackListState extends State<_LibraryTrackList> {
   @override
   void initState() {
     super.initState();
+    _lastView = _view;
     widget.controller.addListener(_refresh);
   }
 
@@ -83,6 +87,9 @@ class _LibraryTrackListState extends State<_LibraryTrackList> {
   }
 
   void _refresh() {
+    final view = _view;
+    if (view == _lastView) return;
+    _lastView = view;
     if (mounted) setState(() {});
   }
 
@@ -257,8 +264,8 @@ class _LibraryTrackListState extends State<_LibraryTrackList> {
                       '操作',
                       style: TextStyle(
                         color: _disabled || _selectedKeys.isEmpty
-                            ? _muted
-                            : _accentStrong,
+                            ? appMuted
+                            : themeAccent(context),
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -276,7 +283,7 @@ class _LibraryTrackListState extends State<_LibraryTrackList> {
             Text(
               '正在处理 ${widget.controller.libraryBatchCompleted} / '
               '${widget.controller.libraryBatchTotal} 首',
-              style: const TextStyle(color: _muted, fontSize: 12),
+              style: const TextStyle(color: appMuted, fontSize: 12),
             ),
           ],
           const SizedBox(height: 8),
@@ -296,6 +303,15 @@ class _LibraryTrackListState extends State<_LibraryTrackList> {
                       final album = track.album.trim().isEmpty
                           ? '未知专辑'
                           : track.album.trim();
+                      final playbackKey = widget.controller.localPlaybackKey(
+                        track,
+                      );
+                      final preparing =
+                          widget.controller.preparingPlaybackKey == playbackKey;
+                      final failure = widget.controller.playbackFailure;
+                      final current =
+                          widget.controller.currentItem?.localPath ==
+                          track.path;
                       return TrackTile(
                         title: track.title,
                         subtitle: '$artist  ·  $album',
@@ -305,10 +321,28 @@ class _LibraryTrackListState extends State<_LibraryTrackList> {
                         titleSize: 15.5,
                         subtitleSize: 13.2,
                         selected: _selecting && selected,
+                        current:
+                            widget.controller.currentItem?.localPath ==
+                            track.path,
+                        playing: widget.controller.player.isPlaying,
+                        preparing: preparing,
+                        buffering:
+                            current &&
+                            widget.controller.currentPlaybackHealth.buffering,
+                        playbackError: failure?.key == playbackKey
+                            ? failure?.message
+                            : current
+                            ? widget.controller.currentPlaybackHealth.error
+                            : null,
+                        onRetry: _disabled || _selecting
+                            ? null
+                            : () => widget.controller.playDownloaded(track),
                         onTap: _disabled
                             ? null
                             : _selecting
                             ? () => _toggle(track)
+                            : preparing
+                            ? null
                             : () => widget.controller.playDownloaded(track),
                         onLongPress: _disabled ? null : () => _toggle(track),
                         trailing: _selecting
@@ -436,7 +470,7 @@ Future<String?> _chooseBatchAlbum(
               const SizedBox(height: 8),
               const Text(
                 'MP3 会更新文件标签；其他格式更新青听内的信息。正在播放的 MP3 会在切歌后写入。',
-                style: TextStyle(color: _muted, fontSize: 12),
+                style: TextStyle(color: appMuted, fontSize: 12),
               ),
               const SizedBox(height: 12),
               TextField(

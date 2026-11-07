@@ -12,6 +12,19 @@ const appReleasePage =
     'https://github.com/sadpotato1006/music_downloader/releases';
 const _repositoryPath = 'sadpotato1006/music_downloader';
 
+enum AppUpdatePlatform {
+  windows,
+  android,
+  linux;
+
+  static AppUpdatePlatform get current {
+    if (Platform.isWindows) return windows;
+    if (Platform.isAndroid) return android;
+    if (Platform.isLinux) return linux;
+    throw UnsupportedError('当前平台不支持检查更新');
+  }
+}
+
 class UpdateVersion implements Comparable<UpdateVersion> {
   UpdateVersion._(this.parts, this.build);
 
@@ -45,10 +58,11 @@ class AppUpdateRelease {
   const AppUpdateRelease({
     required this.version,
     required this.notes,
-    required this.assetName,
+    this.assetName = '',
     required this.url,
-    required this.size,
-    required this.sha256Hex,
+    this.size = 0,
+    this.sha256Hex = '',
+    this.requiresManualInstall = false,
   });
 
   final UpdateVersion version;
@@ -57,6 +71,7 @@ class AppUpdateRelease {
   final Uri url;
   final int size;
   final String sha256Hex;
+  final bool requiresManualInstall;
 }
 
 abstract class AppUpdateSource {
@@ -72,18 +87,23 @@ abstract class AppUpdateSource {
 /// Only accepts release assets from this repository. Redirects are restricted
 /// to GitHub's HTTPS asset hosts; the downloaded executable is never a shell command.
 class GitHubUpdateSource extends AppUpdateSource {
-  GitHubUpdateSource({Dio? dio, Future<Directory> Function()? cacheDirectory})
-    : _dio =
-          dio ??
-          Dio(
-            BaseOptions(
-              connectTimeout: const Duration(seconds: 15),
-              receiveTimeout: const Duration(seconds: 30),
-            ),
-          ),
-      _cacheDirectory = cacheDirectory ?? defaultUpdateDirectory;
+  GitHubUpdateSource({
+    Dio? dio,
+    Future<Directory> Function()? cacheDirectory,
+    AppUpdatePlatform? platform,
+  }) : platform = platform ?? AppUpdatePlatform.current,
+       _dio =
+           dio ??
+           Dio(
+             BaseOptions(
+               connectTimeout: const Duration(seconds: 15),
+               receiveTimeout: const Duration(seconds: 30),
+             ),
+           ),
+       _cacheDirectory = cacheDirectory ?? defaultUpdateDirectory;
 
   static const maxInstallerBytes = 256 * 1024 * 1024;
+  final AppUpdatePlatform platform;
   final Dio _dio;
   final Future<Directory> Function() _cacheDirectory;
 
@@ -217,8 +237,14 @@ class GitHubUpdateSource extends AppUpdateSource {
     final manifests = assets
         .where((a) => a['name'] == 'qingting-update.json')
         .toList();
+    if (manifests.length > 1) {
+      throw const FormatException('发布包含重复的更新清单');
+    }
     if (manifests.length != 1) {
       if (tagVersion.compareTo(current) <= 0) return null;
+      if (platform != AppUpdatePlatform.windows) {
+        return _manualRelease(release, tag, tagVersion);
+      }
       throw const FormatException('新版尚未提供应用内更新文件，可前往发布页下载');
     }
     final manifest = await _json(
@@ -234,17 +260,28 @@ class GitHubUpdateSource extends AppUpdateSource {
       throw const FormatException('更新版本信息不一致');
     }
     if (version.compareTo(current) <= 0) return null;
-    final windows = manifest['windows-x64'];
-    if (windows is! Map ||
-        windows['installer'] is! String ||
-        windows['size'] is! int ||
-        windows['sha256'] is! String) {
-      throw const FormatException('缺少 Windows x64 更新包');
+    if (platform == AppUpdatePlatform.linux ||
+        (platform == AppUpdatePlatform.android &&
+            manifest['android'] == null)) {
+      return _manualRelease(release, tag, version);
     }
-    final name = windows['installer'] as String;
-    final size = windows['size'] as int;
-    final hash = (windows['sha256'] as String).toLowerCase();
-    if (name != 'QingTingSetup-v${version.release.replaceAll('.', '_')}.exe' ||
+    final package =
+        manifest[platform == AppUpdatePlatform.android
+            ? 'android'
+            : 'windows-x64'];
+    if (package is! Map ||
+        package['installer'] is! String ||
+        package['size'] is! int ||
+        package['sha256'] is! String) {
+      throw const FormatException('缺少当前平台的更新包校验信息');
+    }
+    final name = package['installer'] as String;
+    final size = package['size'] as int;
+    final hash = (package['sha256'] as String).toLowerCase();
+    final expectedName = platform == AppUpdatePlatform.android
+        ? 'QingTing-v${version.release}-build${version.build}.apk'
+        : 'QingTingSetup-v${version.release.replaceAll('.', '_')}.exe';
+    if (name != expectedName ||
         size <= 0 ||
         size > maxInstallerBytes ||
         !RegExp(r'^[a-f0-9]{64}$').hasMatch(hash)) {
@@ -260,15 +297,28 @@ class GitHubUpdateSource extends AppUpdateSource {
     }
     return AppUpdateRelease(
       version: version,
-      notes: (release['body'] as String? ?? '').substring(
-        0,
-        (release['body'] as String? ?? '').length.clamp(0, 20000),
-      ),
+      notes: _releaseNotes(release),
       assetName: name,
       url: assetUri(installers.single, tag),
       size: size,
       sha256Hex: hash,
     );
+  }
+
+  AppUpdateRelease _manualRelease(
+    Map<String, dynamic> release,
+    String tag,
+    UpdateVersion version,
+  ) => AppUpdateRelease(
+    version: version,
+    notes: _releaseNotes(release),
+    url: Uri.https('github.com', '/$_repositoryPath/releases/tag/$tag'),
+    requiresManualInstall: true,
+  );
+
+  String _releaseNotes(Map<String, dynamic> release) {
+    final notes = release['body'] as String? ?? '';
+    return notes.substring(0, notes.length.clamp(0, 20000));
   }
 
   @override
@@ -277,6 +327,9 @@ class GitHubUpdateSource extends AppUpdateSource {
     CancelToken cancel,
     void Function(int, int) progress,
   ) async {
+    if (release.requiresManualInstall) {
+      throw const FormatException('请前往发布页下载适合当前平台的安装包');
+    }
     final root = await _cacheDirectory();
     await root.create(recursive: true);
     final directory = await root.createTemp('download-');

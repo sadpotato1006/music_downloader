@@ -10,6 +10,18 @@ enum LibrarySortMode { downloadedAtDesc, titleAsc, artistAsc }
 const defaultDesktopLyricsSettings = DesktopLyricsSettings();
 const maxSearchHistoryItems = 12;
 
+const appThemeIds = [
+  'lightGreen',
+  'skyBlue',
+  'lavender',
+  'rose',
+  'apricot',
+  'graphite',
+];
+
+String normalizeAppTheme(Object? value) =>
+    appThemeIds.contains(value) ? value as String : 'lightGreen';
+
 class TrackSearchResult {
   const TrackSearchResult({
     required this.id,
@@ -647,7 +659,7 @@ class AppSettings {
       downloadDirectory: downloadDirectory ?? this.downloadDirectory,
       preferredFormat: preferredFormat ?? this.preferredFormat,
       concurrentDownloads: concurrentDownloads ?? this.concurrentDownloads,
-      theme: theme ?? this.theme,
+      theme: normalizeAppTheme(theme ?? this.theme),
       volume: volume ?? this.volume,
       autoPlayOnStartup: autoPlayOnStartup ?? this.autoPlayOnStartup,
       checkUpdatesOnStartup:
@@ -671,7 +683,7 @@ class AppSettings {
     'downloadDirectory': downloadDirectory,
     'preferredFormat': preferredFormat,
     'concurrentDownloads': concurrentDownloads,
-    'theme': theme,
+    'theme': normalizeAppTheme(theme),
     'volume': volume,
     'autoPlayOnStartup': autoPlayOnStartup,
     'checkUpdatesOnStartup': checkUpdatesOnStartup,
@@ -691,7 +703,7 @@ class AppSettings {
       downloadDirectory: json['downloadDirectory'] as String,
       preferredFormat: json['preferredFormat'] as String? ?? 'mp3',
       concurrentDownloads: json['concurrentDownloads'] as int? ?? 1,
-      theme: json['theme'] as String? ?? 'lightGreen',
+      theme: normalizeAppTheme(json['theme']),
       volume: (json['volume'] as num?)?.toDouble() ?? 100,
       autoPlayOnStartup: json['autoPlayOnStartup'] as bool? ?? false,
       checkUpdatesOnStartup: json['checkUpdatesOnStartup'] as bool? ?? true,
@@ -854,6 +866,8 @@ class PlayerItem {
     required this.artist,
     required this.uri,
     this.headers = const {},
+    this.audioCacheKey,
+    this.audioCacheFormat,
     this.localPath,
     this.coverUrl,
     this.coverFilePath,
@@ -866,6 +880,8 @@ class PlayerItem {
   final String artist;
   final String uri;
   final Map<String, String> headers;
+  final String? audioCacheKey;
+  final String? audioCacheFormat;
   final String? localPath;
   final String? coverUrl;
   final String? coverFilePath;
@@ -878,6 +894,8 @@ class PlayerItem {
     'artist': artist,
     'uri': uri,
     'headers': headers,
+    'audioCacheKey': audioCacheKey,
+    'audioCacheFormat': audioCacheFormat,
     'localPath': localPath,
     'coverUrl': coverUrl,
     'coverFilePath': coverFilePath,
@@ -892,6 +910,8 @@ class PlayerItem {
       artist: json['artist'] as String? ?? '',
       uri: json['uri'] as String,
       headers: Map<String, String>.from(json['headers'] as Map? ?? const {}),
+      audioCacheKey: json['audioCacheKey'] as String?,
+      audioCacheFormat: json['audioCacheFormat'] as String?,
       localPath: json['localPath'] as String?,
       coverUrl: json['coverUrl'] as String?,
       coverFilePath: json['coverFilePath'] as String?,
@@ -906,6 +926,8 @@ class PlayerItem {
     String? artist,
     String? uri,
     Map<String, String>? headers,
+    String? audioCacheKey,
+    String? audioCacheFormat,
     String? localPath,
     String? coverUrl,
     String? coverFilePath,
@@ -920,6 +942,8 @@ class PlayerItem {
       artist: artist ?? this.artist,
       uri: uri ?? this.uri,
       headers: headers ?? this.headers,
+      audioCacheKey: audioCacheKey ?? this.audioCacheKey,
+      audioCacheFormat: audioCacheFormat ?? this.audioCacheFormat,
       localPath: localPath ?? this.localPath,
       coverUrl: clearCoverUrl ? null : coverUrl ?? this.coverUrl,
       coverFilePath: clearCoverFilePath

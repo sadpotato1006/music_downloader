@@ -50,12 +50,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            const Text(
-              '将本地下载目录与所选云盘文件夹内的“青听歌曲”同步。歌曲保存在“青听歌曲”，歌曲信息、封面、索引和删除记录保存在“青听数据”；这些文件夹会自动创建。',
-            ),
-            const SizedBox(height: 8),
-            const Text('在青听中修改歌曲信息后，其他设备下次同步也会更新，原下载顺序保持不变。'),
-            const SizedBox(height: 20),
+            SettingsSaveNotice(controller: controller.preferences),
             if (!controller.cloudConnected)
               FilledButton.icon(
                 onPressed: _login,
@@ -64,14 +59,14 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
               )
             else ...[
               ListTile(
-                leading: const Icon(Icons.check_circle, color: _accentStrong),
+                leading: Icon(Icons.check_circle, color: themeAccent(context)),
                 title: const Text('已连接北科云盘'),
                 trailing: TextButton(
                   onPressed:
                       controller.isCloudSyncing ||
                           controller.isCloudPolicyLoading
                       ? null
-                      : controller.disconnectCloud,
+                      : () => runSettingsAction(controller.disconnectCloud),
                   child: const Text('退出登录'),
                 ),
               ),
@@ -102,16 +97,13 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
                   value: settings.cloudSyncEnabled,
                   onChanged: controller.isCloudPolicyLoading
                       ? null
-                      : controller.setCloudSyncEnabled,
+                      : (value) => runSettingsAction(
+                          () => controller.setCloudSyncEnabled(value),
+                        ),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('此云盘文件夹的同步删除'),
-                  subtitle: Text(
-                    controller.cloudDeletionPolicyEnabled == null
-                        ? '正在读取云盘设置；读取失败时暂停同步以保护歌曲。'
-                        : '所有已更新设备下次同步生效。关闭后仍会执行已确认的删除记录；只删除内容未变化的歌曲。',
-                  ),
                   value: controller.cloudDeletionPolicyEnabled ?? false,
                   onChanged:
                       controller.isCloudSyncing ||
@@ -139,7 +131,6 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
                   icon: const Icon(Icons.sort),
                   label: const Text('以本机下载顺序为准'),
                 ),
-                const Text('将本机曲库的下载时间写入云盘；其他设备下次同步后按这个顺序显示。'),
               ],
             ],
             if (controller.isCloudSyncing)

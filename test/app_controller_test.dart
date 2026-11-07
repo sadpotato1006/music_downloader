@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qingting/album_metadata_service.dart';
@@ -25,9 +27,923 @@ import 'package:qingting/player_service.dart';
 import 'package:qingting/pending_album_match.dart';
 import 'package:qingting/storage_service.dart';
 import 'package:qingting/song_metadata.dart';
-import 'package:qingting/windows_update_controller.dart';
+import 'package:qingting/app_update_controller.dart';
+
+BoxDecoration _capsuleDecoration(WidgetTester tester) {
+  return tester
+          .widget<DecoratedBox>(
+            find
+                .descendant(
+                  of: find.byKey(const ValueKey('navigation-capsule')),
+                  matching: find.byType(DecoratedBox),
+                  matchRoot: true,
+                )
+                .first,
+          )
+          .decoration
+      as BoxDecoration;
+}
 
 void main() {
+  // Initialize the process-wide log queue outside any widget's fake clock.
+  setUpAll(() => AppLog.instance.flush());
+  testWidgets(
+    'runtime buffering and errors follow the current song and can retry',
+    (tester) async {
+      final player = _FakePlaybackService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: player,
+      );
+      addTearDown(controller.dispose);
+      const item = PlayerItem(
+        id: 'runtime',
+        title: 'Runtime Song',
+        artist: 'Artist',
+        uri: 'https://example.test/song.mp3',
+      );
+      controller.queue = [item];
+      controller.currentQueueIndex = 0;
+      await player.open(item);
+      await tester.pumpWidget(
+        MaterialApp(home: app.HomeShell(controller: controller)),
+      );
+      player.health = PlaybackHealth(
+        itemKey: (item.id, item.uri),
+        buffering: true,
+      );
+      player.onChanged?.call();
+      await tester.pump();
+      expect(find.text('正在缓冲…'), findsOneWidget);
+      expect(find.byTooltip('暂停'), findsOneWidget);
+      player.health = PlaybackHealth(
+        itemKey: (item.id, item.uri),
+        error: '网络连接中断',
+      );
+      player.onChanged?.call();
+      await tester.pump();
+      expect(find.text('播放中断，点击重试'), findsOneWidget);
+      await tester.tap(find.byTooltip('重试播放'));
+      await tester.pumpAndSettle();
+      expect(player.openCalls, 2);
+      expect(find.text('播放中断，点击重试'), findsNothing);
+      controller.queue = [item.copyWith(uri: 'https://example.test/new.mp3')];
+      player.health = PlaybackHealth(
+        itemKey: (item.id, item.uri),
+        error: '上一首的错误',
+      );
+      player.onChanged?.call();
+      await tester.pump();
+      expect(controller.playbackStatusText, isNull);
+      expect(find.byTooltip('重试播放'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  test(
+    'large library publishes only latest search and metadata snapshots',
+    () async {
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      addTearDown(controller.dispose);
+      final tracks = List.generate(
+        600,
+        (i) => DownloadedTrack(
+          id: '$i',
+          path: 'song-$i.mp3',
+          title: i == 0 ? '晴天' : '歌曲 $i',
+          artist: '歌手',
+          album: '',
+          format: 'mp3',
+          sourceUrl: '',
+          metadataLyrics: '',
+          downloadedAt: DateTime(2026),
+        ),
+      );
+      controller.downloadedTracks = tracks;
+      controller.setLibraryQuery('不存在');
+      controller.setLibraryQuery('qingtian');
+      expect(controller.visibleDownloadedTracks, isEmpty);
+      expect(controller.isPreparingLibraryView, isTrue);
+      await controller.libraryViewReady;
+      expect(controller.visibleDownloadedTracks, [tracks.first]);
+      expect(controller.visibleDownloadedTracks.single, same(tracks.first));
+      expect(controller.isPreparingLibraryView, isFalse);
+      controller.setLibraryQuery('旧名字');
+      final updated = tracks.first.copyWith(title: '新名字');
+      controller.downloadedTracks = [updated, ...tracks.skip(1)];
+      controller.setLibraryQuery('新名字');
+      await controller.libraryViewReady;
+      expect(controller.visibleDownloadedTracks, [updated]);
+      controller.setLibraryQuery('');
+      controller.setLibrarySortMode(LibrarySortMode.titleAsc);
+      controller.visibleDownloadedTracks;
+      await controller.libraryViewReady;
+      final expected = List.of(
+        controller.downloadedTracks,
+      )..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+      expect(controller.visibleDownloadedTracks, orderedEquals(expected));
+    },
+  );
+
+  test('large library lyric matches survive repeated searches', () async {
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+    addTearDown(controller.dispose);
+    controller.downloadedTracks = List.generate(
+      512,
+      (i) => DownloadedTrack(
+        id: '$i',
+        path: 'song-$i.mp3',
+        title: '歌曲 $i',
+        artist: '歌手',
+        format: 'mp3',
+        sourceUrl: '',
+        metadataLyrics: i == 10 ? '独特歌词' : '',
+        downloadedAt: DateTime(2026),
+      ),
+    );
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final found = Completer<void>();
+      void listener() {
+        if (controller.visibleDownloadedTracks.length == 1 &&
+            !found.isCompleted) {
+          found.complete();
+        }
+      }
+
+      controller.addListener(listener);
+      controller.setLibraryQuery('独特歌词');
+      await found.future.timeout(const Duration(seconds: 5));
+      expect(controller.visibleDownloadedTracks.single.id, '10');
+      controller.removeListener(listener);
+    }
+  });
+  for (final delayedPosition in [false, true]) {
+    testWidgets(
+      'progress previews and seeks once (delayed position: $delayedPosition)',
+      (tester) async {
+        final player = _FakePlaybackService()
+          ..duration = const Duration(minutes: 3)
+          ..delaySeekPosition = delayedPosition;
+        final controller = AppController(
+          source: _FakeMusicSource(),
+          storage: _FakeStorageService(),
+          player: player,
+        );
+        addTearDown(controller.dispose);
+        const item = PlayerItem(
+          id: 'seek-preview',
+          title: 'Preview Song',
+          artist: 'Artist',
+          uri: 'https://example.test/song.mp3',
+          lyrics: '[00:01]歌词',
+        );
+        controller.queue = [item];
+        controller.currentQueueIndex = 0;
+        player.openedItem = item;
+        await tester.pumpWidget(
+          MaterialApp(home: app.HomeShell(controller: controller)),
+        );
+        await tester.tap(find.text('Preview Song'));
+        await tester.pumpAndSettle();
+        final sliderFinder = find.byKey(const ValueKey('lyrics-progress'));
+        final rect = tester.getRect(sliderFinder);
+        final gesture = await tester.startGesture(
+          Offset(rect.left + rect.width * .3, rect.center.dy),
+        );
+        await gesture.moveBy(Offset(rect.width * .2, 0));
+        await tester.pump();
+        final preview = tester.widget<Slider>(sliderFinder).value;
+        expect(preview, greaterThan(0));
+        expect(player.seekCalls, isEmpty);
+        player.position = const Duration(seconds: 1);
+        player._positionListenable.value = player.position;
+        await tester.pump();
+        expect(tester.widget<Slider>(sliderFinder).value, preview);
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(player.seekCalls, [Duration(milliseconds: preview.round())]);
+        if (delayedPosition) {
+          expect(tester.widget<Slider>(sliderFinder).value, preview);
+          player.position = Duration(milliseconds: preview.round());
+          player._positionListenable.value = player.position;
+          await tester.pump();
+          expect(tester.widget<Slider>(sliderFinder).value, preview.round());
+        }
+
+        // A release belonging to the previous song must not seek the new song.
+        final oldSlider = tester.widget<Slider>(sliderFinder);
+        oldSlider.onChangeStart!(preview);
+        oldSlider.onChanged!(5000);
+        controller.queue = [
+          item.copyWith(uri: 'https://example.test/other.mp3'),
+        ];
+        player.onChanged?.call();
+        await tester.pump();
+        oldSlider.onChangeEnd!(5000);
+        await tester.pump();
+        expect(player.seekCalls.length, 1);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets('manual lyric scroll stays put until following resumes', (
+    tester,
+  ) async {
+    final player = _FakePlaybackService()
+      ..duration = const Duration(minutes: 3);
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: player,
+    );
+    addTearDown(controller.dispose);
+    final item = PlayerItem(
+      id: 'follow',
+      title: 'Follow Song',
+      artist: 'Artist',
+      uri: 'https://example.test/song.mp3',
+      lyrics: List.generate(
+        60,
+        (i) => '[00:${i.toString().padLeft(2, '0')}]歌词 $i',
+      ).join('\n'),
+    );
+    controller.queue = [item];
+    controller.currentQueueIndex = 0;
+    player.openedItem = item;
+    await player.seek(const Duration(seconds: 15));
+    await tester.pumpWidget(
+      MaterialApp(home: app.HomeShell(controller: controller)),
+    );
+    await tester.tap(find.text('Follow Song'));
+    await tester.pumpAndSettle();
+    final listFinder = find.byKey(const ValueKey('lyrics-list'));
+    await tester.drag(listFinder, const Offset(0, -180));
+    await tester.pumpAndSettle();
+    expect(find.text('回到当前歌词'), findsOneWidget);
+    final scroll = tester.widget<ListView>(listFinder).controller!;
+    final manualOffset = scroll.offset;
+    await player.seek(const Duration(seconds: 30));
+    await tester.pumpAndSettle();
+    expect(scroll.offset, manualOffset);
+    await tester.tap(find.text('回到当前歌词'));
+    await tester.pumpAndSettle();
+    expect(find.text('回到当前歌词'), findsNothing);
+    expect(scroll.offset, isNot(manualOffset));
+    await tester.drag(listFinder, const Offset(0, 120));
+    await tester.pumpAndSettle();
+    controller.queue = [item.copyWith(uri: 'https://example.test/new.mp3')];
+    player.onChanged?.call();
+    await tester.pumpAndSettle();
+    expect(find.text('回到当前歌词'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'search exposes loading, failure, retry, empty and source switching',
+    (tester) async {
+      final source = _ControlledSearchMusicSource();
+      final other = _SearchMusicSource('other', 'Other Source');
+      final controller = AppController(
+        source: source,
+        sources: [source, other],
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(home: app.HomeShell(controller: controller)),
+      );
+      expect(find.text('输入关键词开始搜索'), findsOneWidget);
+      await tester.enterText(find.byType(TextField).first, '关键词');
+      await tester.tap(find.widgetWithText(FilledButton, '搜索'));
+      await tester.pump();
+      expect(find.text('正在搜索“关键词”…'), findsOneWidget);
+      source.fail(0, '网络暂时不可用');
+      await tester.pumpAndSettle();
+      expect(find.text('搜索失败'), findsOneWidget);
+      expect(find.text('网络暂时不可用'), findsOneWidget);
+      await tester.tap(find.text('重试搜索'));
+      await tester.pump();
+      expect(source.keywords, ['关键词', '关键词']);
+      source._pending[1].complete([]);
+      await tester.pumpAndSettle();
+      expect(find.text('没有找到相关歌曲'), findsOneWidget);
+      expect(find.text('搜索失败'), findsNothing);
+      await tester.tap(find.text('换源搜索'));
+      await tester.pumpAndSettle();
+      expect(other.lastKeyword, '关键词');
+      expect(controller.source, other);
+      expect(controller.searchResults.single.title, '关键词');
+      expect(
+        tester.widget<TextField>(find.byType(TextField).first).controller!.text,
+        '关键词',
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  for (final size in [const Size(390, 844), const Size(1200, 900)]) {
+    testWidgets('song card feedback and retry at $size', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final source = _UxPlaybackSource();
+      final player = _FakePlaybackService();
+      final controller = AppController(
+        source: source,
+        storage: _FakeStorageService(),
+        player: player,
+        lyricsService: _FakeLyricsService(),
+      );
+      addTearDown(controller.dispose);
+      controller.searchResults = [source.result];
+      await tester.pumpWidget(
+        MaterialApp(home: app.HomeShell(controller: controller)),
+      );
+      expect(find.text('音乐，随心而听'), findsNothing);
+      if (size.width >= 980) {
+        expect(tester.getSize(find.byType(app.TrackTile).first).height, 72);
+      }
+      await tester.tap(find.text('测试歌曲'));
+      await tester.pump();
+      expect(find.text('正在准备播放'), findsOneWidget);
+      source.gate.completeError(const MusicSourceException('链接暂时失效'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.text('播放失败：链接暂时失效'), findsOneWidget);
+      expect(find.byTooltip('重试播放'), findsOneWidget);
+      source.gate = Completer<TrackDetail>();
+      await tester.tap(find.byTooltip('重试播放'));
+      await tester.pump();
+      expect(find.text('正在准备播放'), findsOneWidget);
+      expect(find.byTooltip('重试播放'), findsNothing);
+      source.gate.complete(await source.detail());
+      await tester.pumpAndSettle();
+      expect(find.text('正在播放'), findsNothing);
+      expect(player.openCalls, 1);
+      final card = tester.widget<app.TrackTile>(
+        find.byType(app.TrackTile).first,
+      );
+      expect(card.current, isTrue);
+      player.isPlaying = false;
+      player.onChanged?.call();
+      await tester.pumpAndSettle();
+      expect(find.text('已暂停'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  test(
+    'theme settings migrate old glass preferences and reject unknown values',
+    () {
+      for (final legacy in [true, false]) {
+        final settings = AppSettings.fromJson({
+          'downloadDirectory': 'music',
+          'liquidGlassEnabled': legacy,
+        });
+        expect(settings.theme, 'lightGreen');
+        expect(settings.toJson().containsKey('liquidGlassEnabled'), isFalse);
+      }
+      for (final value in [null, 'missing-theme', 42]) {
+        expect(
+          AppSettings.fromJson({'downloadDirectory': '', 'theme': value}).theme,
+          'lightGreen',
+        );
+      }
+      final colors = <Color>{};
+      final backgrounds = <Color>{};
+      final borders = <Color>{};
+      for (final theme in appThemeIds) {
+        final data = app.qingTingTheme(theme: theme);
+        expect(app.qingTingTheme(theme: theme), same(data));
+        colors.add(data.colorScheme.primary);
+        backgrounds.add(data.scaffoldBackgroundColor);
+        borders.add(data.colorScheme.outlineVariant);
+        expect(data.chipTheme.side!.color, data.colorScheme.outlineVariant);
+        expect(
+          data.inputDecorationTheme.enabledBorder!.borderSide.color,
+          data.colorScheme.outlineVariant,
+        );
+        expect(data.colorScheme.surface.a, 1);
+        expect(data.scaffoldBackgroundColor.a, 1);
+        expect(
+          1.05 / (data.colorScheme.primary.computeLuminance() + .05),
+          greaterThanOrEqualTo(4.5),
+        );
+      }
+      expect(colors.length, appThemeIds.length);
+      expect(backgrounds.length, appThemeIds.length);
+      expect(borders.length, appThemeIds.length);
+    },
+  );
+
+  test(
+    'theme preference survives storage and unrelated setting edits',
+    () async {
+      final directory = Directory.systemTemp.createTempSync('qingting-theme-');
+      final storage = StorageService(supportDirectory: directory);
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: storage,
+        player: _FakePlaybackService(),
+      );
+      try {
+        controller.settings = const AppSettings(downloadDirectory: 'music');
+        for (final theme in appThemeIds) {
+          controller.setTheme(theme);
+          await controller.flushPendingWrites(strict: true);
+          final restored = await StorageService(
+            supportDirectory: directory,
+          ).loadSettings();
+          expect(restored.theme, theme);
+          expect(restored.copyWith(volume: 42).theme, theme);
+        }
+        controller.setTheme('invalid');
+        expect(controller.settings!.theme, 'lightGreen');
+      } finally {
+        controller.dispose();
+        await storage.flushPendingWrites();
+        directory.deleteSync(recursive: true);
+      }
+    },
+  );
+
+  for (final size in [const Size(390, 844), const Size(1200, 900)]) {
+    testWidgets('theme picker updates colors and preserves editing at $size', (
+      tester,
+    ) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      controller.settings = const AppSettings(downloadDirectory: 'D:/Music');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(home: app.HomeShell(controller: controller)),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, '保留搜索');
+      final searchState = tester.state(find.byType(app.SearchPage));
+      controller.selectIndex(3);
+      await tester.pumpAndSettle();
+      final pathField = find.descendant(
+        of: find.byType(app.SettingsPage),
+        matching: find.byType(TextField),
+      );
+      await tester.scrollUntilVisible(
+        pathField,
+        200,
+        scrollable: find
+            .descendant(
+              of: find.byType(app.SettingsPage),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.enterText(pathField, 'D:/尚未保存');
+      final editedPath = tester.widget<TextField>(pathField).controller!;
+      FocusManager.instance.primaryFocus?.unfocus();
+      final settingsScroll = tester.state<ScrollableState>(
+        find
+            .descendant(
+              of: find.byType(app.SettingsPage),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      settingsScroll.position.jumpTo(0);
+      await tester.pumpAndSettle();
+      for (final theme in appThemeIds) {
+        final choice = find.byKey(ValueKey('theme-$theme'));
+        await tester.scrollUntilVisible(
+          choice,
+          250,
+          scrollable: find
+              .descendant(
+                of: find.byType(app.SettingsPage),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(choice);
+        await tester.pumpAndSettle();
+        expect(controller.settings!.theme, theme);
+        expect(editedPath.text, 'D:/尚未保存');
+        final capsule = find.byKey(const ValueKey('navigation-capsule'));
+        final actual = Theme.of(tester.element(capsule));
+        final expected = app.qingTingTheme(theme: theme);
+        expect(actual.colorScheme.primary, expected.colorScheme.primary);
+        expect(
+          actual.scaffoldBackgroundColor,
+          expected.scaffoldBackgroundColor,
+        );
+        expect(_capsuleDecoration(tester).gradient, isNull);
+        expect(_capsuleDecoration(tester).color, Colors.white);
+        expect(
+          (_capsuleDecoration(tester).border! as Border).top.color,
+          expected.colorScheme.outlineVariant,
+        );
+        expect(find.byType(BackdropFilter), findsNothing);
+        expect(find.text('液态玻璃'), findsNothing);
+      }
+      await tester.scrollUntilVisible(
+        pathField,
+        -250,
+        scrollable: find
+            .descendant(
+              of: find.byType(app.SettingsPage),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      expect(tester.widget<TextField>(pathField).controller, same(editedPath));
+      expect(tester.widget<TextField>(pathField).controller!.text, 'D:/尚未保存');
+      controller.selectIndex(0);
+      await tester.pumpAndSettle();
+      expect(tester.state(find.byType(app.SearchPage)), same(searchState));
+      expect(
+        tester.widget<TextField>(find.byType(TextField).first).controller!.text,
+        '保留搜索',
+      );
+      expect(tester.takeException(), isNull);
+      expect(tester.binding.transientCallbackCount, 0);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  for (final size in [
+    const Size(360, 640),
+    const Size(390, 844),
+    const Size(1200, 900),
+  ]) {
+    testWidgets('theme layout and accessibility at $size', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      if (const bool.fromEnvironment('THEME_SCREENSHOTS')) {
+        await tester.runAsync(() async {
+          for (final font in [
+            ('Microsoft YaHei', 'C:/Windows/Fonts/msyh.ttc'),
+            (
+              'packages/font_awesome_flutter/FontAwesomeBrands',
+              '.pub-cache/hosted/pub.dev/font_awesome_flutter-11.0.0/lib/fonts/Font-Awesome-7-Brands-Regular-400.otf',
+            ),
+            (
+              'MaterialIcons',
+              '.tooling/flutter/bin/cache/artifacts/material_fonts/materialicons-regular.otf',
+            ),
+          ]) {
+            final file = File(font.$2);
+            if (file.existsSync()) {
+              await (FontLoader(
+                font.$1,
+              )..addFont(file.readAsBytes().then(ByteData.sublistView))).load();
+            }
+          }
+        });
+      }
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+      );
+      controller.settings = const AppSettings(downloadDirectory: 'D:/Music');
+      addTearDown(controller.dispose);
+      const previewKey = ValueKey('theme-preview');
+      controller.downloadedTracks = List.generate(
+        6,
+        (i) => DownloadedTrack(
+          id: 'theme-preview-$i',
+          title: ['雨天', '天下', '明天过后', '这，就是爱', '流星雨', '绿光'][i],
+          artist: '青听',
+          album: '我的音乐',
+          path: 'preview-$i.mp3',
+          format: 'mp3',
+          downloadedAt: DateTime(2026, 10, 30),
+          sourceUrl: '',
+        ),
+      );
+      Future<void> capture(String name) async {
+        if (!const bool.fromEnvironment('THEME_SCREENSHOTS')) return;
+        final boundary = tester.renderObject<RenderRepaintBoundary>(
+          find.byKey(previewKey),
+        );
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 1);
+          try {
+            final bytes = await image.toByteData(
+              format: ui.ImageByteFormat.png,
+            );
+            File(
+              '.tooling/theme-${size.width.toInt()}-$name.png',
+            ).writeAsBytesSync(bytes!.buffer.asUint8List());
+          } finally {
+            image.dispose();
+          }
+        });
+      }
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: app.qingTingTheme(),
+          home: RepaintBoundary(
+            key: previewKey,
+            child: app.HomeShell(controller: controller),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await capture('search');
+      for (final index in [1, 2, 3]) {
+        controller.selectIndex(index);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      }
+      await capture('settings');
+      final settingsScroll = find
+          .descendant(
+            of: find.byType(app.SettingsPage),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('theme-lightGreen')),
+        250,
+        scrollable: settingsScroll,
+      );
+      await tester.pumpAndSettle();
+      final settingsPosition = tester
+          .state<ScrollableState>(settingsScroll)
+          .position;
+      settingsPosition.jumpTo(
+        (settingsPosition.pixels - 52).clamp(
+          0,
+          settingsPosition.maxScrollExtent,
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final theme in appThemeIds) {
+        controller.setTheme(theme);
+        await tester.pumpAndSettle();
+        await capture('settings-$theme');
+        expect(tester.takeException(), isNull);
+      }
+      controller.selectIndex(2);
+      await tester.pumpAndSettle();
+      Color? lastBorder;
+      for (final theme in appThemeIds) {
+        controller.setTheme(theme);
+        await tester.pumpAndSettle();
+        final card = tester.widget<Ink>(
+          find.descendant(
+            of: find.byType(app.TrackTile).first,
+            matching: find.byType(Ink),
+          ),
+        );
+        final border = (card.decoration! as BoxDecoration).border! as Border;
+        expect(border.top.width, lessThanOrEqualTo(1));
+        expect(border.top.color, isNot(lastBorder));
+        lastBorder = border.top.color;
+        await capture('library-$theme');
+      }
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: app.qingTingTheme(),
+          home: MediaQuery(
+            data: MediaQueryData(
+              size: size,
+              highContrast: true,
+              disableAnimations: true,
+              textScaler: TextScaler.linear(1.3),
+            ),
+            child: app.HomeShell(controller: controller),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(BackdropFilter), findsNothing);
+      for (final theme in appThemeIds) {
+        controller.setTheme(theme);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      }
+      for (final index in [0, 1, 2, 3]) {
+        controller.selectIndex(index);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  for (final selectedTheme in ['lightGreen', 'graphite']) {
+    for (final hz in [60, 90, 120, 144]) {
+      testWidgets(
+        'theme=$selectedTheme navigation keeps the requested destination at $hz Hz',
+        (tester) async {
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1;
+          tester.view.padding = const FakeViewPadding(top: 32);
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          addTearDown(tester.view.resetPadding);
+          final controller = AppController(
+            source: _FakeMusicSource(),
+            storage: _FakeStorageService(),
+            player: _FakePlaybackService(),
+          );
+          controller.settings = AppSettings(
+            downloadDirectory: '',
+            theme: selectedTheme,
+          );
+          addTearDown(controller.dispose);
+          await tester.pumpWidget(
+            MaterialApp(home: app.HomeShell(controller: controller)),
+          );
+          await tester.pumpAndSettle();
+          final capsule = find.byKey(const ValueKey('navigation-capsule'));
+          expect(tester.getTopLeft(capsule).dy, greaterThanOrEqualTo(44));
+          expect(tester.getSize(capsule).height, lessThanOrEqualTo(64));
+          final scroll = tester
+              .widget<PageView>(find.byType(PageView))
+              .controller!;
+          final selections = <int>[];
+          controller.addListener(() {
+            if (selections.isEmpty ||
+                selections.last != controller.selectedIndex) {
+              selections.add(controller.selectedIndex);
+            }
+          });
+          controller.selectIndex(3);
+          final step = Duration(microseconds: (1000000 / hz).round());
+          var advancingFrames = 0;
+          var previousX = tester
+              .getTopLeft(find.byKey(const ValueKey('navigation-indicator')))
+              .dx;
+          for (var tick = 0; tick < (hz * .4).ceil(); tick++) {
+            await tester.pump(step);
+            expect(tester.layers.whereType<BackdropFilterLayer>(), isEmpty);
+            expect(controller.selectedIndex, 3);
+            final x = tester
+                .getTopLeft(find.byKey(const ValueKey('navigation-indicator')))
+                .dx;
+            if (x > previousX) advancingFrames++;
+            previousX = x;
+            controller.showMessage('progress');
+          }
+          expect(scroll.page, closeTo(3, .001));
+          expect(selections, [3]);
+          expect(advancingFrames, greaterThan(hz * .2));
+          // Reverse before the page rounds to its previous destination.
+          controller.selectIndex(0);
+          await tester.pump(const Duration(milliseconds: 45));
+          controller.selectIndex(3);
+          await tester.pumpAndSettle();
+          expect(scroll.page, closeTo(3, .001));
+          expect(controller.selectedIndex, 3);
+          // Cached page state survives navigation; the removed headings stay gone.
+          for (final index in [0, 1, 2, 3]) {
+            controller.selectIndex(index);
+            await tester.pumpAndSettle();
+            expect(
+              find.byKey(const ValueKey('glass-page-heading')),
+              findsNothing,
+            );
+            expect(tester.layers.whereType<BackdropFilterLayer>(), isEmpty);
+          }
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+    }
+  }
+
+  testWidgets('theme motion reuses static chrome paint records', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1170, 2532);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+    controller.settings = const AppSettings(downloadDirectory: '');
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(home: app.HomeShell(controller: controller)),
+    );
+    await tester.pumpAndSettle();
+
+    List<RenderRepaintBoundary> surfaceBoundaries(String key) => tester
+        .renderObjectList<RenderRepaintBoundary>(
+          find.descendant(
+            of: find.byKey(ValueKey(key)),
+            matching: find.byType(RepaintBoundary),
+          ),
+        )
+        .toList();
+    Iterable<PictureLayer> pictures(Layer layer) sync* {
+      if (layer is PictureLayer) yield layer;
+      if (layer is ContainerLayer) {
+        for (
+          var child = layer.firstChild;
+          child != null;
+          child = child.nextSibling
+        ) {
+          yield* pictures(child);
+        }
+      }
+    }
+
+    final navBoundaries = surfaceBoundaries('navigation-capsule');
+    final playerBoundaries = surfaceBoundaries('mini-player-surface');
+    final navShell = navBoundaries.first;
+    final navContent = navBoundaries[1];
+    final playerShell = playerBoundaries.first;
+    final playerContent = playerBoundaries[1];
+
+    controller.selectIndex(3);
+    // Let the destination's selected labels rebuild once before sampling motion.
+    await tester.pump();
+    await tester.pump(const Duration(microseconds: 8333));
+    final navPicture = pictures(navShell.debugLayer!).first.picture;
+    final playerPictures = pictures(
+      playerShell.debugLayer!,
+    ).map((layer) => layer.picture).toList();
+    for (final boundary in [navShell, navContent, playerShell, playerContent]) {
+      boundary.debugResetMetrics();
+    }
+    var advancingFrames = 0;
+    var previousX = tester
+        .getTopLeft(find.byKey(const ValueKey('navigation-indicator')))
+        .dx;
+    for (var frame = 0; frame < 40; frame++) {
+      await tester.pump(const Duration(microseconds: 8333));
+      final x = tester
+          .getTopLeft(find.byKey(const ValueKey('navigation-indicator')))
+          .dx;
+      if (x > previousX) advancingFrames++;
+      previousX = x;
+      expect(tester.layers.whereType<BackdropFilterLayer>(), isEmpty);
+      expect(pictures(navShell.debugLayer!).first.picture, same(navPicture));
+      expect(
+        pictures(
+          playerShell.debugLayer!,
+        ).map((layer) => layer.picture).toList(),
+        orderedEquals(playerPictures),
+      );
+    }
+    expect(advancingFrames, greaterThan(25));
+    expect(navContent.debugAsymmetricPaintCount, greaterThan(25));
+    expect(navContent.debugSymmetricPaintCount, 0);
+    expect(playerContent.debugSymmetricPaintCount, 0);
+
+    // Vertical content scrolling must also leave the fixed chrome paint records
+    // reusable, with no live backdrop filter reintroduced by the visible page.
+    await tester.pumpAndSettle();
+    final settingsScroll = find
+        .descendant(
+          of: find.byType(app.SettingsPage),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    final scrollState = tester.state<ScrollableState>(settingsScroll);
+    final initialScroll = scrollState.position.pixels;
+    await tester.drag(settingsScroll, const Offset(0, -250));
+    await tester.pumpAndSettle();
+    expect(scrollState.position.pixels, greaterThan(initialScroll));
+    expect(pictures(navShell.debugLayer!).first.picture, same(navPicture));
+    expect(
+      pictures(playerShell.debugLayer!).map((layer) => layer.picture).toList(),
+      orderedEquals(playerPictures),
+    );
+    expect(tester.layers.whereType<BackdropFilterLayer>(), isEmpty);
+    expect(tester.binding.transientCallbackCount, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   for (final persisted in [false, true]) {
     test(
       'expired download link is refreshed once (persisted=$persisted)',
@@ -184,10 +1100,121 @@ void main() {
     }
   });
   TestWidgetsFlutterBinding.ensureInitialized();
+  testWidgets('unrelated settings do not rebuild navigation player or search', (
+    tester,
+  ) async {
+    final controller = AppController(
+      source: _FakeMusicSource(),
+      storage: _FakeStorageService(),
+      player: _FakePlaybackService(),
+    );
+    controller.downloadedTracks = [
+      DownloadedTrack(
+        id: 'library-test',
+        title: 'library song',
+        artist: 'artist',
+        path: 'song.mp3',
+        format: 'mp3',
+        downloadedAt: DateTime(2026, 10, 31),
+        sourceUrl: '',
+      ),
+    ];
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(home: app.HomeShell(controller: controller)),
+    );
+    await tester.pumpAndSettle();
+    final capsule = find.byKey(const ValueKey('navigation-capsule'));
+    final navigation = tester.widget(capsule);
+    final mini = tester.widget(find.byType(app.MiniPlayer));
+    final search = tester.widget(find.byType(app.SearchPage));
+    await controller.setAutoPlayOnStartup(true);
+    await tester.pumpAndSettle();
+    expect(tester.widget(capsule), same(navigation));
+    expect(tester.widget(find.byType(app.MiniPlayer)), same(mini));
+    expect(tester.widget(find.byType(app.SearchPage)), same(search));
+    controller.showMessage('notification only');
+    await tester.pumpAndSettle();
+    expect(find.text('notification only'), findsOneWidget);
+    expect(tester.widget(capsule), same(navigation));
+    expect(tester.widget(find.byType(app.MiniPlayer)), same(mini));
+    expect(tester.widget(find.byType(app.SearchPage)), same(search));
+    controller.selectIndex(2);
+    await tester.pumpAndSettle();
+    expect(tester.widget(capsule), isNot(same(navigation)));
+    expect(find.byType(app.LibraryPage), findsOneWidget);
+    final song = tester.widget<Text>(find.text('library song'));
+    await controller.setAutoPlayOnStartup(false);
+    await tester.pumpAndSettle();
+    expect(tester.widget<Text>(find.text('library song')), same(song));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final platform in [AppUpdatePlatform.android, AppUpdatePlatform.linux]) {
+    testWidgets('${platform.name} settings shows the platform update action', (
+      tester,
+    ) async {
+      final updates = AppUpdateController(
+        source: _UpdatePanelSource(),
+        platform: platform,
+      );
+      await updates.check();
+      if (platform == AppUpdatePlatform.android) {
+        await updates.download();
+      } else {
+        updates.release = AppUpdateRelease(
+          version: UpdateVersion.parse('9.0.0+1'),
+          notes: '测试更新说明',
+          url: Uri.parse(appReleasePage),
+          requiresManualInstall: true,
+        );
+      }
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: _FakePlaybackService(),
+        updates: updates,
+      );
+      controller.settings = AppSettings(downloadDirectory: 'music');
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: app.SettingsPage(controller: controller)),
+        ),
+      );
+      final action = platform == AppUpdatePlatform.android ? '安装更新' : '前往下载';
+      await tester.scrollUntilVisible(
+        find.text(action),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('启动时检查更新'), findsOneWidget);
+      expect(find.text('测试更新说明'), findsOneWidget);
+      expect(find.text('重启并更新'), findsNothing);
+      expect(find.text('下载更新'), findsNothing);
+      if (platform == AppUpdatePlatform.android) {
+        await tester.tap(find.text(action));
+        await tester.pumpAndSettle();
+        expect(find.text('安装新版青听？'), findsOneWidget);
+        expect(find.textContaining('系统安装器'), findsOneWidget);
+        await tester.tap(find.text('稍后'));
+        await tester.pumpAndSettle();
+        expect(updates.status, AppUpdateStatus.ready);
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   testWidgets(
     'Windows update panel lets users opt out, download, and defer restart',
     (tester) async {
-      final updates = WindowsUpdateController(source: _UpdatePanelSource());
+      final updateSource = _UpdatePanelSource();
+      final updates = AppUpdateController(
+        source: updateSource,
+        platform: AppUpdatePlatform.windows,
+      );
       updates.error = '更新版本号无效';
       final controller = AppController(
         source: _FakeMusicSource(),
@@ -202,10 +1229,18 @@ void main() {
           home: Scaffold(body: app.SettingsPage(controller: controller)),
         ),
       );
+      await tester.scrollUntilVisible(
+        find.text('启动时检查更新'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
       expect(find.text('软件更新'), findsOneWidget);
-      expect(find.text('发现新版时提示'), findsOneWidget);
+      expect(find.text('发现新版时提示'), findsNothing);
       expect(find.textContaining('下载和重启由你决定'), findsNothing);
-      final versionBounds = tester.getRect(find.text('当前版本：$appVersion'));
+      final versionBounds = tester.getRect(
+        find.text('当前版本：$appReleaseVersion'),
+      );
       final errorBounds = tester.getRect(find.text('更新版本号无效'));
       expect(errorBounds.top, versionBounds.top);
       expect(errorBounds.left, greaterThan(versionBounds.right));
@@ -215,17 +1250,36 @@ void main() {
       );
       expect(checkBounds.left, greaterThan(errorBounds.right));
       expect(checkBounds.center.dy, closeTo(versionBounds.center.dy, 1));
+      updateSource.available = false;
+      await updates.check();
+      await tester.pumpAndSettle();
+      final currentBounds = tester.getRect(find.text('已是最新正式版'));
+      final currentVersionBounds = tester.getRect(
+        find.text('当前版本：$appReleaseVersion'),
+      );
+      expect(
+        currentBounds.center.dy,
+        closeTo(currentVersionBounds.center.dy, 1),
+      );
+      expect(currentBounds.left, greaterThan(currentVersionBounds.right));
+      updateSource.available = true;
       await tester.tap(find.text('启动时检查更新'));
       await tester.pumpAndSettle();
       expect(controller.settings!.checkUpdatesOnStartup, isFalse);
       expect(updates.automaticCheckEnabled, isFalse);
+      await tester.ensureVisible(find.text('检查更新'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('检查更新'));
       await tester.pumpAndSettle();
       expect(find.text('测试更新说明'), findsOneWidget);
       expect(find.text('下载更新'), findsOneWidget);
+      await tester.ensureVisible(find.text('下载更新'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('下载更新'));
       await tester.pumpAndSettle();
       expect(updates.status, AppUpdateStatus.ready);
+      await tester.ensureVisible(find.text('重启并更新'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('重启并更新'));
       await tester.pumpAndSettle();
       expect(find.text('重启并更新青听？'), findsOneWidget);
@@ -966,6 +2020,143 @@ void main() {
     expect(controller.currentQueueIndex, 0);
     expect(player.openedItem, item);
   });
+
+  testWidgets(
+    'desktop lyrics cache follows seeks, offsets, content changes and toggles',
+    (tester) async {
+      const channel = MethodChannel('qingting/desktop_lyrics');
+      final calls = <MethodCall>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return true;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+      final player = _FakePlaybackService();
+      final controller = AppController(
+        source: _FakeMusicSource(),
+        storage: _FakeStorageService(),
+        player: player,
+      );
+      addTearDown(controller.dispose);
+      const item = PlayerItem(
+        id: 'cached-lyrics',
+        title: 'Cached Lyrics',
+        artist: 'Artist',
+        uri: 'https://example.test/cached.mp3',
+        lyrics: '[00:01.00]第一句\n[00:03.00]第二句',
+      );
+      controller.settings = const AppSettings(
+        downloadDirectory: 'music',
+        desktopLyrics: DesktopLyricsSettings(enabled: true),
+      );
+      controller.queue = [item];
+      controller.currentQueueIndex = 0;
+      await tester.pumpWidget(
+        MaterialApp(home: app.HomeShell(controller: controller)),
+      );
+      await tester.pumpAndSettle();
+      calls.clear();
+
+      Future<void> seekTo(int milliseconds) async {
+        await player.seek(Duration(milliseconds: milliseconds));
+        await tester.pump();
+      }
+
+      void expectUpdate(String text) {
+        expect(calls.map((call) => call.method), ['update']);
+        expect((calls.single.arguments as Map)['text'], text);
+        calls.clear();
+      }
+
+      void expectHidden() {
+        expect(calls.map((call) => call.method), ['hide']);
+        calls.clear();
+      }
+
+      await seekTo(1000);
+      expectUpdate('第一句');
+      await seekTo(1500);
+      expect(calls, isEmpty); // The same line must not be sent again.
+      await seekTo(3000);
+      expectUpdate('第二句');
+      await seekTo(1100);
+      expectUpdate('第一句');
+      await seekTo(900);
+      expectHidden();
+
+      controller.setDesktopLyricsSettings(
+        const DesktopLyricsSettings(enabled: true, delayMilliseconds: -500),
+      );
+      await tester.pump();
+      expectUpdate('第一句');
+      controller.setDesktopLyricsSettings(
+        const DesktopLyricsSettings(enabled: true, delayMilliseconds: 500),
+      );
+      await tester.pump();
+      expectHidden();
+      await seekTo(2000);
+      expectUpdate('第一句');
+
+      // Editing lyrics on the same song must invalidate the cached lines.
+      controller.queue = [item.copyWith(lyrics: '[00:01.00]修改后的歌词')];
+      player.onChanged?.call();
+      await tester.pump();
+      expectUpdate('修改后的歌词');
+      controller.queue = [controller.queue.single.copyWith(title: '新标题')];
+      player.onChanged?.call();
+      await tester.pump();
+      expect(calls, isEmpty);
+
+      const nextItem = PlayerItem(
+        id: 'cached-lyrics',
+        title: 'Next Track',
+        artist: 'Artist',
+        uri: 'https://example.test/next.mp3',
+      );
+      controller.queue = [nextItem];
+      player.onChanged?.call();
+      await tester.pump();
+      expectHidden();
+      controller.queue = [nextItem.copyWith(lyrics: '[00:01.00]稍后补全的歌词')];
+      player.onChanged?.call();
+      await tester.pump();
+      expectUpdate('稍后补全的歌词');
+      controller.queue = [nextItem.copyWith(lyrics: '')];
+      player.onChanged?.call();
+      await tester.pump();
+      expectHidden();
+      controller.queue = [nextItem.copyWith(lyrics: '[00:01.00]恢复的歌词')];
+      player.onChanged?.call();
+      await tester.pump();
+      expectUpdate('恢复的歌词');
+
+      controller.setDesktopLyricsSettings(
+        const DesktopLyricsSettings(enabled: false),
+      );
+      await tester.pump();
+      expectHidden();
+      controller.queue = [item.copyWith(lyrics: '[00:01.00]关闭时更换的歌词')];
+      player.onChanged?.call();
+      await seekTo(2500);
+      expect(calls, isEmpty);
+      controller.setDesktopLyricsSettings(
+        const DesktopLyricsSettings(enabled: true),
+      );
+      await tester.pump();
+      expectUpdate('关闭时更换的歌词');
+
+      controller.queue = [];
+      player.onChanged?.call();
+      await tester.pump();
+      expectHidden();
+      await controller.preferences.flush();
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    skip: !Platform.isWindows && !Platform.isAndroid,
+  );
 
   test(
     'seeking to the progress end stays before playback completion',
@@ -2462,6 +3653,28 @@ void main() {
     controller.dispose();
   });
 
+  test('runtime retry resolves the original online source again', () async {
+    final source = _PlayableMusicSource();
+    final player = _FakePlaybackService();
+    final controller = AppController(
+      source: source,
+      storage: _FakeStorageService(),
+      player: player,
+      lyricsService: _FakeLyricsService(),
+    );
+    addTearDown(controller.dispose);
+    await controller.playSearchResult(source.result);
+    final item = controller.currentItem!;
+    player.health = PlaybackHealth(
+      itemKey: (item.id, item.uri),
+      error: 'HTTP 403',
+    );
+    await controller.retryCurrentPlayback();
+    expect(source.loadCalls, 2);
+    expect(player.openCalls, 2);
+    expect(controller.currentPlaybackHealth.error, isNull);
+  });
+
   test(
     'cover cache failure keeps the finished download in the library',
     () async {
@@ -2555,6 +3768,7 @@ void main() {
             await controller.flushPendingWrites();
             controller = createController(restored);
             await controller.bootstrap();
+            await controller.startupMaintenanceDone;
             await controller.flushPendingWrites();
             expect(restored.savedDownloadedTracks, hasLength(1));
             expect(restored.savedTasks, isEmpty);
@@ -3268,7 +4482,7 @@ void main() {
 
     final applying = controller.applyDownloadedAlbumName(track, 'Album');
     await storage.started.future;
-    await controller.playDownloaded(track);
+    final playback = controller.playDownloaded(track);
 
     expect(player.openedItem, isNull);
     var lyricsReadCompleted = false;
@@ -3277,12 +4491,17 @@ void main() {
         .whenComplete(() => lyricsReadCompleted = true);
     await Future<void>.delayed(Duration.zero);
     expect(lyricsReadCompleted, isFalse);
-    expect(controller.globalMessage, contains('请稍候再播放'));
+    expect(controller.playbackFailure, isNull);
+    expect(controller.preparingPlaybackKey, controller.localPlaybackKey(track));
     storage.release.complete();
     expect(await applying, isTrue);
     expect(controller.pendingAlbumMatches, isEmpty);
     expect(storage.savedPendingAlbumMatches, isEmpty);
     expect(await lyricsRead, await sidecar.readAsString());
+    await playback.timeout(const Duration(seconds: 2));
+    expect(player.openedItem?.localPath, track.path);
+    expect(player.openedItem?.album, 'Album');
+    expect(controller.preparingPlaybackKey, isNull);
   });
 
   test(
@@ -3658,8 +4877,11 @@ void main() {
     await tester.pump();
 
     expect(find.text('诊断与日志'), findsOneWidget);
-    expect(find.text('版本：$appVersion'), findsOneWidget);
+    expect(find.text('版本：$appReleaseVersion'), findsOneWidget);
     expect(find.text('诊断测试日志'), findsOneWidget);
+    expect(find.text('显示与动画'), findsNothing);
+    expect(find.text('检测动画调度'), findsNothing);
+    expect(find.textContaining('复制内容会自动去除'), findsNothing);
   });
 
   testWidgets('single album lookup writes the highest score without a dialog', (
@@ -4050,6 +5272,9 @@ class _BlockingScanCoverStorage extends _FakeStorageService {
 }
 
 class _FakePlaybackService implements PlaybackService {
+  @override
+  PlaybackHealth health = const PlaybackHealth();
+
   final ValueNotifier<Duration> _positionListenable = ValueNotifier(
     Duration.zero,
   );
@@ -4065,6 +5290,7 @@ class _FakePlaybackService implements PlaybackService {
   int playOrPauseCalls = 0;
   int pauseCalls = 0;
   final List<Duration> seekCalls = [];
+  bool delaySeekPosition = false;
 
   @override
   bool isPlaying = false;
@@ -4088,6 +5314,7 @@ class _FakePlaybackService implements PlaybackService {
   Future<void> open(PlayerItem item) async {
     openCalls += 1;
     openedItem = item;
+    health = PlaybackHealth(itemKey: (item.id, item.uri));
     isPlaying = true;
   }
 
@@ -4111,6 +5338,7 @@ class _FakePlaybackService implements PlaybackService {
   @override
   Future<void> seek(Duration value) async {
     seekCalls.add(value);
+    if (delaySeekPosition) return;
     position = value;
     _positionListenable.value = value;
   }
@@ -4130,18 +5358,21 @@ class _FakePlaybackService implements PlaybackService {
 }
 
 class _UpdatePanelSource extends AppUpdateSource {
+  bool available = true;
   @override
   Future<AppUpdateRelease?> check(
     UpdateVersion current,
     CancelToken cancel,
-  ) async => AppUpdateRelease(
-    version: UpdateVersion.parse('99.0.0+99'),
-    notes: '测试更新说明',
-    assetName: 'test.exe',
-    url: Uri.https('github.com', '/test.exe'),
-    size: 1024,
-    sha256Hex: 'test',
-  );
+  ) async => available
+      ? AppUpdateRelease(
+          version: UpdateVersion.parse('99.0.0+99'),
+          notes: '测试更新说明',
+          assetName: 'test.exe',
+          url: Uri.https('github.com', '/test.exe'),
+          size: 1024,
+          sha256Hex: 'test',
+        )
+      : null;
   @override
   Future<File> download(
     AppUpdateRelease release,
@@ -5332,6 +6563,13 @@ class _PlayableMusicSource implements MusicSource {
       AudioCandidate(url: 'https://example.test/generated.mp3', format: 'mp3'),
     ];
   }
+}
+
+class _UxPlaybackSource extends _PlayableMusicSource {
+  Completer<TrackDetail> gate = Completer<TrackDetail>();
+  Future<TrackDetail> detail() => super.loadDetail(result);
+  @override
+  Future<TrackDetail> loadDetail(TrackSearchResult result) => gate.future;
 }
 
 class _FakeLyricsService extends LyricsService {

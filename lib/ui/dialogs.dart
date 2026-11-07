@@ -253,7 +253,7 @@ class _PendingAlbumMatchesSheetState extends State<_PendingAlbumMatchesSheet> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.task_alt, color: _accentStrong, size: 42),
+            Icon(Icons.task_alt, color: themeAccent(context), size: 42),
             const SizedBox(height: 10),
             const Text(
               '待确认结果已处理完毕',
@@ -287,7 +287,7 @@ class _PendingAlbumMatchesSheetState extends State<_PendingAlbumMatchesSheet> {
                     width: 38,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: _line,
+                      color: themeLine(context),
                       borderRadius: BorderRadius.circular(99),
                     ),
                   ),
@@ -307,7 +307,7 @@ class _PendingAlbumMatchesSheetState extends State<_PendingAlbumMatchesSheet> {
                       : '${pending.artist} · ${pending.title}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: _muted),
+                  style: const TextStyle(color: appMuted),
                 ),
                 const SizedBox(height: 12),
                 Expanded(
@@ -331,12 +331,14 @@ class _PendingAlbumMatchesSheetState extends State<_PendingAlbumMatchesSheet> {
                       ].where((value) => value.trim().isNotEmpty).join(' · ');
                       return ListTile(
                         selected: selected,
-                        selectedTileColor: _accent.withValues(alpha: 0.12),
+                        selectedTileColor: themeAccent(
+                          context,
+                        ).withValues(alpha: 0.12),
                         leading: Icon(
                           selected
                               ? Icons.radio_button_checked
                               : Icons.radio_button_off,
-                          color: selected ? _accentStrong : _muted,
+                          color: selected ? themeAccent(context) : appMuted,
                         ),
                         title: Text(candidate.album),
                         subtitle: Text(info),
@@ -489,15 +491,15 @@ class _LibraryMoreActions extends StatelessWidget {
             : '更多',
         padding: EdgeInsets.zero,
         icon: isBusy
-            ? const SizedBox.square(
+            ? SizedBox.square(
                 dimension: 18,
                 child: CircularProgressIndicator(
                   strokeWidth: 2.2,
-                  color: _accentStrong,
+                  color: themeAccent(context),
                 ),
               )
             : const Icon(Icons.more_horiz),
-        iconColor: _ink,
+        iconColor: appInk,
         color: Colors.white,
         elevation: 8,
         offset: const Offset(0, 8),
@@ -605,7 +607,7 @@ class _MoreActionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = destructive ? Colors.redAccent : _ink;
+    final color = destructive ? Colors.redAccent : appInk;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -644,28 +646,15 @@ class _IconAction extends StatelessWidget {
         style: IconButton.styleFrom(
           fixedSize: Size(size, size),
           padding: EdgeInsets.zero,
-          backgroundColor: selected ? _accent.withValues(alpha: 0.22) : null,
-          foregroundColor: selected ? _accentStrong : _ink,
+          backgroundColor: selected
+              ? themeAccent(context).withValues(alpha: 0.22)
+              : null,
+          foregroundColor: selected ? themeAccent(context) : appInk,
         ),
         icon: Icon(icon),
       ),
     );
   }
-}
-
-BoxDecoration _tileDecoration() {
-  return BoxDecoration(
-    color: Colors.white,
-    borderRadius: BorderRadius.circular(16),
-    border: Border.all(color: _line),
-    boxShadow: [
-      BoxShadow(
-        color: Colors.black.withValues(alpha: 0.025),
-        blurRadius: 18,
-        offset: const Offset(0, 8),
-      ),
-    ],
-  );
 }
 
 String _statusLabel(DownloadStatus status) {
@@ -693,34 +682,6 @@ IconData _librarySortIcon(LibrarySortMode mode) {
     LibrarySortMode.titleAsc => Icons.sort_by_alpha,
     LibrarySortMode.artistAsc => Icons.person_outline,
   };
-}
-
-String _desktopLyricPositionLabel(double value) {
-  if (value < 0.28) {
-    return '靠上';
-  }
-  if (value > 0.72) {
-    return '靠下';
-  }
-  return '居中';
-}
-
-String _desktopLyricHorizontalPositionLabel(double value) {
-  if (value < 0.28) {
-    return '靠左';
-  }
-  if (value > 0.72) {
-    return '靠右';
-  }
-  return '居中';
-}
-
-String _formatLyricDelay(int milliseconds) {
-  if (milliseconds == 0) {
-    return '0ms';
-  }
-  final sign = milliseconds > 0 ? '+' : '';
-  return '$sign${milliseconds}ms';
 }
 
 int _currentLyricIndex(List<LyricLine> lines, Duration position) {

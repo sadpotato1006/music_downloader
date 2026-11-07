@@ -45,14 +45,15 @@ extension AppControllerCloudSyncActions on AppController {
     if (running != null) await running;
     final current = settings;
     if (current == null) return;
-    settings = current.copyWith(
-      cloudFolderId: folder.id,
-      cloudFolderName: folder.name,
-      cloudSyncEnabled: true,
+    await preferences.updateAndSave(
+      (value) => value.copyWith(
+        cloudFolderId: folder.id,
+        cloudFolderName: folder.name,
+        cloudSyncEnabled: true,
+      ),
     );
     cloudDeletionPolicyEnabled = null;
     cloudSyncFailures = const [];
-    await storage.saveSettings(settings!);
     _notify();
     unawaited(syncCloud());
   }
@@ -60,8 +61,9 @@ extension AppControllerCloudSyncActions on AppController {
   Future<void> setCloudSyncEnabled(bool enabled) async {
     final current = settings;
     if (current == null) return;
-    settings = current.copyWith(cloudSyncEnabled: enabled);
-    await storage.saveSettings(settings!);
+    await preferences.updateAndSave(
+      (value) => value.copyWith(cloudSyncEnabled: enabled),
+    );
     _notify();
     if (enabled) unawaited(syncCloud());
   }
@@ -141,12 +143,13 @@ extension AppControllerCloudSyncActions on AppController {
     cloudDeletionPolicyEnabled = null;
     final current = settings;
     if (current != null) {
-      settings = current.copyWith(
-        cloudFolderId: '',
-        cloudFolderName: '',
-        cloudSyncEnabled: false,
+      await preferences.updateAndSave(
+        (value) => value.copyWith(
+          cloudFolderId: '',
+          cloudFolderName: '',
+          cloudSyncEnabled: false,
+        ),
       );
-      await storage.saveSettings(settings!);
     }
     cloudSyncError = null;
     cloudSyncNotice = null;
@@ -222,10 +225,7 @@ extension AppControllerCloudSyncActions on AppController {
         );
         await albumMatch;
       }
-      _cloudSyncOwnsFiles = true;
-      while (_metadataWriteKeys.isNotEmpty || _metadataReadCounts.isNotEmpty) {
-        await Future<void>.delayed(const Duration(milliseconds: 30));
-      }
+      if (!await _songFiles.beginSync()) return null;
       final metadataTracks = {
         for (final track in downloadedTracks)
           if (p.isWithin(current.downloadDirectory, track.path))
@@ -293,6 +293,7 @@ extension AppControllerCloudSyncActions on AppController {
       _notify();
       // A manual scan may predate the sync's downloads and deletions. Wait for
       // it, then take a fresh directory snapshot for this completed sync.
+      _songFiles.finishSyncFileChanges();
       await _libraryScanOperation;
       await scanCurrentDownloadDirectory();
       scannedLibrary = true;
@@ -337,6 +338,9 @@ extension AppControllerCloudSyncActions on AppController {
       _notify();
       return null;
     } finally {
+      // The service has returned (or failed), so no sync file mutations remain.
+      // Recovery scanning must not keep playback locked either.
+      _songFiles.finishSyncFileChanges();
       try {
         if (!scannedLibrary && !_isDisposed) {
           await _libraryScanOperation;
@@ -350,7 +354,7 @@ extension AppControllerCloudSyncActions on AppController {
           stackTrace: stackTrace,
         );
       }
-      _cloudSyncOwnsFiles = false;
+      _songFiles.endSync();
       isCloudSyncing = false;
       _notify();
       _scheduleDeferredAlbumWrites();

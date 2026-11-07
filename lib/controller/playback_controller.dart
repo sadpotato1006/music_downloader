@@ -25,6 +25,7 @@ extension AppControllerPlaybackActions on AppController {
         includeLyrics: false,
         includeMetadata: false,
         showMissingMessage: false,
+        shouldRun: () => _canCommitPlaybackRequest(generation),
       ),
       maxConcurrent: 8,
     );
@@ -50,13 +51,36 @@ extension AppControllerPlaybackActions on AppController {
 
   int _beginPlaybackRequest() {
     resolvingPlayId = null;
+    preparingPlaybackKey = null;
+    playbackFailure = null;
     return ++_playbackRequestGeneration;
+  }
+
+  String searchPlaybackKey(TrackSearchResult result) =>
+      'search:${source.name}:${result.id}';
+
+  String localPlaybackKey(DownloadedTrack track) =>
+      'local:${_trackPathKey(track.path)}';
+
+  bool isCurrentSearchResult(TrackSearchResult result) {
+    final item = currentItem;
+    if (item == null || item.id != result.id) return false;
+    final path = item.localPath;
+    if (path != null) {
+      return _downloadedTrackByPath(path)?.sourceUrl == result.detailUrl;
+    }
+    final origin = _onlinePlaybackOrigins[(item.id, item.uri)];
+    return origin == null || origin.source == result.source;
   }
 
   bool _canCommitPlaybackRequest(int generation) =>
       !_isDisposed && generation == _playbackRequestGeneration;
 
-  Future<void> _playQueueAt(int index, int generation) async {
+  Future<void> _playQueueAt(
+    int index,
+    int generation, {
+    bool metadataReadHeld = false,
+  }) async {
     if (!_canCommitPlaybackRequest(generation) ||
         index < 0 ||
         index >= queue.length) {
@@ -64,14 +88,16 @@ extension AppControllerPlaybackActions on AppController {
     }
     final requestedItem = queue[index];
     final localPath = requestedItem.localPath;
-    final acquiredRead = localPath == null || _tryBeginMetadataRead(localPath);
+    final acquiredRead =
+        localPath == null ||
+        metadataReadHeld ||
+        await _beginMetadataReadWhenAvailable(localPath);
     if (!acquiredRead) {
-      globalMessage = '正在更新“${queue[index].title}”的歌曲信息，请稍候再播放。';
-      _notify();
       return;
     }
     var didOpen = false;
     try {
+      if (!_canCommitPlaybackRequest(generation)) return;
       final hydrated = await _hydrateQueueItemForPlayback(requestedItem);
       if (_isDisposed || generation != _playbackRequestGeneration) {
         return;
@@ -104,11 +130,12 @@ extension AppControllerPlaybackActions on AppController {
         didOpen = _isCurrentPlaybackRequest(generation, item);
       });
       if (!didOpen || !_isCurrentPlaybackRequest(generation, item)) return;
+      _notify();
       await _saveQueueStateAfterPlaybackStarts();
       if (!_isCurrentPlaybackRequest(generation, item)) return;
       await _recordRecentPlayback(item);
     } finally {
-      if (localPath != null) {
+      if (localPath != null && !metadataReadHeld) {
         _endMetadataRead(localPath);
       }
       if (didOpen &&
@@ -221,11 +248,26 @@ extension AppControllerPlaybackActions on AppController {
     if (item == null) {
       return;
     }
+    if (currentPlaybackHealth.error != null) {
+      await retryCurrentPlayback();
+      return;
+    }
     if (!player.isOpened(item)) {
       await _openCurrentItemForPlayback();
       return;
     }
     await player.playOrPause();
+  }
+
+  Future<void> retryCurrentPlayback() async {
+    final item = currentItem;
+    if (item == null) return;
+    final origin = _onlinePlaybackOrigins[(item.id, item.uri)];
+    if (origin != null && item.localPath == null) {
+      await playSearchResult(origin);
+    } else {
+      await _openCurrentItemForPlayback();
+    }
   }
 
   Future<void> _playCurrentItem() async {
@@ -302,8 +344,7 @@ extension AppControllerPlaybackActions on AppController {
     if (settings == null) {
       return;
     }
-    settings = settings!.copyWith(volume: normalized);
-    _debouncedSaveSettings();
+    preferences.update((value) => value.copyWith(volume: normalized));
     unawaited(_syncAndroidMediaControls(force: true));
     _notify();
   }
@@ -348,30 +389,7 @@ extension AppControllerPlaybackActions on AppController {
       return;
     }
 
-    final shuffledTracks = List<DownloadedTrack>.from(downloadedTracks)
-      ..shuffle(_shuffleRandom);
-    final resolvedItems = await mapWithConcurrency(
-      shuffledTracks,
-      (track) => _playerItemFromDownloadedTrack(
-        track,
-        includeLyrics: false,
-        includeMetadata: false,
-        showMissingMessage: false,
-      ),
-      maxConcurrent: 8,
-    );
-    final items = resolvedItems.whereType<PlayerItem>().toList();
-
-    if (items.isEmpty) {
-      globalMessage = '没有找到可播放的本地文件，请重新扫描下载目录。';
-      _notify();
-      return;
-    }
-
-    queue = items;
-    currentQueueIndex = 0;
-    shuffleEnabled = true;
-    await playQueueAt(0);
+    await playDownloadedCollection(downloadedTracks, shuffle: true);
   }
 
   Future<void> reshuffleUpcomingQueue() async {
@@ -517,18 +535,27 @@ extension AppControllerPlaybackActions on AppController {
   Future<void> _enqueueAndPlay(
     PlayerItem item, {
     int? requestGeneration,
+    bool metadataReadHeld = false,
   }) async {
     final generation = requestGeneration ?? _beginPlaybackRequest();
     if (!_canCommitPlaybackRequest(generation)) return;
     final existingIndex = queue.indexWhere((queued) => queued.id == item.id);
     if (existingIndex >= 0) {
       queue = List<PlayerItem>.from(queue)..[existingIndex] = item;
-      await _playQueueAt(existingIndex, generation);
+      await _playQueueAt(
+        existingIndex,
+        generation,
+        metadataReadHeld: metadataReadHeld,
+      );
       return;
     }
 
     queue = [...queue, item];
-    await _playQueueAt(queue.length - 1, generation);
+    await _playQueueAt(
+      queue.length - 1,
+      generation,
+      metadataReadHeld: metadataReadHeld,
+    );
   }
 
   Future<void> _enqueueNext(PlayerItem item) async {
@@ -564,9 +591,12 @@ extension AppControllerPlaybackActions on AppController {
     _notify();
   }
 
-  Future<bool> _enqueueNextOrPlayWhenIdle(PlayerItem item) async {
+  Future<bool> _enqueueNextOrPlayWhenIdle(
+    PlayerItem item, {
+    bool metadataReadHeld = false,
+  }) async {
     if (!player.isPlaying) {
-      await _enqueueAndPlay(item);
+      await _enqueueAndPlay(item, metadataReadHeld: metadataReadHeld);
       return true;
     }
 
@@ -620,6 +650,20 @@ extension AppControllerPlaybackActions on AppController {
     String action, {
     bool Function()? shouldRun,
   }) async {
+    for (final track in downloadedTracks) {
+      if (track.id != result.id || track.sourceUrl != result.detailUrl) {
+        continue;
+      }
+      final local = await _playerItemFromDownloadedTrack(
+        track,
+        showMissingMessage: false,
+        shouldRun: shouldRun,
+      );
+      if (shouldRun != null && !shouldRun()) {
+        throw const ObsoleteSourceRequest();
+      }
+      if (local != null) return local;
+    }
     final requestSource = _sourceForName(result.source);
     final (detail, candidates) = await _runSourceRequest(action, () async {
       final detail = await requestSource.loadDetail(result);
@@ -633,16 +677,25 @@ extension AppControllerPlaybackActions on AppController {
     if (candidate == null) {
       throw const MusicSourceException('这个歌曲页面没有找到可播放的公开音频链接。');
     }
-    return PlayerItem(
+    final item = PlayerItem(
       id: result.id,
       title: detail.title,
       artist: detail.artist,
       uri: candidate.url,
+      audioCacheKey: AudioCacheService.trackKey(result, candidate),
+      audioCacheFormat: candidate.format,
       headers: candidate.headers,
       coverUrl: detail.coverUrl ?? result.coverUrl,
       lyrics: detail.lyrics,
       album: detail.album,
     );
+    if (!_isDisposed) {
+      _onlinePlaybackOrigins[(item.id, item.uri)] = result;
+      if (_onlinePlaybackOrigins.length > 64) {
+        _onlinePlaybackOrigins.remove(_onlinePlaybackOrigins.keys.first);
+      }
+    }
+    return item;
   }
 
   Future<void> _loadOnlineLyrics(
